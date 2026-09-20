@@ -468,7 +468,9 @@ features the PoC cannot have at all.
 - **Content-defined chunking?** Fixed chunks mean inserting a byte at the front
   of a file rewrites everything. Rolling-hash boundaries fix it and improve
   dedup, at some CPU cost and with variable block sizes complicating the offset
-  arithmetic. Probably worth it; not on the critical path.
+  arithmetic. Tracked as issue #18 — and it *is* on the critical path after all:
+  the indirect-block layout in section 4 assumes position implies offset, so
+  this has to be decided before phase 2 of section 14 rather than after.
 - **Should the inode file be sparse?** Freed inodes leave holes. WAFL keeps an
   inode-map file (§3.2). A free list in `fsinfo` is simpler and probably enough.
 - **Multi-writer.** Single-writer-with-detection is correct and limiting. Doing
