@@ -1,0 +1,11 @@
+# Build output
+/strata
+/strata-*
+*.test
+
+# Local demo state
+/tmp/
+*.log
+
+# macOS
+.DS_Store
