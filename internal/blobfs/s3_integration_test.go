@@ -14,8 +14,8 @@ import (
 )
 
 // TestFilesystemOverS3 runs the whole filesystem against a live S3-compatible
-// server: write, commit, remount from the buckets alone, and verify that the
-// data bucket still contains nothing but content-addressed chunks.
+// server: write, commit, remount from the bucket alone, and verify that chunk
+// keys are still bare content hashes.
 //
 // Runs only when STRATA_S3_ENDPOINT is set. See the store package's
 // conformance test for the environment variables.
@@ -90,7 +90,7 @@ func TestFilesystemOverS3(t *testing.T) {
 		t.Fatalf("commit to S3: %v", err)
 	}
 
-	// Remount using nothing but the two buckets.
+	// Remount using nothing but the bucket.
 	fs2, err := New(ctx, Config{Store: mk(bucket), Log: quietLog()})
 	if err != nil {
 		t.Fatalf("remount from S3: %v", err)
@@ -117,7 +117,7 @@ func TestFilesystemOverS3(t *testing.T) {
 	}
 	wantChunks := (len(payload) + 64*1024 - 1) / (64 * 1024)
 	if len(objs) != wantChunks {
-		t.Errorf("data bucket holds %d chunks, want %d (two identical files should share)", len(objs), wantChunks)
+		t.Errorf("bucket holds %d chunks, want %d (two identical files should share)", len(objs), wantChunks)
 	}
 
 	// Writing a third copy of the same bytes must add no objects at all.

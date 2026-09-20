@@ -1,6 +1,6 @@
-// Package store abstracts the object storage that strata keeps its data and
-// metadata in. Two backends exist: a real S3 client and a local directory
-// backend used for tests and for running the demo without cloud credentials.
+// Package store abstracts the object storage that holds the filesystem. Two
+// backends exist: a real S3 client and a local directory backend used for
+// tests and for running the demo without cloud credentials.
 package store
 
 import (
@@ -53,9 +53,10 @@ type Store interface {
 	Name() string
 }
 
-// ReadOnly wraps a Store and rejects every mutation. The data bucket is opened
-// through this when strata is told the bucket is shared read-only, so a bug in
-// the write path cannot touch a bucket the user does not own.
+// ReadOnly wraps a Store and rejects every mutation. A filesystem opened
+// through this can be inspected or recovered with no risk of modifying the
+// bucket, because the refusal sits below the filesystem rather than relying on
+// every write path remembering to check a flag.
 type ReadOnly struct{ Store }
 
 func (r ReadOnly) Put(ctx context.Context, key string, data []byte) error {

@@ -124,7 +124,7 @@ type snapshot struct {
 }
 
 // rootPointer is the tiny object whose atomic replacement commits a snapshot.
-// It is the only mutable object in either bucket.
+// It is the only mutable object in the bucket.
 type rootPointer struct {
 	Version   int    `json:"version"`
 	Epoch     uint64 `json:"epoch"`

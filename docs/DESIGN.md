@@ -303,7 +303,7 @@ The equivalent question here is "may this object be deleted?", answered by
 
 - **Mark.** From every root in `fsinfo` — active plus every snapshot — walk the
   tree and record reachable hashes.
-- **Sweep.** List both buckets; delete objects that were not marked.
+- **Sweep.** List the bucket; delete objects that were not marked.
 
 Two properties make this cheap, and they come directly from content addressing:
 
@@ -454,7 +454,7 @@ carry over unchanged — only `blobfs` is replaced.
 5. **Snapshots.** Root-inode table, `.snapshot` synthesis in LOOKUP.
    Test: snapshot, modify, confirm the snapshot is unchanged and shares blocks.
 6. **Sweeper.** Mark from all roots, sweep with the age rule, dry-run mode,
-   refusal on shared buckets.
+   refusal when live roots cannot all be enumerated.
    Test: churn, sweep, assert nothing reachable was deleted — the one test that
    must never be flaky.
 

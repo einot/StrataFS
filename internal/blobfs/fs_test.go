@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -83,7 +82,7 @@ func readAll(t *testing.T, fs *FS, h vfs.Handle, size int) []byte {
 
 // TestWriteReadRemount is the end-to-end durability check: data written through
 // one mount must come back byte-identical through a fresh mount that shares
-// nothing but the two buckets.
+// nothing but the bucket.
 func TestWriteReadRemount(t *testing.T) {
 	ctx := context.Background()
 	fs, st, _ := newTestFS(t)
@@ -376,8 +375,8 @@ func TestStaleHandle(t *testing.T) {
 	}
 }
 
-// TestSecondWriterIsDetected checks the compare-and-swap that protects the
-// metadata bucket from two mounts silently overwriting each other.
+// TestSecondWriterIsDetected checks the compare-and-swap that stops two mounts
+// of the same bucket from silently overwriting each other.
 func TestSecondWriterIsDetected(t *testing.T) {
 	ctx := context.Background()
 	fsA, st, _ := newTestFS(t)
@@ -525,37 +524,11 @@ func TestSymlink(t *testing.T) {
 	}
 }
 
-// copyTree duplicates a directory, standing in for handing someone a copy of
-// the metadata bucket.
-func copyTree(src, dst string) error {
-	return filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, p)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		return os.WriteFile(target, b, 0o644)
-	})
-}
-
 var _ = time.Now
 
 // TestSnapshotsArePruned checks that a long-running mount does not fill the
-// bucket with superseded namespace snapshots. A live smoke test
-// produced 440 snapshots in one run before retention existed.
+// bucket with superseded namespace snapshots. A live smoke test produced 440
+// snapshots in one run before retention existed.
 func TestSnapshotsArePruned(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

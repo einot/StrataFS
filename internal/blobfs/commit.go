@@ -210,7 +210,7 @@ func (f *FS) commitLocked(ctx context.Context) error {
 	f.log.Debug("committed", "epoch", epoch, "inodes", len(f.inodes), "snapshot", key)
 
 	// Each commit writes a complete namespace snapshot, so without pruning the
-	// metadata bucket grows without bound -- a busy mount can produce hundreds
+	// bucket grows without bound -- a busy mount can produce hundreds
 	// of snapshots in a minute. Older ones are kept only as a short rollback
 	// window, and reclaiming them happens off the commit path so a slow bucket
 	// never stalls a write.

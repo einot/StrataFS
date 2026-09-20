@@ -72,7 +72,7 @@ type FS struct {
 	lastCommit time.Time
 
 	// retention is how many namespace snapshots to keep behind the current
-	// one; pruning guards against a busy mount filling the metadata bucket.
+	// one; pruning guards against a busy mount filling the bucket.
 	retention int
 	pruning   bool
 
@@ -82,7 +82,7 @@ type FS struct {
 	cache    *chunkCache
 	writerID string
 
-	// knownChunks remembers hashes already present in the data bucket so a
+	// knownChunks remembers hashes already present in the bucket so a
 	// rewrite of identical content costs nothing.
 	knownMu     sync.Mutex
 	knownChunks map[string]struct{}
@@ -105,13 +105,13 @@ type openFile struct {
 const defaultChunkSize = 1 << 20
 
 // defaultSnapshotRetention keeps a short rollback window without letting the
-// metadata bucket grow without bound.
+// bucket grow without bound.
 const defaultSnapshotRetention = 10
 
 // FS implements the full mountable filesystem contract.
 var _ vfs.FS = (*FS)(nil)
 
-// New opens or creates a filesystem over the two buckets.
+// New opens or creates a filesystem in the bucket.
 func New(ctx context.Context, cfg Config) (*FS, error) {
 	if cfg.Store == nil {
 		return nil, errors.New("blobfs: a store is required")
@@ -909,7 +909,7 @@ func (f *FS) isKnown(hash string) bool {
 }
 
 // putChunk stores a chunk under its content hash, skipping the upload when the
-// data bucket already holds that content.
+// bucket already holds that content.
 func (f *FS) putChunk(ctx context.Context, data []byte) (chunkRef, error) {
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
@@ -1319,7 +1319,7 @@ func (f *FS) Commit(ctx context.Context, h vfs.Handle, off uint64, count uint32)
 		return err
 	}
 	// COMMIT promises the data is on stable storage. For this filesystem that
-	// means the chunks are in the data bucket and the namespace that names
-	// them is in the metadata bucket, so a full commit is required.
+	// means both the chunks and the namespace that names them are stored, so
+	// a full commit is required.
 	return f.Sync(ctx)
 }
