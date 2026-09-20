@@ -121,24 +121,19 @@ func (c *rpcClient) readRecord() []byte {
 }
 
 // startServer brings up the full stack on a random loopback port.
-func startServer(t *testing.T) (addr string, dataDir, metaDir string, fs *blobfs.FS) {
+func startServer(t *testing.T) (addr string, bucketDir string, fs *blobfs.FS) {
 	t.Helper()
 	dir := t.TempDir()
-	dataDir = filepath.Join(dir, "data")
-	metaDir = filepath.Join(dir, "meta")
+	bucketDir = filepath.Join(dir, "bucket")
 
-	data, err := store.NewLocal(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta, err := store.NewLocal(metaDir)
+	st, err := store.NewLocal(bucketDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	fs, err = blobfs.New(context.Background(), blobfs.Config{
-		Data: data, Meta: meta,
+		Store:     st,
 		ChunkSize: 8192,
 		OwnerUID:  501, OwnerGID: 20,
 		CommitInterval: time.Hour, // commits in these tests are explicit
@@ -160,7 +155,7 @@ func startServer(t *testing.T) (addr string, dataDir, metaDir string, fs *blobfs
 	t.Cleanup(func() { cancel(); ln.Close() })
 	go rpc.Serve(ctx, ln)
 
-	return ln.Addr().String(), dataDir, metaDir, fs
+	return ln.Addr().String(), bucketDir, fs
 }
 
 // mountRoot performs a MOUNT MNT and returns the root file handle.
@@ -258,7 +253,7 @@ func nfsCreate(t *testing.T, c *rpcClient, dir []byte, name string) []byte {
 // TestNFSEndToEnd drives a full create/write/commit/read cycle over the real
 // protocol and then verifies the bytes landed in the buckets.
 func TestNFSEndToEnd(t *testing.T) {
-	addr, dataDir, metaDir, _ := startServer(t)
+	addr, bucketDir, _ := startServer(t)
 	c := dial(t, addr)
 
 	// MOUNT NULL must succeed before anything else.
@@ -364,25 +359,27 @@ func TestNFSEndToEnd(t *testing.T) {
 		t.Errorf("read back %d bytes, wrote %d; contents differ", len(readBack), len(payload))
 	}
 
-	// The data bucket must hold chunks and nothing else.
-	entries, err := os.ReadDir(filepath.Join(dataDir, "chunks"))
+	// The bucket must hold chunks, snapshots and the root pointer, and nothing else.
+	entries, err := os.ReadDir(filepath.Join(bucketDir, "chunks"))
 	if err != nil {
-		t.Fatalf("data bucket has no chunks directory: %v", err)
+		t.Fatalf("bucket has no chunks directory: %v", err)
 	}
 	if len(entries) == 0 {
-		t.Error("no chunks were written to the data bucket")
+		t.Error("no chunks were written")
 	}
-	top, err := os.ReadDir(dataDir)
+	if _, err := os.Stat(filepath.Join(bucketDir, "root")); err != nil {
+		t.Errorf("bucket has no root pointer: %v", err)
+	}
+	top, err := os.ReadDir(bucketDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(top) != 1 || top[0].Name() != "chunks" {
-		t.Errorf("data bucket contains something other than chunks: %v", names(top))
-	}
-
-	// The metadata bucket must hold the root pointer and snapshots.
-	if _, err := os.Stat(filepath.Join(metaDir, "root")); err != nil {
-		t.Errorf("metadata bucket has no root pointer: %v", err)
+	for _, e := range top {
+		switch e.Name() {
+		case "chunks", "snapshots", "root":
+		default:
+			t.Errorf("unexpected object in bucket: %q (all: %v)", e.Name(), names(top))
+		}
 	}
 }
 
@@ -397,7 +394,7 @@ func names(es []os.DirEntry) []string {
 // TestNFSDirectoryOps covers MKDIR, READDIRPLUS, RENAME, REMOVE and RMDIR
 // over the wire.
 func TestNFSDirectoryOps(t *testing.T) {
-	addr, _, _, _ := startServer(t)
+	addr, _, _ := startServer(t)
 	c := dial(t, addr)
 	root := mountRoot(t, c)
 
@@ -511,7 +508,7 @@ func keys(m map[string]bool) []string {
 // TestNFSErrorsAreProtocolErrors checks that failures come back as NFS status
 // codes in a well-formed reply, not as RPC-level errors.
 func TestNFSErrorsAreProtocolErrors(t *testing.T) {
-	addr, _, _, _ := startServer(t)
+	addr, _, _ := startServer(t)
 	c := dial(t, addr)
 	root := mountRoot(t, c)
 
@@ -547,7 +544,7 @@ func TestNFSErrorsAreProtocolErrors(t *testing.T) {
 
 // TestUnknownProgramRejected checks PROG_UNAVAIL handling.
 func TestUnknownProgramRejected(t *testing.T) {
-	addr, _, _, _ := startServer(t)
+	addr, _, _ := startServer(t)
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)

@@ -1,8 +1,7 @@
 // Command strata mounts an S3-backed filesystem by serving NFSv3 on loopback.
 //
-// The design splits storage across two buckets: a data bucket holding only
-// content-addressed chunks, and a metadata bucket holding the namespace. See
-// the blobfs package for why.
+// The whole filesystem lives in one bucket. See the blobfs package for the
+// object layout and the commit protocol.
 package main
 
 import (
@@ -36,14 +35,13 @@ func main() {
 
 func run() error {
 	var (
-		dataSpec  = flag.String("data", "", "data bucket: s3://BUCKET or a local directory path")
-		metaSpec  = flag.String("meta", "", "metadata bucket: s3://BUCKET or a local directory path")
-		endpoint  = flag.String("endpoint", "", "S3 endpoint URL (default: AWS for the given region)")
-		region    = flag.String("region", "us-east-1", "S3 region")
-		pathStyle = flag.Bool("path-style", false, "use path-style S3 addressing (required by MinIO and most S3-compatible servers)")
+		bucketSpec = flag.String("bucket", "", "bucket holding the filesystem: s3://BUCKET or a local directory path")
+		endpoint   = flag.String("endpoint", "", "S3 endpoint URL (default: AWS for the given region)")
+		region     = flag.String("region", "us-east-1", "S3 region")
+		pathStyle  = flag.Bool("path-style", false, "use path-style S3 addressing (required by MinIO and most S3-compatible servers)")
 
-		dataReadOnly = flag.Bool("data-read-only", false, "treat the data bucket as read-only: mount someone else's shared chunks")
-		readOnly     = flag.Bool("read-only", false, "refuse all modifications")
+		readOnly = flag.Bool("read-only", false, "refuse all modifications")
+		check    = flag.Bool("check", false, "probe the endpoint for the S3 behaviour strata needs, then exit")
 
 		listen    = flag.String("listen", "127.0.0.1:20490", "address to serve NFS on")
 		export    = flag.String("export", "/", "exported path clients mount")
@@ -66,12 +64,9 @@ func run() error {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	if *dataSpec == "" || *metaSpec == "" {
+	if *bucketSpec == "" {
 		flag.Usage()
-		return errors.New("both -data and -meta are required")
-	}
-	if *dataSpec == *metaSpec {
-		return errors.New("-data and -meta must be different buckets: keeping the namespace out of the data bucket is the point of the design")
+		return errors.New("-bucket is required")
 	}
 
 	creds := store.Credentials{
@@ -80,18 +75,13 @@ func run() error {
 		SessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
 	}
 
-	dataStore, err := openStore(*dataSpec, *endpoint, *region, creds, *pathStyle)
+	bucket, err := openStore(*bucketSpec, *endpoint, *region, creds, *pathStyle)
 	if err != nil {
-		return fmt.Errorf("data bucket: %w", err)
-	}
-	metaStore, err := openStore(*metaSpec, *endpoint, *region, creds, *pathStyle)
-	if err != nil {
-		return fmt.Errorf("metadata bucket: %w", err)
+		return fmt.Errorf("bucket: %w", err)
 	}
 
-	var data store.Store = dataStore
-	if *dataReadOnly {
-		data = store.ReadOnly{Store: dataStore}
+	if *check {
+		return runCheck(context.Background(), bucket, os.Stdout)
 	}
 
 	uid, gid := currentIDs()
@@ -106,8 +96,7 @@ func run() error {
 	defer stop()
 
 	fs, err := blobfs.New(ctx, blobfs.Config{
-		Data:              data,
-		Meta:              metaStore,
+		Store:             bucket,
 		ChunkSize:         uint32(*chunkKiB) * 1024,
 		CacheBytes:        int64(*cacheMiB) << 20,
 		CommitInterval:    *interval,
@@ -132,7 +121,7 @@ func run() error {
 	defer ln.Close()
 
 	host, port, _ := net.SplitHostPort(ln.Addr().String())
-	printMountInstructions(host, port, *export, *readOnly || *dataReadOnly)
+	printMountInstructions(host, port, *export, *readOnly)
 
 	go fs.Run(ctx)
 
@@ -222,24 +211,29 @@ Locking is kept local: strata serves NFS but not the separate NLM protocol.
 func usage() {
 	fmt.Fprint(os.Stderr, `strata - an S3-backed filesystem served over loopback NFSv3
 
-The filesystem spans two buckets. The data bucket holds only immutable,
-content-addressed chunks named by the SHA-256 of their contents, so it can be
-shared read-only without revealing any filename or directory structure. The
-metadata bucket holds the namespace and is private to whoever mounts it.
+The whole filesystem lives in one bucket. File contents are stored as chunks
+named by the SHA-256 of their bytes, so identical data is stored once and a
+modified chunk lands at a new key instead of overwriting the old one. Exactly
+one object is ever mutated: a small root pointer, swapped with a conditional
+write, which advances the filesystem atomically from one consistent state to
+the next.
 
 Usage:
-  strata -data <bucket> -meta <bucket> [options]
+  strata -bucket <bucket> [options]
 
 Examples:
-  # Local directories, no credentials needed.
-  strata -data /tmp/strata-data -meta /tmp/strata-meta
+  # A local directory, no credentials needed.
+  strata -bucket /tmp/strata
 
-  # Real S3.
+  # AWS S3.
   export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
-  strata -data s3://my-chunks -meta s3://my-namespace -region eu-west-1
+  strata -bucket s3://my-filesystem -region eu-west-1
 
-  # Mount a colleague's shared chunk bucket with your own namespace.
-  strata -data s3://their-chunks -data-read-only -meta s3://my-namespace
+  # An on-premise S3-compatible cluster.
+  strata -bucket s3://my-filesystem -endpoint https://objectscale.example.net -path-style
+
+  # Check that an endpoint supports what strata needs, without mounting.
+  strata -bucket s3://my-filesystem -endpoint https://objectscale.example.net -path-style -check
 
 Options:
 `)

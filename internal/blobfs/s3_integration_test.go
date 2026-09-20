@@ -43,25 +43,26 @@ func TestFilesystemOverS3(t *testing.T) {
 		return s
 	}
 
-	// This test EMPTIES both buckets before running, so the defaults are names
+	// This test EMPTIES the bucket before running, so the default is a name
 	// nothing would be mounted on, and any override must opt in explicitly.
 	// Pointing it at a bucket a live mount is using destroys that filesystem.
-	dataBucket := envDefault("STRATA_S3_DATA_BUCKET", "strata-test-data")
-	metaBucket := envDefault("STRATA_S3_META_BUCKET", "strata-test-meta")
-	if !strings.Contains(dataBucket, "test") || !strings.Contains(metaBucket, "test") {
-		t.Fatalf("refusing to wipe buckets %q and %q: this test empties both, so "+
-			"their names must contain \"test\". Set STRATA_S3_DATA_BUCKET and "+
-			"STRATA_S3_META_BUCKET to dedicated buckets.", dataBucket, metaBucket)
+	//
+	// It deliberately does NOT read STRATA_S3_BUCKET: the store package's
+	// conformance test uses that bucket, `go test ./...` runs packages in
+	// parallel, and wiping a bucket another test is writing to fails at random.
+	bucket := envDefault("STRATA_S3_FS_BUCKET", "strata-test-fs")
+	if !strings.Contains(bucket, "test") {
+		t.Fatalf("refusing to wipe bucket %q: this test empties it, so its name "+
+			"must contain \"test\". Set STRATA_S3_FS_BUCKET to a dedicated bucket.", bucket)
 	}
-	data, meta := mk(dataBucket), mk(metaBucket)
+	st := mk(bucket)
 	ctx := context.Background()
 
 	// Each run starts from a clean namespace so the test is repeatable.
-	clearBucket(t, ctx, meta)
-	clearBucket(t, ctx, data)
+	clearBucket(t, ctx, st)
 
 	fs, err := New(ctx, Config{
-		Data: data, Meta: meta,
+		Store:     st,
 		ChunkSize: 64 * 1024,
 		OwnerUID:  501, OwnerGID: 20,
 		Log: quietLog(),
@@ -90,7 +91,7 @@ func TestFilesystemOverS3(t *testing.T) {
 	}
 
 	// Remount using nothing but the two buckets.
-	fs2, err := New(ctx, Config{Data: mk(dataBucket), Meta: mk(metaBucket), Log: quietLog()})
+	fs2, err := New(ctx, Config{Store: mk(bucket), Log: quietLog()})
 	if err != nil {
 		t.Fatalf("remount from S3: %v", err)
 	}
@@ -110,7 +111,7 @@ func TestFilesystemOverS3(t *testing.T) {
 	}
 
 	// Dedup: two identical files must share their chunks.
-	objs, err := data.List(ctx, chunkPrefix, "", 1000)
+	objs, err := st.List(ctx, chunkPrefix, "", 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +126,7 @@ func TestFilesystemOverS3(t *testing.T) {
 	if err := fs.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
-	after, err := data.List(ctx, chunkPrefix, "", 1000)
+	after, err := st.List(ctx, chunkPrefix, "", 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,17 +134,23 @@ func TestFilesystemOverS3(t *testing.T) {
 		t.Errorf("a third identical file added %d chunks, want 0", len(after)-len(objs))
 	}
 
-	// The data bucket must still be free of namespace detail.
-	all, err := data.List(ctx, "", "", 1000)
+	// Chunk keys must be bare digests, and nothing unexpected may be in the bucket.
+	all, err := st.List(ctx, "", "", 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, o := range all {
-		if !strings.HasPrefix(o.Key, chunkPrefix) || len(strings.TrimPrefix(o.Key, chunkPrefix)) != 64 {
-			t.Errorf("unexpected object in data bucket: %q", o.Key)
+		switch {
+		case strings.HasPrefix(o.Key, chunkPrefix):
+			if len(strings.TrimPrefix(o.Key, chunkPrefix)) != 64 {
+				t.Errorf("chunk key is not a bare digest: %q", o.Key)
+			}
+		case strings.HasPrefix(o.Key, snapshotPrefix), o.Key == rootKey:
+		default:
+			t.Errorf("unexpected object in bucket: %q", o.Key)
 		}
 	}
-	t.Logf("wrote %d KB as %d chunks across two files; namespace in a separate bucket",
+	t.Logf("wrote %d KB as %d chunks shared across three identical files",
 		len(payload)/1024, len(objs))
 }
 

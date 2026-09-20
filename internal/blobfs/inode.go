@@ -1,18 +1,16 @@
-// Package blobfs implements a filesystem whose bytes live in one S3 bucket and
-// whose namespace lives in another.
+// Package blobfs implements a filesystem stored in a single S3 bucket.
 //
-// The split is the point of the design. The data bucket holds nothing but
-// immutable, content-addressed chunks named by the SHA-256 of their contents:
-// no filenames, no directory structure, no sizes of logical files. It can
-// therefore be shared read-only with other people, or made public, without
-// revealing the shape of anyone's tree. The metadata bucket holds the
-// namespace -- inodes, directory entries and the chunk lists that reassemble
-// files -- and is private to whoever mounts it.
+// The bucket holds two kinds of object. File contents are split into chunks
+// named by the SHA-256 of their bytes, under the "chunks/" prefix; because a
+// chunk's key is its content, writing the same bytes twice stores them once,
+// and a modified chunk necessarily lands at a new key rather than overwriting
+// the old one. The namespace -- inodes, directory entries and the chunk lists
+// that reassemble files -- is serialized into immutable snapshot objects.
 //
-// Two consequences fall out for free. Several people can mount the same data
-// bucket with different metadata buckets, each seeing a private tree over
-// shared bytes. And because chunks are addressed by content, identical data
-// written by anyone is stored once.
+// Exactly one object in the bucket is ever mutated: a small root pointer,
+// replaced by a conditional write. That single atomic swap is what advances
+// the filesystem from one self-consistent state to the next, following the
+// consistency-point design in the WAFL paper.
 package blobfs
 
 import (
@@ -111,7 +109,7 @@ func (n *inode) attr(fsid uint64) vfs.Attr {
 }
 
 // snapshot is the serialized form of the entire namespace, stored as one
-// gzipped JSON object in the metadata bucket.
+// gzipped JSON object in the bucket.
 //
 // Writing the whole namespace on every commit is the PoC's main scaling limit
 // and its main simplicity win: a snapshot is self-contained, so a reader needs
@@ -142,7 +140,7 @@ const (
 	rootKey = "root"
 	// snapshotPrefix is where committed namespace snapshots accumulate.
 	snapshotPrefix = "snapshots/"
-	// chunkPrefix is where content-addressed data lives in the data bucket.
+	// chunkPrefix is where content-addressed file data lives.
 	chunkPrefix = "chunks/"
 
 	snapshotVersion = 1

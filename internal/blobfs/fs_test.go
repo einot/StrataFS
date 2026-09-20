@@ -23,20 +23,16 @@ func quietLog() *slog.Logger {
 
 var testCaller = vfs.Caller{UID: 501, GID: 20}
 
-// newTestFS builds a filesystem over two local buckets in a temp dir.
-func newTestFS(t *testing.T) (*FS, *store.Local, *store.Local, string) {
+// newTestFS builds a filesystem over one local bucket in a temp dir.
+func newTestFS(t *testing.T) (*FS, *store.Local, string) {
 	t.Helper()
 	dir := t.TempDir()
-	data, err := store.NewLocal(filepath.Join(dir, "data"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta, err := store.NewLocal(filepath.Join(dir, "meta"))
+	st, err := store.NewLocal(filepath.Join(dir, "bucket"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	fs, err := New(context.Background(), Config{
-		Data: data, Meta: meta,
+		Store:     st,
 		ChunkSize: 4096,
 		OwnerUID:  501, OwnerGID: 20,
 		Log: quietLog(),
@@ -44,7 +40,7 @@ func newTestFS(t *testing.T) (*FS, *store.Local, *store.Local, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fs, data, meta, dir
+	return fs, st, dir
 }
 
 func mustCreate(t *testing.T, fs *FS, dir vfs.Handle, name string) vfs.Handle {
@@ -90,7 +86,7 @@ func readAll(t *testing.T, fs *FS, h vfs.Handle, size int) []byte {
 // nothing but the two buckets.
 func TestWriteReadRemount(t *testing.T) {
 	ctx := context.Background()
-	fs, data, meta, _ := newTestFS(t)
+	fs, st, _ := newTestFS(t)
 
 	// Span several chunks and a partial final chunk.
 	payload := bytes.Repeat([]byte("strata!"), 3000) // 21000 bytes over 4096-byte chunks
@@ -102,7 +98,7 @@ func TestWriteReadRemount(t *testing.T) {
 	}
 
 	// Remount from the buckets alone.
-	fs2, err := New(ctx, Config{Data: data, Meta: meta, ChunkSize: 4096, Log: quietLog()})
+	fs2, err := New(ctx, Config{Store: st, ChunkSize: 4096, Log: quietLog()})
 	if err != nil {
 		t.Fatalf("remount: %v", err)
 	}
@@ -118,12 +114,13 @@ func TestWriteReadRemount(t *testing.T) {
 	}
 }
 
-// TestDataBucketLeaksNoNames is the central privacy claim of the design: the
-// data bucket must contain nothing but content-addressed chunks, so sharing it
-// reveals no filenames or directory structure.
-func TestDataBucketLeaksNoNames(t *testing.T) {
+// TestChunkKeysAreBareHashes checks the content-addressing invariant: a chunk's
+// key is the hash of its bytes and nothing else. Keeping names out of chunk
+// keys is what makes the "chunks/" prefix safe to expose on its own, should
+// that ever be wanted, and is why a rewrite of identical data is free.
+func TestChunkKeysAreBareHashes(t *testing.T) {
 	ctx := context.Background()
-	fs, data, _, _ := newTestFS(t)
+	fs, st, _ := newTestFS(t)
 
 	dirH, _, err := fs.Mkdir(ctx, testCaller, fs.Root(), "secret-project", vfs.SetAttr{})
 	if err != nil {
@@ -135,26 +132,37 @@ func TestDataBucketLeaksNoNames(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	objs, err := data.List(ctx, "", "", 0)
+	chunks, err := st.List(ctx, chunkPrefix, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(objs) == 0 {
-		t.Fatal("expected at least one chunk in the data bucket")
+	if len(chunks) == 0 {
+		t.Fatal("expected at least one chunk")
 	}
-	for _, o := range objs {
-		if !strings.HasPrefix(o.Key, chunkPrefix) {
-			t.Errorf("data bucket holds a non-chunk object: %q", o.Key)
-		}
+	for _, o := range chunks {
 		// The key must be the prefix plus a 64-char hex digest and nothing else.
-		name := strings.TrimPrefix(o.Key, chunkPrefix)
-		if len(name) != 64 {
+		if name := strings.TrimPrefix(o.Key, chunkPrefix); len(name) != 64 {
 			t.Errorf("chunk key %q is not a bare sha256 digest", o.Key)
 		}
 		for _, leak := range []string{"secret-project", "acquisition-memo", ".txt"} {
 			if strings.Contains(o.Key, leak) {
-				t.Errorf("data bucket key %q leaks namespace detail %q", o.Key, leak)
+				t.Errorf("chunk key %q leaks namespace detail %q", o.Key, leak)
 			}
+		}
+	}
+
+	// Every object in the bucket belongs to one of the three known prefixes.
+	all, err := st.List(ctx, "", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range all {
+		switch {
+		case strings.HasPrefix(o.Key, chunkPrefix),
+			strings.HasPrefix(o.Key, snapshotPrefix),
+			o.Key == rootKey:
+		default:
+			t.Errorf("unexpected object in bucket: %q", o.Key)
 		}
 	}
 }
@@ -163,7 +171,7 @@ func TestDataBucketLeaksNoNames(t *testing.T) {
 // what content addressing buys.
 func TestDedupAcrossFiles(t *testing.T) {
 	ctx := context.Background()
-	fs, data, _, _ := newTestFS(t)
+	fs, st, _ := newTestFS(t)
 
 	content := bytes.Repeat([]byte("x"), 4096)
 	for _, name := range []string{"a.bin", "b.bin", "c.bin"} {
@@ -174,7 +182,7 @@ func TestDedupAcrossFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	objs, err := data.List(ctx, chunkPrefix, "", 0)
+	objs, err := st.List(ctx, chunkPrefix, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,56 +191,42 @@ func TestDedupAcrossFiles(t *testing.T) {
 	}
 }
 
-// TestSharedReadOnlyDataBucket exercises the scenario the design exists for:
-// a second party mounts the same data bucket read-only, with their own copy of
-// the metadata, and can read everything but write nothing.
-func TestSharedReadOnlyDataBucket(t *testing.T) {
+// TestReadOnlyMount checks that a store opened read-only serves reads and
+// refuses every write, which is how a bucket is mounted for inspection or
+// recovery without any risk of modifying it.
+func TestReadOnlyMount(t *testing.T) {
 	ctx := context.Background()
-	fs, data, meta, dir := newTestFS(t)
+	fs, st, _ := newTestFS(t)
 
-	payload := []byte("shared bytes, private namespace")
-	h := mustCreate(t, fs, fs.Root(), "shared.txt")
+	payload := []byte("written before the bucket was sealed")
+	h := mustCreate(t, fs, fs.Root(), "existing.txt")
 	mustWrite(t, fs, h, 0, payload)
 	if err := fs.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	// The second party receives a copy of the namespace out of band and mounts
-	// the shared data bucket read-only.
-	metaB := filepath.Join(dir, "meta-b")
-	if err := copyTree(filepath.Join(dir, "meta"), metaB); err != nil {
-		t.Fatal(err)
-	}
-	_ = meta
-	storeB, err := store.NewLocal(metaB)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	fsB, err := New(ctx, Config{
-		Data:      store.ReadOnly{Store: data},
-		Meta:      storeB,
+	roFS, err := New(ctx, Config{
+		Store:     store.ReadOnly{Store: st},
 		ChunkSize: 4096,
 		Log:       quietLog(),
 	})
 	if err != nil {
-		t.Fatalf("mount shared: %v", err)
+		t.Fatalf("mount read-only: %v", err)
 	}
 
-	hB, _, err := fsB.Lookup(ctx, testCaller, fsB.Root(), "shared.txt")
+	hRO, _, err := roFS.Lookup(ctx, testCaller, roFS.Root(), "existing.txt")
 	if err != nil {
-		t.Fatalf("lookup in shared mount: %v", err)
+		t.Fatalf("lookup on a read-only mount: %v", err)
 	}
-	if got := readAll(t, fsB, hB, len(payload)); !bytes.Equal(got, payload) {
-		t.Errorf("shared read got %q, want %q", got, payload)
+	if got := readAll(t, roFS, hRO, len(payload)); !bytes.Equal(got, payload) {
+		t.Errorf("read-only mount returned %q, want %q", got, payload)
 	}
 
-	// Writing new content must fail: the data bucket rejects the chunk upload.
-	hNew := mustCreate(t, fsB, fsB.Root(), "attempt.txt")
-	mustWrite(t, fsB, hNew, 0, []byte("this should not reach the shared bucket"))
-	err = fsB.Sync(ctx)
-	if err == nil {
-		t.Error("expected commit to fail against a read-only data bucket")
+	// Writes must not reach the bucket.
+	hNew := mustCreate(t, roFS, roFS.Root(), "attempt.txt")
+	mustWrite(t, roFS, hNew, 0, []byte("this must not be stored"))
+	if err := roFS.Sync(ctx); err == nil {
+		t.Error("expected commit to fail against a read-only store")
 	}
 }
 
@@ -240,7 +234,7 @@ func TestSharedReadOnlyDataBucket(t *testing.T) {
 // chunks and reads back as zeros.
 func TestSparseFileCostsNothing(t *testing.T) {
 	ctx := context.Background()
-	fs, data, _, _ := newTestFS(t)
+	fs, st, _ := newTestFS(t)
 
 	h := mustCreate(t, fs, fs.Root(), "sparse.bin")
 	size := uint64(4096 * 10)
@@ -251,7 +245,7 @@ func TestSparseFileCostsNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	objs, err := data.List(ctx, chunkPrefix, "", 0)
+	objs, err := st.List(ctx, chunkPrefix, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +271,7 @@ func TestSparseFileCostsNothing(t *testing.T) {
 // that lands inside a stored chunk.
 func TestTruncateShortensFile(t *testing.T) {
 	ctx := context.Background()
-	fs, _, _, _ := newTestFS(t)
+	fs, _, _ := newTestFS(t)
 
 	h := mustCreate(t, fs, fs.Root(), "trunc.txt")
 	mustWrite(t, fs, h, 0, bytes.Repeat([]byte("abcd"), 2000)) // 8000 bytes
@@ -306,7 +300,7 @@ func TestTruncateShortensFile(t *testing.T) {
 // TestOverwriteMiddle checks partial writes into existing chunks.
 func TestOverwriteMiddle(t *testing.T) {
 	ctx := context.Background()
-	fs, _, _, _ := newTestFS(t)
+	fs, _, _ := newTestFS(t)
 
 	h := mustCreate(t, fs, fs.Root(), "patch.bin")
 	base := bytes.Repeat([]byte("."), 10000)
@@ -330,7 +324,7 @@ func TestOverwriteMiddle(t *testing.T) {
 // TestRenameAndRmdir covers the namespace edge cases that are easy to get wrong.
 func TestRenameAndRmdir(t *testing.T) {
 	ctx := context.Background()
-	fs, _, _, _ := newTestFS(t)
+	fs, _, _ := newTestFS(t)
 	root := fs.Root()
 
 	a, _, err := fs.Mkdir(ctx, testCaller, root, "a", vfs.SetAttr{})
@@ -371,7 +365,7 @@ func TestRenameAndRmdir(t *testing.T) {
 // than addressing whatever inode number gets reused.
 func TestStaleHandle(t *testing.T) {
 	ctx := context.Background()
-	fs, _, _, _ := newTestFS(t)
+	fs, _, _ := newTestFS(t)
 
 	h := mustCreate(t, fs, fs.Root(), "doomed.txt")
 	if err := fs.Remove(ctx, testCaller, fs.Root(), "doomed.txt"); err != nil {
@@ -386,9 +380,9 @@ func TestStaleHandle(t *testing.T) {
 // metadata bucket from two mounts silently overwriting each other.
 func TestSecondWriterIsDetected(t *testing.T) {
 	ctx := context.Background()
-	fsA, data, meta, _ := newTestFS(t)
+	fsA, st, _ := newTestFS(t)
 
-	fsB, err := New(ctx, Config{Data: data, Meta: meta, ChunkSize: 4096, Log: quietLog()})
+	fsB, err := New(ctx, Config{Store: st, ChunkSize: 4096, Log: quietLog()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +404,7 @@ func TestSecondWriterIsDetected(t *testing.T) {
 	}
 
 	// A is unaffected and its file survives a remount.
-	fsC, err := New(ctx, Config{Data: data, Meta: meta, ChunkSize: 4096, Log: quietLog()})
+	fsC, err := New(ctx, Config{Store: st, ChunkSize: 4096, Log: quietLog()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +416,7 @@ func TestSecondWriterIsDetected(t *testing.T) {
 // TestPermissionsEnforced checks that mode bits actually gate access.
 func TestPermissionsEnforced(t *testing.T) {
 	ctx := context.Background()
-	fs, _, _, _ := newTestFS(t)
+	fs, _, _ := newTestFS(t)
 
 	mode := uint32(0o600)
 	h, _, err := fs.Create(ctx, testCaller, fs.Root(), "private.txt", vfs.SetAttr{Mode: &mode}, true)
@@ -447,7 +441,7 @@ func TestPermissionsEnforced(t *testing.T) {
 // TestReadDirPaging walks a directory larger than one reply.
 func TestReadDirPaging(t *testing.T) {
 	ctx := context.Background()
-	fs, _, _, _ := newTestFS(t)
+	fs, _, _ := newTestFS(t)
 
 	const n = 50
 	for i := 0; i < n; i++ {
@@ -488,7 +482,7 @@ func TestReadDirPaging(t *testing.T) {
 // TestStaleCookieRejected checks the readdir verifier.
 func TestStaleCookieRejected(t *testing.T) {
 	ctx := context.Background()
-	fs, _, _, _ := newTestFS(t)
+	fs, _, _ := newTestFS(t)
 	for i := 0; i < 10; i++ {
 		mustCreate(t, fs, fs.Root(), string(rune('a'+i))+".txt")
 	}
@@ -513,7 +507,7 @@ func TestStaleCookieRejected(t *testing.T) {
 // TestSymlink round-trips a symlink.
 func TestSymlink(t *testing.T) {
 	ctx := context.Background()
-	fs, _, _, _ := newTestFS(t)
+	fs, _, _ := newTestFS(t)
 
 	h, attr, err := fs.Symlink(ctx, testCaller, fs.Root(), "link", "../target/path", vfs.SetAttr{})
 	if err != nil {
@@ -560,21 +554,17 @@ func copyTree(src, dst string) error {
 var _ = time.Now
 
 // TestSnapshotsArePruned checks that a long-running mount does not fill the
-// metadata bucket with superseded namespace snapshots. A live smoke test
+// bucket with superseded namespace snapshots. A live smoke test
 // produced 440 snapshots in one run before retention existed.
 func TestSnapshotsArePruned(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	data, err := store.NewLocal(filepath.Join(dir, "data"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta, err := store.NewLocal(filepath.Join(dir, "meta"))
+	st, err := store.NewLocal(filepath.Join(dir, "bucket"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	fs, err := New(ctx, Config{
-		Data: data, Meta: meta,
+		Store:             st,
 		ChunkSize:         4096,
 		SnapshotRetention: 5,
 		OwnerUID:          501,
@@ -599,7 +589,7 @@ func TestSnapshotsArePruned(t *testing.T) {
 	const bound = 12
 	var snaps []store.ObjectInfo
 	for attempt := 0; attempt < 60; attempt++ {
-		snaps, err = meta.List(ctx, snapshotPrefix, "", 0)
+		snaps, err = st.List(ctx, snapshotPrefix, "", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -616,7 +606,7 @@ func TestSnapshotsArePruned(t *testing.T) {
 	}
 
 	// The namespace must still be intact and mountable from what survived.
-	fs2, err := New(ctx, Config{Data: data, Meta: meta, ChunkSize: 4096, Log: quietLog()})
+	fs2, err := New(ctx, Config{Store: st, ChunkSize: 4096, Log: quietLog()})
 	if err != nil {
 		t.Fatalf("remount after pruning: %v", err)
 	}

@@ -72,6 +72,22 @@ better fit here than it was on the hardware it was written for.
 | NVRAM request log | Acknowledge NFS writes before they reach disk | NFSv3's own UNSTABLE/COMMIT contract (§9) |
 | RAID | Survive a disk failure | The provider's durability |
 
+### A note on where this runs
+
+The target is an on-premise Dell ECS cluster (ObjectScale is its renamed next
+release). "S3-compatible" is a spectrum, and the behaviour this design leans on
+hardest — conditional writes on PUT, which make the consistency point atomic —
+is exactly the kind of thing implementations differ on. Dell documents ECS as
+supporting `If-Match` and `If-None-Match`, but `strata -check` probes a live
+endpoint for every behaviour the filesystem needs, and should be run against any
+new cluster before trusting it.
+
+If conditional writes turn out to be unavailable, the fallback is not to give up
+atomicity — the root swap is still a single object PUT, so readers still see one
+state or the other — but to give up *detection* of a second writer. In that case
+the filesystem must be operated single-writer by policy, and the design should
+say so rather than pretend the guarantee holds.
+
 The one thing object storage takes away is cheap small random writes. A 4 KB
 block is the wrong unit when each access is an HTTPS round trip, so block sizes
 grow by two orders of magnitude and the tree gets shallower and wider. That is a
@@ -83,40 +99,38 @@ they name it with the same hash. That property does real work in §8.
 
 ---
 
-## 3. Blocks, and the two buckets
+## 3. Blocks, and the single bucket
 
 A **block** is an immutable object named by the SHA-256 of its contents. There
 are five kinds, distinguished only by how their referrer interprets them:
 
-| Kind | Contents | Bucket |
+| Kind | Contents | Key prefix |
 |---|---|---|
-| `data` | raw file bytes | **data** |
-| `indirect` | array of block references | metadata |
-| `inode-file` | a run of packed inode records | metadata |
-| `dirent` | a run of directory entries | metadata |
-| `fsinfo` | the root; the one mutable object | metadata |
+| `data` | raw file bytes | `b/` |
+| `indirect` | array of block references | `m/` |
+| `inode-file` | a run of packed inode records | `m/` |
+| `dirent` | a run of directory entries | `m/` |
+| `fsinfo` | the root; the one mutable object | `fsinfo` |
 
-The proof of concept's two-bucket split is kept, but the dividing line moves.
-It is no longer "data versus namespace" — it is **leaf file bytes versus
-everything else**:
+Everything lives in **one bucket**. An earlier iteration split data and metadata
+across two, so the chunk half could be shared read-only without revealing
+filenames. That is not worth the cost: the isolation it bought is achievable
+with key prefixes and an access policy, while two buckets introduce a
+cross-bucket invariant that no backup, restore or replication operation can
+preserve atomically. One bucket is also what WAFL describes — a single volume,
+not two storage pools.
 
-- **Data bucket** — `data` blocks only, keyed `b/<sha256>`. No names, no
-  structure, no indication of which blocks belong to the same file. Safe to
-  share read-only or publish.
-- **Metadata bucket** — every other block, plus the single mutable `fsinfo`
-  object. Private to whoever mounts.
+The `b/` and `m/` prefixes are retained because they cost nothing and keep the
+option open: a policy granting read on `b/*` alone still exposes only
+content-addressed bytes, with no filenames or directory structure. Nothing in
+the format depends on that, and no code distinguishes the two beyond choosing a
+prefix.
 
-This matters because WAFL's "metadata lives in files" would otherwise destroy
-the privacy property: directory blocks are full of filenames, and if all tree
-blocks went to one bucket the shareable half would leak the namespace. Splitting
-by *what a block contains* rather than by *where it sits in the tree* keeps both
-properties at once.
-
-A pleasant consequence: because metadata is now a Merkle tree rather than one
-monolithic document, a subtree can be shared by handing over a single hash.
-"Share this directory, read-only" becomes a well-defined operation.
-
----
+Worth noting for its own sake: because block names are unguessable hashes,
+granting `s3:GetObject` *without* `s3:ListBucket` turns a hash into a
+capability. A holder can fetch exactly the subtree whose root they were given
+and enumerate nothing else. That is a finer-grained sharing primitive than any
+bucket split, and it needs no structural support.
 
 ## 4. The tree
 
@@ -129,7 +143,7 @@ fsinfo  (mutable, key "fsinfo", compare-and-swapped)
                          inode file  (a regular file)
                                 │
                       ┌─────────┴─────────┐
-                  indirect             indirect        (metadata bucket)
+                  indirect             indirect              (m/ prefix)
                       │                   │
                 inode-file blocks   inode-file blocks  (256 inodes each)
                       │
@@ -138,8 +152,8 @@ fsinfo  (mutable, key "fsinfo", compare-and-swapped)
           (a dir)         (a file)      (a symlink)
               │               │              │
           dirent blocks   indirect        target inline
-         (metadata)           │
-                         data blocks      (DATA bucket)
+           (m/ prefix)        │
+                         data blocks            (b/ prefix)
 ```
 
 The root inode describes the inode file, exactly as in §3.3. Every inode —
@@ -147,7 +161,7 @@ including the inode file's own, and the directories' — is reached by indexing
 into the inode file. Inode number *n* lives at byte offset `n × 256`.
 
 `fsinfo` is the fixed location. The paper needed a fixed disk address; we need a
-fixed key. It is the only object in either bucket that is ever modified.
+fixed key. It is the only object in the bucket that is ever modified.
 
 ### Block sizing
 
@@ -307,11 +321,12 @@ Safety rules, both non-negotiable:
    writer uploads blocks before the `fsinfo` that references them, so a
    newly-uploaded block is legitimately unreferenced for a moment. Sweeping only
    objects older than the mark start closes that window.
-2. **Never sweep a shared data bucket.** If others mount your data bucket with
-   their own metadata, you cannot enumerate their roots and therefore cannot
-   know what is reachable. A bucket that has been shared is append-only until
-   every consumer publishes a root, or forever. This is a real limitation of the
-   sharing model and the design should not hide it.
+2. **Never sweep a bucket whose roots you cannot all enumerate.** Sweeping is
+   only sound when `fsinfo` names every live root. If subtree hashes have been
+   handed out as capabilities, or another party mounts the same bucket, those
+   references are invisible to the mark phase and the sweeper will delete data
+   that is still in use. Either keep such a bucket append-only, or require every
+   consumer to register a root that the mark phase can see.
 
 ---
 
@@ -376,7 +391,7 @@ block.
 | Metadata cache | Whole-namespace, invalidated per commit | Per-block, never invalidated |
 | Snapshots | None | Free; user-visible under `.snapshot/` |
 | Garbage collection | None — chunks leak on delete | Mark-and-sweep, exact |
-| Metadata bucket growth | 440 snapshots from one smoke test | Bounded by live set plus sweep lag |
+| Bucket growth | 440 snapshots from one smoke test | Bounded by live set plus sweep lag |
 | Mount time | Download and parse whole namespace | One GET of `fsinfo` |
 | Memory | Entire namespace resident | Working set only |
 

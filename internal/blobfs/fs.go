@@ -22,12 +22,9 @@ import (
 
 // Config configures a blobfs mount.
 type Config struct {
-	// Data is the bucket holding content-addressed chunks. Wrap it in
-	// store.ReadOnly to mount someone else's shared data bucket.
-	Data store.Store
-	// Meta is the bucket holding the namespace. Must be writable to mount
-	// read-write.
-	Meta store.Store
+	// Store is the bucket holding the entire filesystem: content-addressed
+	// chunks under one key prefix, the namespace under others.
+	Store store.Store
 
 	ChunkSize      uint32
 	CacheBytes     int64
@@ -49,9 +46,8 @@ type Config struct {
 
 // FS is an S3-backed filesystem implementing vfs.FS.
 type FS struct {
-	data store.Store
-	meta store.Store
-	log  *slog.Logger
+	store store.Store
+	log   *slog.Logger
 
 	chunkSize      uint32
 	commitInterval time.Duration
@@ -117,8 +113,8 @@ var _ vfs.FS = (*FS)(nil)
 
 // New opens or creates a filesystem over the two buckets.
 func New(ctx context.Context, cfg Config) (*FS, error) {
-	if cfg.Data == nil || cfg.Meta == nil {
-		return nil, errors.New("blobfs: both data and metadata stores are required")
+	if cfg.Store == nil {
+		return nil, errors.New("blobfs: a store is required")
 	}
 	if cfg.ChunkSize == 0 {
 		cfg.ChunkSize = defaultChunkSize
@@ -141,8 +137,7 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 
 	host, _ := os.Hostname()
 	f := &FS{
-		data:           cfg.Data,
-		meta:           cfg.Meta,
+		store:          cfg.Store,
 		log:            cfg.Log,
 		chunkSize:      cfg.ChunkSize,
 		commitInterval: cfg.CommitInterval,
@@ -884,13 +879,13 @@ func (f *FS) loadChunk(ctx context.Context, ref chunkRef) ([]byte, error) {
 	if data, ok := f.cache.get(ref.Hash); ok {
 		return data, nil
 	}
-	data, err := f.data.Get(ctx, chunkPrefix+ref.Hash)
+	data, err := f.store.Get(ctx, chunkPrefix+ref.Hash)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			// The namespace references a chunk the data bucket does not have.
-			// That means the two buckets are out of sync -- most likely the
-			// wrong data bucket was supplied.
-			f.log.Error("missing chunk referenced by metadata", "hash", ref.Hash)
+			// The namespace references a chunk the bucket does not hold. A
+			// commit always stores chunks before the namespace that names
+			// them, so this means the bucket has lost objects.
+			f.log.Error("missing chunk referenced by namespace", "hash", ref.Hash)
 			return nil, vfs.ErrIO
 		}
 		return nil, fmt.Errorf("read chunk %s: %w", ref.Hash, err)
@@ -927,14 +922,14 @@ func (f *FS) putChunk(ctx context.Context, data []byte) (chunkRef, error) {
 	// A HEAD before the PUT turns a rewrite of identical content into one cheap
 	// round trip instead of re-uploading the bytes. Because the key is the hash
 	// of the contents, an object that exists is necessarily the right one.
-	if _, err := f.data.Head(ctx, key); err == nil {
+	if _, err := f.store.Head(ctx, key); err == nil {
 		f.markKnown(hash)
 		return ref, nil
 	} else if !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrUnsupported) {
 		f.log.Debug("chunk existence probe failed, uploading anyway", "hash", hash, "err", err)
 	}
 
-	if err := f.data.Put(ctx, key, data); err != nil {
+	if err := f.store.Put(ctx, key, data); err != nil {
 		if errors.Is(err, store.ErrUnsupported) {
 			return chunkRef{}, vfs.ErrROFS
 		}

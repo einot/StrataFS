@@ -17,10 +17,10 @@ import (
 	"strata/internal/store"
 )
 
-// loadOrInit reads the current namespace from the metadata bucket, creating an
+// loadOrInit reads the current namespace from the bucket, creating an
 // empty filesystem if the bucket has no root pointer yet.
 func (f *FS) loadOrInit(ctx context.Context) error {
-	raw, err := f.meta.Get(ctx, rootKey)
+	raw, err := f.store.Get(ctx, rootKey)
 	if errors.Is(err, store.ErrNotFound) {
 		return f.initEmpty(ctx)
 	}
@@ -33,18 +33,18 @@ func (f *FS) loadOrInit(ctx context.Context) error {
 		return fmt.Errorf("parse root pointer: %w", err)
 	}
 	if rp.Version != snapshotVersion {
-		return fmt.Errorf("metadata bucket holds format version %d, this build speaks %d", rp.Version, snapshotVersion)
+		return fmt.Errorf("bucket holds format version %d, this build speaks %d", rp.Version, snapshotVersion)
 	}
 
 	// Record the ETag we loaded from; the next commit compare-and-swaps against
 	// it, so a second mount writing concurrently is detected rather than
 	// silently clobbering us.
-	info, err := f.meta.Head(ctx, rootKey)
+	info, err := f.store.Head(ctx, rootKey)
 	if err != nil {
 		return fmt.Errorf("stat root pointer: %w", err)
 	}
 
-	snapRaw, err := f.meta.Get(ctx, rp.Snapshot)
+	snapRaw, err := f.store.Get(ctx, rp.Snapshot)
 	if err != nil {
 		return fmt.Errorf("read snapshot %s: %w", rp.Snapshot, err)
 	}
@@ -95,14 +95,14 @@ func (f *FS) initEmpty(ctx context.Context) error {
 	f.inodes = map[uint64]*inode{rootInodeID: root}
 	f.nextIno = rootInodeID + 1
 	f.epoch = 0
-	f.fsid = fsidFor(f.meta.Name())
+	f.fsid = fsidFor(f.store.Name())
 	f.rootETag = "" // If-None-Match: * on first commit
 
-	f.log.Info("initializing new filesystem", "metadata", f.meta.Name(), "data", f.data.Name())
+	f.log.Info("initializing new filesystem", "bucket", f.store.Name())
 	return f.commitLocked(ctx)
 }
 
-// fsidFor derives a stable filesystem ID from the metadata bucket name, so the
+// fsidFor derives a stable filesystem ID from the bucket name, so the
 // same bucket presents the same fsid across mounts.
 func fsidFor(name string) uint64 {
 	h := fnv.New64a()
@@ -110,7 +110,7 @@ func fsidFor(name string) uint64 {
 	return h.Sum64()
 }
 
-// Sync writes the current namespace to the metadata bucket and atomically
+// Sync writes the current namespace to the bucket and atomically
 // swaps the root pointer to it.
 //
 // The ordering matters and is the whole durability argument: every chunk a
@@ -119,7 +119,7 @@ func fsidFor(name string) uint64 {
 // leaves unreferenced objects behind, never a root pointer that names data
 // which does not exist. Readers only ever see the old tree or the new one.
 func (f *FS) Sync(ctx context.Context) error {
-	// Buffered file data must reach the data bucket before the namespace that
+	// Buffered file data must be stored before the namespace that
 	// references it. This happens before mu is taken because flushing acquires
 	// per-file locks, which must never be taken while holding mu.
 	if err := f.flushAll(ctx); err != nil {
@@ -136,7 +136,7 @@ func (f *FS) Sync(ctx context.Context) error {
 
 func (f *FS) commitLocked(ctx context.Context) error {
 	if f.diverged {
-		return errors.New("filesystem diverged: another writer committed to this metadata bucket; remount to continue")
+		return errors.New("filesystem diverged: another writer committed to this bucket; remount to continue")
 	}
 
 	epoch := f.epoch + 1
@@ -160,7 +160,7 @@ func (f *FS) commitLocked(ctx context.Context) error {
 	rand.Read(nonce[:])
 	key := fmt.Sprintf("%s%020d-%s.json.gz", snapshotPrefix, epoch, hex.EncodeToString(nonce[:]))
 
-	if err := f.meta.Put(ctx, key, body); err != nil {
+	if err := f.store.Put(ctx, key, body); err != nil {
 		return fmt.Errorf("write snapshot: %w", err)
 	}
 
@@ -177,24 +177,24 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		return err
 	}
 
-	newETag, err := f.meta.PutIfMatch(ctx, rootKey, rpBody, f.rootETag)
+	newETag, err := f.store.PutIfMatch(ctx, rootKey, rpBody, f.rootETag)
 	switch {
 	case errors.Is(err, store.ErrPrecondition):
 		// Someone else moved the root pointer. Our in-memory tree is built on a
 		// namespace that is no longer current, so continuing would discard
 		// their work. Refuse to write any further rather than corrupt.
 		f.diverged = true
-		f.log.Error("commit conflict: another writer owns this metadata bucket",
+		f.log.Error("commit conflict: another writer owns this bucket",
 			"our_epoch", f.epoch, "attempted", epoch)
-		return errors.New("commit conflict: another writer owns this metadata bucket; remount to continue")
+		return errors.New("commit conflict: another writer owns this bucket; remount to continue")
 	case errors.Is(err, store.ErrUnsupported):
 		// A backend without conditional writes cannot give us safe single-writer
 		// detection. Fall back to an unconditional write and say so clearly.
 		f.log.Warn("backend lacks conditional writes; concurrent mounts are unsafe")
-		if err := f.meta.Put(ctx, rootKey, rpBody); err != nil {
+		if err := f.store.Put(ctx, rootKey, rpBody); err != nil {
 			return fmt.Errorf("write root pointer: %w", err)
 		}
-		if info, herr := f.meta.Head(ctx, rootKey); herr == nil {
+		if info, herr := f.store.Head(ctx, rootKey); herr == nil {
 			newETag = info.ETag
 		}
 	case err != nil:
@@ -247,7 +247,7 @@ func (f *FS) pruneSnapshots(ctx context.Context, current uint64) error {
 	var all []store.ObjectInfo
 	after := ""
 	for {
-		batch, err := f.meta.List(ctx, snapshotPrefix, after, 1000)
+		batch, err := f.store.List(ctx, snapshotPrefix, after, 1000)
 		if err != nil {
 			return fmt.Errorf("list snapshots: %w", err)
 		}
@@ -273,7 +273,7 @@ func (f *FS) pruneSnapshots(ctx context.Context, current uint64) error {
 		if strings.HasPrefix(o.Key, currentPrefix) {
 			continue // never delete the snapshot the root pointer names
 		}
-		if err := f.meta.Delete(ctx, o.Key); err != nil {
+		if err := f.store.Delete(ctx, o.Key); err != nil {
 			// A failed delete only leaves garbage behind; it is not a
 			// correctness problem, so log and keep going.
 			f.log.Debug("could not delete superseded snapshot", "key", o.Key, "err", err)
