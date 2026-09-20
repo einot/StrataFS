@@ -206,3 +206,7 @@ This is a proof of concept. What that means concretely:
   bucket is the obvious next step and fits the split cleanly.
 - **atime is not updated on read**, deliberately: doing so would dirty the
   namespace on every read.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
