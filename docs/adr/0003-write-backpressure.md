@@ -2,6 +2,21 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-22
+- **Revised:** 2026-09-22 — §2 is rewritten to account `cap(v)` rather than
+  `len(v)` over each open file's `dirty` map. The buffers are allocated at full
+  chunk capacity, so a `len`-shaped charge does not bound resident memory,
+  which is the thing the budget exists to bound; §1's `Config` doc comment,
+  §6's bound and §8's `DirtyBytes()` are restated in those terms. §5's claim
+  that a diverged filesystem surfaces as `NFS3ERR_STALE` was false and is
+  corrected: the commit path returns bare errors, so the write whose drain
+  *discovers* divergence reports `NFS3ERR_IO` and only the next one reports
+  `NFS3ERR_STALE`. Assumption 7 now accounts for retransmitted stalled writes
+  taking further in-flight slots; Assumptions 1, 2 and 6 follow the accounting
+  change; §9 notes that its doc comment has since landed; and a *What this does
+  not decide* section is added. Nothing else changed: the decision itself — a
+  global byte budget with a check-then-proceed blocking discipline — §1's flag
+  and 256 MiB default, §3's lock ordering, §4's `budget` API and waiting rules,
+  §7's logging and the Consequences are as first written.
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
 - **Affects:** `internal/blobfs`, `cmd/strata`, doc comment on `vfs.FS.Write`
 
@@ -44,9 +59,11 @@ stalled writer has to be able to perform the drain itself.
 ```go
 // Config
 //
-// MaxDirtyBytes bounds the bytes buffered by unflushed writes across all open
-// files. Zero selects the default (256 MiB); a negative value disables
-// backpressure and lets the buffer grow without limit.
+// MaxDirtyBytes bounds the memory held by unflushed writes across all open
+// files, measured as the capacity of their buffers rather than the count of
+// logically dirty bytes (see the accounting rule below). Zero selects the
+// default (256 MiB); a negative value disables backpressure and lets the
+// buffer grow without limit.
 MaxDirtyBytes int64
 ```
 
@@ -64,35 +81,89 @@ There is **no minimum**. With the check-then-proceed discipline in §4 any
 positive limit makes progress, because a writer is admitted whenever the current
 charge is below the limit and a successful drain takes the charge to zero.
 
-### 2. Accounting: five sites, and all of them matter
+### 2. Accounting: the quantity counted, and the five sites that count it
 
-`openFile` gains `bytes atomic.Int64`, the sum of `len(v)` over its `dirty` map.
-`FS` gains the budget, whose `cur` is the sum over all live open files.
-`atomic.Int64` rather than a field under `openFile.mu`, because one of the five
-sites runs under `FS.mu` where taking `openFile.mu` would invert the lock order
-(§3).
+`openFile` gains `bytes atomic.Int64`, the sum of **`cap(v)`** — not `len(v)` —
+over its `dirty` map. `FS` gains the budget, whose `cur` is the sum over all
+live open files. `atomic.Int64` rather than a field under `openFile.mu`, because
+one of the five sites runs under `FS.mu` where taking `openFile.mu` would invert
+the lock order (§3).
+
+#### Why the accounted quantity is `cap`, not `len`
+
+The budget is a statement about **resident memory**, not about logical dirty
+bytes, and a dirty buffer is resident at its capacity however little of it is
+written. The buffers are allocated at full chunk capacity throughout:
+`internal/blobfs/fs.go:1092` is `make([]byte, 0, cs)`, `fs.go:1103` is
+`append(make([]byte, 0, cs), loaded...)`, and `fs.go:1194` is
+`of.dirty[lastIdx] = chunk[:tail]`, a reslice that shrinks `len` while the
+backing array stays at `cap`.
+
+Under `len` accounting a client issuing one small write per chunk index is
+charged only what it wrote — a few kilobytes per index — while the process
+holds a full `cs` per index, a megabyte at the default chunk size. The charge
+is then wrong by nearly the whole of the memory it is supposed to be measuring:
+`DirtyBytes()` would report a number comfortably inside the limit, no writer
+would ever stall, and the process would die of exactly the OOM this ADR exists
+to prevent. `len` accounting does not bound what the operator asked to bound.
+
+The consequence, accepted knowingly: **on a sparsely written file
+`DirtyBytes()` reports more than the count of logically dirty bytes** — for a
+file with one byte written into each of three chunk indices, `3 × cs`. That is
+the honest number for a memory budget, it is the number §6's bound is about,
+and it is what §8's accessor returns. A test asserting that a 10-byte write
+adds 10 to `DirtyBytes()` is asserting the defect.
+
+Capacity is `cs` exactly for any buffer the write path allocates: `make([]byte,
+0, cs)` yields `cap == cs` — the language guarantees the capacity `make` was
+asked for, whatever the allocator rounds up to underneath — and the subsequent
+`append` at `fs.go:1111-1112` never needs more than `cs`, so it never grows.
+The exception is a buffer that `truncate` or `pendingTrim` staged at a partial
+length (`fs.go:1216`, `fs.go:1272`) and a later write then grows: there
+`append` chooses the new capacity, which is at least what the write needs and
+may round above `cs`. Computing every delta as a difference of `cap` keeps the
+accounting exact in that case too, which is why the rule below is stated as a
+`cap` delta rather than as "add `cs` per new index".
+
+#### The five sites
 
 1. **`Write`**, under `openFile.mu`, per chunk index touched: the delta is
-   `len(new) - len(old)`, and `len(old)` is zero when the index was absent.
-   Accumulate over the loop, then charge once.
+   `cap(new) - cap(old)`, sampling `cap(old)` from the map entry *before* the
+   buffer is mutated, and `cap(old)` is zero when the index was absent.
+   Accumulate over the loop, then charge once. A single `Write` call touches
+   each index at most once — each iteration either runs to the next chunk
+   boundary or exhausts the data, so the indices it visits strictly increase —
+   and therefore no index can be double-counted. An index that was already
+   dirty at full capacity contributes zero.
 2. **`Write`'s tail block**, holding `openFile.mu` and `FS.mu`, where it
    re-resolves the handle: if the inode has gone (unlinked, or a generation
    mismatch) nothing will ever flush this buffer. Release the file's whole
    remaining charge with `of.bytes.Swap(0)` and reset `of.dirty` to an empty map.
    Without this a write racing an unlink of the same file leaks budget
    permanently.
-3. **`truncate`**, under `openFile.mu` and `FS.mu`: subtract for every map entry
-   it deletes and for the shortened tail chunk; add for the chunk it stages from
-   the cache. Charged **without waiting** — see §6.
-4. **`flushOpen`**, under `openFile.mu`: add for each entry it materialises while
-   resolving `pendingTrim`; when it replaces `of.dirty` with a fresh map,
-   release `of.bytes.Swap(0)`.
+3. **`truncate`**, under `openFile.mu` and `FS.mu`: subtract `cap` for every map
+   entry it deletes; add `cap` for the chunk it stages from the cache
+   (`fs.go:1216`, a fresh allocation of the truncated length). The **shortened
+   tail chunk contributes no delta**: `of.dirty[lastIdx] = chunk[:tail]`
+   (`fs.go:1194`) is a reslice, so `len` falls and `cap` does not, and the
+   backing array is still resident. Not subtracting there is accuracy, not
+   conservatism — the memory really is still held. (The first version of this
+   ADR subtracted for it, which was wrong for the same reason `len` accounting
+   as a whole was.) Charged **without waiting** — see §6 and Assumption 6.
+4. **`flushOpen`**, under `openFile.mu`: add `cap` for each entry it
+   materialises while resolving `pendingTrim` (`fs.go:1272`); when it replaces
+   `of.dirty` with a fresh map (`fs.go:1311`), release `of.bytes.Swap(0)`.
 5. **`unlink` and `Rename`'s victim removal**, under `FS.mu`, wherever
    `delete(f.open, id)` happens today: release `of.bytes.Swap(0)` first. This is
    the easiest site to miss and the most damaging to miss — a long-running mount
    doing create/write/delete cycles would ratchet the charge upward until it sat
    permanently at the limit with nothing left that could drain it. `Swap` makes
    the release exactly-once even if a flush is releasing concurrently.
+
+Every site is a `cap` delta or a full release, so the invariant — `of.bytes`
+equals the sum of `cap(v)` over `of.dirty` — holds once each site returns. It is
+directly assertable, and asserting it after each kind of operation is a better
+test than checking any single total.
 
 ### 3. Lock ordering
 
@@ -159,13 +230,31 @@ writer, precisely when the bucket is already the bottleneck.
 
 **On failure:** the drain's error is broadcast, and every waiter — including the
 one that ran it — abandons the wait and returns that error from `Write`. The
-NFS layer maps it through the existing `statusOf`: a `vfs.Status` passes through
-unchanged (so a diverged filesystem still reports `NFS3ERR_STALE`, a read-only
-store still reports `NFS3ERR_ROFS`), and anything else becomes `NFS3ERR_IO`. No
-data was buffered and no charge was taken, so a failed drain cannot leak budget.
-The writer does not retry the commit itself; a client on a hard mount will
-retransmit the `WRITE`, which attempts a fresh drain. Retry policy stays with
-the client, which is where NFS puts it.
+NFS layer maps it through the existing `statusOf` (`internal/nfs/wire.go:52`),
+which `errors.As`-unwraps a `vfs.Status` from anywhere in the chain and passes
+it through unchanged, and turns anything else into `NFS3ERR_IO`. Concretely,
+for the two failures worth naming:
+
+- **A read-only store reports `NFS3ERR_ROFS`.** `putChunk` returns
+  `vfs.ErrROFS` (`internal/blobfs/fs.go:960`); it propagates through
+  `flushOpen` → `flushAll` → `Sync`'s wrapping `fmt.Errorf`
+  (`internal/blobfs/commit.go:126`) and survives the unwrap.
+- **A diverged filesystem reports `NFS3ERR_IO`, not `NFS3ERR_STALE`.** Both
+  divergence paths return a bare error rather than a `vfs.Status` —
+  `commit.go:139` (`filesystem diverged: …`) and `commit.go:189` (`commit
+  conflict: another writer owns this bucket; …`) — so `statusOf` falls through
+  to `vfs.ErrIO`. The write whose drain *discovers* divergence therefore gets
+  `NFS3ERR_IO`; the *next* write gets `NFS3ERR_STALE`, from `f.mutable()`
+  (`internal/blobfs/fs.go:271-273`), because the failed drain set `f.diverged`.
+  This ADR describes that behaviour rather than changing it — `NFS3ERR_IO` for
+  "the commit failed" is defensible, and changing an error code is
+  client-visible and deserves its own decision rather than arriving inside a
+  backpressure ADR. Recorded as open in *What this does not decide*.
+
+No data was buffered and no charge was taken, so a failed drain cannot leak
+budget. The writer does not retry the commit itself; a client on a hard mount
+will retransmit the `WRITE`, which attempts a fresh drain. Retry policy stays
+with the client, which is where NFS puts it.
 
 **There is no wall-clock timeout on the stall.** The wait ends when the budget
 drains, when a drain fails, or when `ctx` is cancelled — nothing else. A timeout
@@ -179,15 +268,32 @@ honour it.
 ### 6. The bound this actually guarantees
 
 The issue's done-when says buffered bytes never exceed the configured limit. I
-am implementing that as **bounded by**, not as a hard ceiling, and saying so
-rather than quietly weakening it:
+am implementing that as **bounded by** rather than as a hard ceiling, and — per
+§2 — against buffer *capacity* rather than buffer length, which is the stricter
+of those two readings: the same `-max-dirty` admits less data than a literal
+reading would. Saying so rather than quietly moving either one:
 
 > At any moment, `DirtyBytes() <= MaxDirtyBytes + k × W`, where `k` is the
-> number of `Write` calls admitted concurrently and `W` is the most one call can
-> add: for a call of `n` bytes at offset `off` with chunk size `cs`, the number
-> of chunk indices `[off/cs, (off+n-1)/cs]` it spans, times `cs`. A single
-> writer issuing calls of at most `cs` bytes therefore sees at most
-> `MaxDirtyBytes + 2×cs`. `truncate` may add one further partial chunk per call.
+> number of `Write` calls admitted concurrently and `W` is the most capacity one
+> call can add: for a call of `n` bytes at offset `off` with chunk size `cs`,
+> the number of chunk indices `[off/cs, (off+n-1)/cs]` it spans, times `cs`. A
+> single writer issuing calls of at most `cs` bytes spans at most two indices
+> and therefore sees at most `MaxDirtyBytes + 2×cs`. `truncate` may add one
+> further partial chunk per call.
+
+`W` is `cs` per spanned index because `cs` is what the write path allocates for
+an index it has to create, whether the call puts one byte in it or a full chunk
+(§2); an index already dirty at full capacity adds nothing. The one case that
+is not exactly `cs` is an index staged at a partial length by `truncate` or
+`pendingTrim` and then grown by a write, where `append` picks the capacity and
+may round above `cs`. That is per-index allocator rounding rather than a term
+that scales with the workload, so it is left inside "bounded by" instead of
+being given a symbol.
+
+What the bound is a bound *on*: bytes of buffer capacity resident in the
+`openFile.dirty` maps. It does not cover the chunk cache (a separate pool — see
+*Consequences*), the snapshot body a commit encodes, or per-entry map and
+slice-header overhead.
 
 An exact ceiling would require reserving worst-case bytes before buffering and
 reconciling afterwards, plus restructuring `truncate`, which holds both locks and
@@ -209,10 +315,16 @@ be thousands per second:
 ### 8. Observability
 
 ```go
-// DirtyBytes reports the total bytes currently buffered by unflushed writes
-// across all open files.
+// DirtyBytes reports the memory currently held by unflushed writes across all
+// open files: the sum of cap(b) over every buffered chunk b, which is what is
+// resident, not the count of logically dirty bytes. A file with one byte
+// written into each of three chunk indices reports three chunk sizes.
 func (f *FS) DirtyBytes() int64
 ```
+
+This is the quantity §6 bounds and the quantity §2 accounts; the doc comment
+spells out the `cap`/`len` distinction because a caller reading only the name
+would assume the other one.
 
 A separate method rather than a sixth return from `Stats()`, which would ripple
 into `cmd/strata` for no benefit — at shutdown the number is zero.
@@ -223,23 +335,33 @@ caused by the feature rather than by incidental flushing.
 
 ### 9. The `vfs` contract
 
-`vfs.FS.Write` gains a doc comment saying an implementation may delay its reply
-as backpressure and must honour `ctx` while doing so. This is not a new method
-or a changed signature; it records an expectation that the NFS layer and any
-future backend both depend on. Without it, someone could reasonably wrap `Write`
-in a short per-call timeout and silently break backpressure.
+`vfs.FS.Write` carries a doc comment saying an implementation may delay its
+reply as backpressure and must honour `ctx` while doing so. This is not a new
+method or a changed signature; it records an expectation that the NFS layer and
+any future backend both depend on. Without it, someone could reasonably wrap
+`Write` in a short per-call timeout and silently break backpressure.
+
+As of this revision that comment is in the tree, on `vfs.FS.Write` in
+`internal/vfs/vfs.go` — so §9 is the one part of this ADR already satisfied,
+and nothing else here is implemented. It is cited by symbol rather than by line
+number, because line numbers are not stable.
 
 ## Assumptions
 
 Recorded because the issue did not specify them.
 
-1. **"Never exceed" is read as "bounded by".** §6. This is the largest
-   interpretive step in this ADR and the one most worth pushing back on.
+1. **"Never exceed" is read as "bounded by", and "buffered bytes" as buffered
+   *capacity*.** §6 and §2. These are the two largest interpretive steps in this
+   ADR and the ones most worth pushing back on, separately: the first loosens
+   the issue's wording, the second tightens it, and neither is stated by the
+   issue.
 2. **256 MiB default, unmeasured.** Taken from the issue. I cannot run or
    measure this server. Note that it stacks with `-cache` (default 256 MiB), so
    the out-of-the-box ceiling for these two pools together is ~512 MiB plus
-   per-chunk overhead; an operator sizing a small host should turn one of them
-   down.
+   per-entry overhead; an operator sizing a small host should turn one of them
+   down. With §2's `cap` accounting the dirty half of that figure is a real
+   resident bound rather than a logical one — what stays uncounted is map and
+   slice-header overhead, not unused buffer capacity.
 3. **No timeout.** §5. The issue asked only that the commit path make progress.
 4. **Fairness is not guaranteed.** `sync.Cond.Broadcast` wakes everyone and the
    winner is whoever is scheduled first, so a writer can in principle be starved
@@ -251,12 +373,28 @@ Recorded because the issue did not specify them.
 6. **`truncate` and the `pendingTrim` path charge without waiting** and may
    therefore push the charge above the limit. They hold both locks, so they
    cannot wait; and a truncate is bounded by client SETATTR traffic rather than
-   by write throughput.
+   by write throughput. Note also that shrinking a file does not necessarily
+   lower the charge: a tail chunk shortened in place is a reslice, and the
+   backing array stays resident (§2, site 3).
 7. **Stalled writes hold RPC slots.** Once `maxInFlight` (64) requests on a
    connection are stalled writes, other operations on that connection queue
    behind them. That is intended backpressure for writes, but it also delays
    reads on the same connection. Fixing it would need per-procedure concurrency
    classes; out of scope, recorded as a known consequence.
+
+   The arithmetic is more optimistic than "64 stalled writes" suggests, because
+   the slots do not correspond one-to-one with distinct client `WRITE`s. In the
+   design this ADR and ADR 0002 jointly describe — ADR 0002 is not implemented
+   yet, so this is a property of the design rather than of today's running code
+   — `WRITE` is classified idempotent (ADR 0002 §4) and so is neither cached
+   nor dropped as a duplicate. A client that times out on a stalled write and
+   retransmits it therefore gets a *second* handler that also stalls, taking
+   another of the 64 slots (`internal/sunrpc/rpc.go:96` sets the bound,
+   `rpc.go:132` enforces it). Under sustained backpressure the in-flight window
+   fills with retransmissions of writes already waiting, so the read stall
+   above arrives sooner than a per-`WRITE` count would predict. It is not a
+   deadlock — the drain completes and releases every waiter, retransmissions
+   included — but the effective window is narrower than 64 distinct writes.
 
 ## Consequences
 
@@ -284,6 +422,28 @@ single pool over both needs a policy for which one yields under pressure, and
 getting that wrong turns a cache-pressure event into a write stall. That policy
 is a phase-1 design question with the block cache in front of it, not a question
 to answer speculatively now.
+
+## What this does not decide
+
+- **Whether `commitLocked` should return `vfs.Status`-typed errors.** §5
+  records that a drain which discovers divergence surfaces as `NFS3ERR_IO`
+  while the *next* write surfaces as `NFS3ERR_STALE` — two answers for what a
+  client experiences as one condition. Wrapping the two divergence errors
+  (`commit.go:139`, `commit.go:189`) in `vfs.ErrStale` would make both report
+  `NFS3ERR_STALE`, and is plausibly the right end state. It is left open
+  deliberately: it changes a status code a client can observe, which is a
+  decision of its own and should not arrive inside a backpressure ADR. What
+  would settle it: deciding what a client should do differently on each code —
+  `NFS3ERR_STALE` invites a remount, `NFS3ERR_IO` invites a retry, and
+  divergence is only recoverable by the first. Whoever takes it up must keep
+  `NFS3ERR_IO` for a commit that fails for any *other* reason, since today both
+  leave `Sync` through the same return.
+- **Whether the dirty budget and the chunk cache draw on one pool.** Left open
+  with reasons under *Consequences*; the block cache of `docs/DESIGN.md` §14,
+  step 1 is what would settle it.
+- **Per-procedure concurrency classes** for the per-connection in-flight
+  window. Out of scope here; Assumption 7 records what their absence costs
+  under sustained backpressure.
 
 ## References
 
