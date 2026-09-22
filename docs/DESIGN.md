@@ -8,6 +8,13 @@ replaces it and why.
 NFS File Server Appliance*, USENIX Winter 1994 (NetApp TR-3002). Section
 numbers below refer to that paper.
 
+**Companion:** [nfsv4-assessment.md](nfsv4-assessment.md) assesses what serving
+NFSv4.2 instead of NFSv3 would take, and recommends against doing it before this
+design lands. It is an assessment, not a commitment, and this document stays
+normative — but two of its conclusions are already binding here: the `change`
+field in section 4's inode record, and the optional interfaces in
+`internal/vfs`.
+
 ---
 
 ## 1. What WAFL actually does
@@ -231,7 +238,7 @@ verifying a block's hash means fetching all of it, so the largest chunk is the
 read amplification of the smallest random read.
 
 WAFL stores very small files in the inode itself in place of block pointers
-(§3.1). We keep that: up to 160 bytes of file data, or a symlink target, live
+(§3.1). We keep that: up to 152 bytes of file data, or a symlink target, live
 inline, so a small file costs zero extra objects.
 
 ### Indirect blocks
@@ -270,8 +277,8 @@ root hash and therefore always deduplicates:
    smallest *d* ≥ 1 with *n* ≤ 1638^*d*, and `root` names the single block of
    level *d*−1 — unless rule 3 applies.
 3. **`depth` 0 is the small-file case.** Either the data is inline (`size` ≤
-   160) and `root` is the zero hash, or the file is exactly one stored chunk and
-   `root` is that chunk's hash. A file over 160 bytes that is entirely a hole is
+   152) and `root` is the zero hash, or the file is exactly one stored chunk and
+   `root` is that chunk's hash. A file over 152 bytes that is entirely a hole is
    depth 1 with a single hole entry.
 4. **Spans sum to `size`.** At every level the entries' spans sum to their
    parent's span, and at the root to the inode's `size`. Extending a file by
@@ -309,7 +316,8 @@ offset size field
 36     24   atime/mtime/ctime, nanoseconds
 60     4    depth           levels of indirection below this inode
 64     32   root            hash of this file's top block
-96     160  inline          file data or symlink target when it fits
+96     8    change          version stamp; changes whenever this inode does
+104    152  inline          file data or symlink target when it fits
 ```
 
 `used` is in bytes rather than blocks because there is no fixed block to count
@@ -321,6 +329,43 @@ to walk without consulting anything else, and a file grows a level by writing
 one new top block whose single entry is the old root. It is also *authoritative*
 rather than a cross-check — with variable-length leaves the number of leaves
 depends on the data, so `depth` cannot be recomputed from `size`.
+
+`change` is here for a protocol this server does not yet speak, and is the one
+field in the record that is far cheaper to allocate now than to add later.
+**Nothing reads it today** — NFSv3 has no use for it — so it needs a reason on
+the record rather than in someone's memory, or it will be reclaimed as dead
+space by the next person to want eight bytes.
+
+NFSv4 requires a per-object *change attribute*: a value that differs whenever
+the object's data or metadata changes, which clients use for cache validation in
+place of comparing timestamps. A timestamp cannot stand in for it here, because
+`ctime` comes from the wall clock and two modifications inside one clock tick
+would be indistinguishable. The value is allocated from a single monotonically
+increasing counter in `fsinfo`, taken on every mutation of any inode — one
+counter rather than one per inode, so a directory gets a change stamp for free,
+and a counter rather than a hash of the record, so that a server can advertise
+`NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR` and a client may assume the value only ever
+rises. Mutations made after the last consistency point reuse their numbers after
+a crash, which is exactly the window in which the data they describe is also
+lost, so the two stay consistent.
+
+**It is written from the first implementation, not reserved as zeros.** A
+reserved field is deleted as unused and is wrong the first time it is read;
+writing it costs one counter increment on a path that is already rewriting the
+record.
+
+The eight bytes come out of the inline area, which drops from 160 to 152. The
+record cannot grow instead: 256 bytes is what puts inode *n* at offset
+*n* × 256 and fits 256 inodes in one metadata block. The inline threshold was
+always this project's number rather than a derived one — the WAFL paper sets
+none — so moving it costs nothing but the handful of files between 153 and 160
+bytes, which gain one object each. ADR 0001 mentions the old threshold in
+passing ("every file between 161 bytes and one chunk"); it predates this and is
+not edited, per the append-only ADR convention. This document is normative.
+
+[nfsv4-assessment.md](nfsv4-assessment.md) records why this field is here now
+rather than when an NFSv4 server is actually written, and what else such a
+server would need.
 
 ### Directories
 
