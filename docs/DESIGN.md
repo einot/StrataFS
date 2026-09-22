@@ -77,16 +77,25 @@ better fit here than it was on the hardware it was written for.
 The target is an on-premise Dell ECS cluster (ObjectScale is its renamed next
 release). "S3-compatible" is a spectrum, and the behaviour this design leans on
 hardest — conditional writes on PUT, which make the consistency point atomic —
-is exactly the kind of thing implementations differ on. Dell documents ECS as
-supporting `If-Match` and `If-None-Match`, but `strata -check` probes a live
-endpoint for every behaviour the filesystem needs, and should be run against any
-new cluster before trusting it.
+is exactly the kind of thing implementations differ on.
 
-If conditional writes turn out to be unavailable, the fallback is not to give up
+**This has now been confirmed on the target cluster.** `strata -check` was run
+against a live ECS endpoint and passed all ten probes, including the one that
+matters: a PUT conditioned on a superseded ETag is *rejected*. The
+compare-and-swap this design commits through is therefore sound there, and a
+second writer is detected rather than silently overwriting the first. The
+SigV4 signer was accepted too, which makes ECS the third independent
+implementation it has been validated against, after AWS's published test vector
+and MinIO.
+
+That result is specific to one cluster, so `-check` remains the thing to run
+against any new endpoint rather than assuming this generalises.
+
+Where conditional writes are unavailable, the fallback is not to give up
 atomicity — the root swap is still a single object PUT, so readers still see one
-state or the other — but to give up *detection* of a second writer. In that case
-the filesystem must be operated single-writer by policy, and the design should
-say so rather than pretend the guarantee holds.
+state or the other — but to give up *detection* of a second writer. Such a
+deployment must be operated single-writer by policy, and should say so rather
+than pretend the guarantee holds.
 
 The one thing object storage takes away is cheap small random writes. A 4 KB
 block is the wrong unit when each access is an HTTPS round trip, so block sizes
