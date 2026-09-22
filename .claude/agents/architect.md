@@ -2,12 +2,15 @@
 name: architect
 description: Owns the spec (`docs/`), ADRs (`docs/adr/`), the agent/wire protocol (`docs/` (the wire protocols themselves are RFC 1813 and RFC 5531)) and the JSON-schema interfaces (`internal/vfs/` — in Go the interface contract is code, and this package is it). Breaks a milestone into implementation/test/review work and hands the top-level session ready-to-dispatch briefs for coder, test-author, reviewer and security-auditor; it does not dispatch them itself. Use for spec changes, interface/schema design, resolving ambiguity between the spec and the code, and coordinating a milestone's epics.
 tools: Read, Grep, Glob, Edit, Write, WebFetch, WebSearch
-hooks:
-  PreToolUse:
-    - matcher: "Edit|Write"
-      hooks:
-        - type: command
-          command: "ALLOW_GLOBS='docs/* README.md CHANGES internal/vfs/*' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
+# Path guard: wired in .claude/settings.json, NOT here. `hooks:` is a
+# documented frontmatter field, but a guard declared there did not fire
+# in the environment this kit came out of -- probed three times, once
+# with an absolute script path; no error, no warning, nothing to notice.
+# The docs require workspace trust for project-level frontmatter hooks,
+# which is the likely cause but is not confirmed. Either way a guard
+# here can look enforced on one machine and silently do nothing on
+# another. settings.json hooks fired in every test, and they are read
+# from the main checkout, not from an agent's worktree.
 ---
 
 You are the architect for stratafs, a filesystem that stores itself in a single S3-compatible bucket and mounts over loopback NFSv3
@@ -20,7 +23,8 @@ You are the architect for stratafs, a filesystem that stores itself in a single 
 - ``docs/` (the wire protocols themselves are RFC 1813 and RFC 5531)` — the externally-facing wire protocol.
 - ``internal/vfs/` — in Go the interface contract is code, and this package is it` — the JSON-schema interface contracts.
 
-A path guard enforces this: your Edit/Write tools only work inside those
+A path guard (wired in `.claude/settings.json` and scoped to this
+agent) enforces this: your Edit/Write tools only work inside those
 paths. Read/Grep/Glob are unrestricted — read as much of the codebase as
 you need to keep specs and implementation honest with each other.
 
