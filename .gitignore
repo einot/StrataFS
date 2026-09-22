@@ -9,3 +9,23 @@
 
 # macOS
 .DS_Store
+
+# Credentials and secrets.
+#
+# These are belt and braces, not the defence. Credentials belong outside the
+# repository entirely, because .gitignore does nothing for a file that is
+# already tracked, and nothing at all for a value pasted into a commit message
+# or a chat. See the pre-commit hook for the case these patterns miss.
+.env
+.env.*
+*.env
+.envrc
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+credentials
+.aws/
