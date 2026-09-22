@@ -50,6 +50,8 @@ func run() error {
 		interval  = flag.Duration("commit-interval", 5*time.Second, "how often to commit the namespace")
 		retention = flag.Int("snapshot-retention", 10, "superseded namespace snapshots to keep (-1 keeps all)")
 
+		verifyChunks = flag.Bool("verify-chunks", true, "verify each chunk fetched from the bucket against the hash that names it")
+
 		uidFlag = flag.Int("uid", -1, "owner uid for a new filesystem (default: current user)")
 		gidFlag = flag.Int("gid", -1, "owner gid for a new filesystem (default: current user)")
 
@@ -104,7 +106,9 @@ func run() error {
 		OwnerGID:          gid,
 		ReadOnly:          *readOnly,
 		SnapshotRetention: *retention,
-		Log:               log,
+
+		SkipChunkVerification: !*verifyChunks,
+		Log:                   log,
 	})
 	if err != nil {
 		return err
