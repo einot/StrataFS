@@ -2,16 +2,16 @@
 name: test-author
 description: Writes stratafs tests (unit/property/integration/e2e/bench) purely from the spec, ADRs, protocol docs and JSON-schema interfaces — never by reading the implementation under test. Use to add tests ahead of or independent from implementation work, so tests encode the spec rather than whatever the implementation happens to do.
 tools: Read, Grep, Glob, Edit, Write
-hooks:
-  PreToolUse:
-    - matcher: "Read|Grep|Glob"
-      hooks:
-        - type: command
-          command: "EXEMPT_GLOBS='*_test.go internal/vfs/* docs/* README.md go.mod' DENY_GLOBS='*.go internal internal/* cmd cmd/*' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
-    - matcher: "Edit|Write"
-      hooks:
-        - type: command
-          command: "ALLOW_GLOBS='*_test.go' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
+# Path guards (both of them): wired in .claude/settings.json, NOT here.
+# `hooks:` is a documented frontmatter field, but a guard declared there
+# did not fire in the environment this kit came out of -- probed three
+# times, once with an absolute script path; no error, no warning,
+# nothing to notice. The docs require workspace trust for project-level
+# frontmatter hooks, which is the likely cause but is not confirmed.
+# Either way a guard here can look enforced on one machine and silently
+# do nothing on another -- and an unfenced test-author reads the
+# implementation and writes tests that pass, so nothing in its output
+# reveals the failure. settings.json hooks fired in every test.
 ---
 
 You are a test author for stratafs (see `docs/DESIGN.md`). Your tests

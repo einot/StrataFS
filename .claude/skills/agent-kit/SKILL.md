@@ -1,26 +1,32 @@
 ---
 name: agent-kit
-description: Bootstrap a delegation-based multi-agent orchestration system in a project — architect, coder, test-author, reviewer, security-auditor and supervisor, the shared path-guard hook, and the CLAUDE.md governance rules that make the whole thing hold together. Use when starting a new development project that should be built by delegated agents rather than by the session directly, or when auditing an existing setup against the reference design.
+description: Bootstrap a delegation-based multi-agent orchestration system in a project — architect, coder, test-author, reviewer, security-auditor and supervisor, the shared path-guard and bash-guard hooks, the settings.json wiring that actually makes those guards fire, and the CLAUDE.md governance rules that hold the whole thing together. Use when starting a new development project that should be built by delegated agents rather than by the session directly, or when auditing an existing setup against the reference design.
 ---
 
 # agent-kit
 
-Six agents, one hook, and a page of governance rules. Together they make a
-top-level session into a project manager that delegates all work and
+Six agents, two hooks, and a page of governance rules. Together they make
+a top-level session into a project manager that delegates all work and
 verifies what comes back, instead of an editor that does everything
 itself.
 
 Each agent also ships as its own single-file skill, so you can install or
 repair one without the rest:
 
-| Skill | Agent | Writes? |
-| --- | --- | --- |
-| `agent-kit-architect` | `architect` | docs + schemas only |
-| `agent-kit-coder` | `coder` | implementation only, in a worktree |
-| `agent-kit-test-author` | `test-author` | tests only, cannot read the code |
-| `agent-kit-reviewer` | `reviewer` | no |
-| `agent-kit-security-auditor` | `security-auditor` | no |
-| `agent-kit-supervisor` | `supervisor` | no |
+| Skill | Agent | Writes? | Bash? |
+| --- | --- | --- | --- |
+| `agent-kit-architect` | `architect` | docs + schemas only | no |
+| `agent-kit-coder` | `coder` | implementation only, in a worktree | yes, unfenced |
+| `agent-kit-test-author` | `test-author` | tests only, cannot read the code | no |
+| `agent-kit-reviewer` | `reviewer` | no | no |
+| `agent-kit-security-auditor` | `security-auditor` | no | optional, fenced |
+| `agent-kit-supervisor` | `supervisor` | no | no |
+
+The two hooks are real files in this bundle, at
+`skills/agent-kit/hooks/path-guard.sh` and
+`skills/agent-kit/hooks/bash-guard.sh`. Every skill that needs a guard
+points at those same two files rather than carrying its own copy, so a
+fix lands once.
 
 ## The design in one page
 
@@ -35,10 +41,19 @@ implementation, so its tests encode the spec rather than the code's
 current behaviour. This is the single highest-value constraint in the kit
 and the easiest one to accidentally break — see `agent-kit-test-author`.
 
-**Enforcement, not instruction.** The boundaries above are hooks
-(`.claude/hooks/path-guard.sh`), not paragraphs. Where enforcement is
-impossible — the guard cannot inspect Bash, and `coder` needs Bash to run
-tests — the prompt says so plainly and `supervisor` covers the gap.
+**Enforcement, not instruction.** The boundaries above are `PreToolUse`
+hooks, not paragraphs. `path-guard.sh` polices which paths an agent may
+read or write; `bash-guard.sh` is a default-deny fence over the Bash tool
+for an agent that needs to run read-only inspection tooling and nothing
+else. Where enforcement is impossible — `coder` needs an unfenced Bash to
+run the test suite — the prompt says so plainly and `supervisor` covers
+the gap.
+
+**Guards are only real once they have fired.** Hook configuration lives in
+`.claude/settings.json`, never in an agent file's `hooks:` frontmatter,
+and the only evidence a guard works is a real dispatch that a real policy
+refused. See *Wire the guards* below; this is the part of the kit most
+likely to look installed while doing nothing at all.
 
 **Plans separated from dispatch.** `architect` has no `Agent` tool. It
 settles the interface and hands back ready-to-dispatch briefs; the
@@ -47,11 +62,12 @@ one hop from the human instead of relayed through another agent, and the
 layer deciding whether to trust a worker's report is the layer that can
 run the tests and read the git state.
 
-**Verification of the workers themselves.** Every dispatch to a
-write-capable agent is paired with a `supervisor` review that receives the
-literal brief and the worker's own report, and checks both against the
-files on disk. Any finding stops everything and goes to the human
-verbatim.
+**Verification of the workers themselves.** Every dispatch to an agent
+that can write or execute is paired with a `supervisor` review. It
+receives the literal brief, the worker's own report, and the `git status`
+and `git diff` for that dispatch — collected by the session, because
+`supervisor` has no Bash and keeps it that way. Any finding goes to the
+human verbatim, and stops everything unless every entry is `unverified`.
 
 ```text
                   ┌──────────────── top-level session (PM only) ───────────────┐
@@ -62,156 +78,151 @@ verbatim.
                  architect     test-author        coder      reviewer
                  docs+schemas  tests only      impl only     security-auditor
                       │              │              │        (read-only, JSON)
-                      └──────────────┴──────────────┘             │
-                          every dispatch also ──▶ supervisor ──▶ findings
-                                                        │
-                                  any finding ──▶ verbatim to human, STOP
+                      └──────────────┴──────────────┴──────────────┘
+                     every dispatch that can write or execute
+                                  ──▶ supervisor ──▶ findings
+                                            │
+                        any finding ──▶ verbatim to human, STOP
 ```
 
 ## Install
 
-Work through this in order; steps 2–4 are the per-agent skills.
+Work through this in order. Steps 3–5 are the per-agent skills.
 
-### 1. Shared path-guard hook
+### 1. Copy the shared hooks
 
-Write to `.claude/hooks/path-guard.sh`, then `chmod +x` it. Requires
-`bash` and `jq`. Three agents wire it in with different env vars rather
-than duplicating the logic.
+Both hooks live in this bundle. Copy them into the project and make them
+executable — they are not templates and need no editing:
 
-````bash
-#!/usr/bin/env bash
-# Generic PreToolUse path guard shared by this project's subagents
-# (.claude/agents/*.md). A subagent wires this in via its own `hooks:`
-# frontmatter, setting env vars inline on the command line to parametrize
-# the same script per-agent instead of duplicating the logic per agent.
-#
-# Env vars (space-separated glob lists; `[[ str == pattern ]]` semantics,
-# so a bare `*` in a pattern matches across `/` too — "docs/*" matches
-# "docs/spec/overview.md"):
-#
-#   EXEMPT_GLOBS  - path matching any of these is always ALLOWED,
-#                   checked before DENY_GLOBS/ALLOW_GLOBS.
-#   DENY_GLOBS    - path matching any of these (and not exempt) is DENIED.
-#   ALLOW_GLOBS   - if set, a path that is not exempt/already-denied must
-#                   match at least one of these or it is DENIED
-#                   (allowlist mode). Leave unset for denylist-only mode.
-#
-# Reads the PreToolUse JSON payload on stdin (see
-# https://code.claude.com/docs/en/hooks) and checks tool_input.file_path,
-# falling back to tool_input.path (Grep/Glob).
-#
-# Unscoped content tools are DENIED for guarded agents. Grep and Glob take
-# an optional `path`; without one they search the whole project, and
-# Grep's `output_mode: content` then returns matching lines from files the
-# guard is supposed to hide. Passing such a call through makes the guard
-# advisory rather than enforced. A guarded agent must therefore name an
-# in-scope path it wants to search. The same applies to a `path` that
-# resolves to the project root itself.
-#
-# Caveat (documented, not a bug): this only intercepts the tool calls named
-# in the subagent's own `matcher` (Edit|Write or Read|Grep|Glob). It does
-# NOT inspect Bash commands, so an agent that also has the Bash tool could
-# still read or write a guarded path via a shell command. Keep Bash off
-# any agent whose guard must be a hard boundary, or treat the guard as a
-# strong default rather than a sandbox for agents that keep Bash.
-#
-# Requires: bash, jq.
+```bash
+mkdir -p .claude/hooks
+cp path/to/agent-kit-skills/skills/agent-kit/hooks/path-guard.sh .claude/hooks/
+cp path/to/agent-kit-skills/skills/agent-kit/hooks/bash-guard.sh .claude/hooks/
+chmod +x .claude/hooks/path-guard.sh .claude/hooks/bash-guard.sh
+bash -n .claude/hooks/path-guard.sh && bash -n .claude/hooks/bash-guard.sh
+```
 
-set -f -e -u -o pipefail
+Requires `bash` and `jq` on the machine running the session; both hooks
+parse their JSON payload with `jq`.
 
-input="$(cat)"
-tool_name="$(printf '%s' "$input" | jq -r '.tool_name // empty')"
-file_path="$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.path // empty')"
-cwd="$(printf '%s' "$input" | jq -r '.cwd // empty')"
+`bash-guard.sh` is only needed if you give `security-auditor` a Bash tool
+(see `agent-kit-security-auditor`). Copy it anyway — an inert hook costs
+nothing, and the alternative is discovering it is missing at the moment
+you wire it.
 
-# A guard is in force for this agent if it constrains paths at all.
-guarded=0
-if [[ -n "${DENY_GLOBS:-}" || -n "${ALLOW_GLOBS:-}" ]]; then
-  guarded=1
-fi
+Read the header comment of each before adapting anything. Both carry the
+reasoning behind rules that look arbitrary until you know what broke.
 
-# Tools whose RESULTS can disclose the contents or existence of files
-# anywhere under the search root, not just at one named path.
-content_tool=0
-case "$tool_name" in
-  Read | Grep | Glob) content_tool=1 ;;
-esac
+### 2. Wire the guards in `.claude/settings.json`
 
-deny() {
-  local reason="$1"
-  jq -n --arg reason "$reason" '{
-    hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      permissionDecision: "deny",
-      permissionDecisionReason: $reason
-    }
-  }'
-  exit 2
+**This is the step that makes the difference between a guard and a
+decoration.** Read all four points before writing the file.
+
+**Hooks go in `.claude/settings.json`, never in an agent file's
+frontmatter.** `hooks:` is a documented frontmatter field, but a guard
+declared there did not fire in the environment this kit came out of —
+probed three times, including with an absolute script path and with
+`${CLAUDE_PROJECT_DIR}`. No error, no warning, nothing to notice; the
+agent simply ran unfenced. The best-supported explanation is the
+documented requirement that a project-level agent's frontmatter hooks
+take effect only once the workspace trust dialog has been accepted for
+the folder containing the agent file, which a headless session never
+does — but that has not been confirmed directly, and it does not matter
+much: whether a frontmatter guard fires depends on environment state that
+is invisible from the repository, so it can look enforced on one machine
+and silently do nothing on another. `settings.json` hooks fired in every
+test.
+
+**Settings hooks are session-wide, so every policy needs
+`SCOPE_AGENT_TYPES`.** A hook wired in `settings.json` sees tool calls
+from every agent *and* from the top-level session, not just the agent the
+policy was written for. `SCOPE_AGENT_TYPES` names the agent types a
+policy applies to, matched against the payload's `agent_type`. One entry
+carries one policy, because the env vars come from that entry's own
+command line — two agents needing different globs need two entries. Two
+entries whose scopes overlap both run, and the stricter denial wins.
+
+The scoping is **fail-open by design**: an absent or unlisted
+`agent_type` means "not my business", not "deny" — a top-level call
+carries no `agent_type` at all. It is routing, not a check, so an exit 0
+for an out-of-scope caller is not approval.
+
+**Hook configuration is read from the main checkout, not from a
+worktree.** A worktree-isolated agent such as `coder` is fenced by
+whatever the main checkout's `.claude/settings.json` says at dispatch
+time; the copy inside its worktree is inert. This was established by
+experiment: with a policy removed from the main checkout only, while the
+worktree copy still carried it, the write was *not* denied. So to test a
+policy change, put the change in the main checkout and dispatch a probe
+right after.
+
+**A config test is not a fired hook.** Pinning the contents of
+`settings.json` in a test is worth doing, but it proves only that the
+file says what you meant. The only evidence a guard works is a real
+dispatch attempting an operation the policy must refuse, and a refusal
+whose text comes from the guard. If a command that should be denied
+simply succeeds, treat that as evidence the fence is missing.
+
+The wiring, with the kit's default scopes:
+
+````json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCOPE_AGENT_TYPES='architect' ALLOW_GLOBS='{{DOC_GLOBS}}' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCOPE_AGENT_TYPES='coder' DENY_GLOBS='{{DENY_GLOBS}}' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCOPE_AGENT_TYPES='test-author' ALLOW_GLOBS='{{TEST_WRITE_ALLOW_GLOBS}}' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCOPE_AGENT_TYPES='test-author' EXEMPT_GLOBS='{{TEST_READ_EXEMPT_GLOBS}}' DENY_GLOBS='{{IMPL_DENY_GLOBS}}' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCOPE_AGENT_TYPES='security-auditor' ALLOW_CMDS='{{ALLOW_CMDS}}' ALLOW_GIT_SUBCMDS='{{ALLOW_GIT_SUBCMDS}}' ${CLAUDE_PROJECT_DIR}/.claude/hooks/bash-guard.sh"
+          }
+        ]
+      }
+    ]
+  }
 }
-
-# No path at all. For a guarded agent this is an unscoped Grep/Glob over
-# the whole project, which can return guarded content; deny it and say how
-# to proceed. Any other tool shape passes through as before.
-if [[ -z "$file_path" ]]; then
-  if (( guarded && content_tool )); then
-    deny "path guard: an unscoped ${tool_name} would search the whole project and can return files this agent may not read. Re-run it with an explicit in-scope 'path'."
-  fi
-  exit 0
-fi
-
-# Normalize to a path relative to the project/worktree root when possible.
-# Note the exact-match arm: without it, a path equal to the root itself
-# falls through with `rel` still absolute and matches no glob at all.
-project_dir="${CLAUDE_PROJECT_DIR:-$cwd}"
-rel="$file_path"
-for base in "$cwd" "$project_dir"; do
-  [[ -z "$base" ]] && continue
-  base="${base%/}"
-  if [[ "$file_path" == "$base" ]]; then
-    rel="."
-    break
-  elif [[ "$file_path" == "$base"/* ]]; then
-    rel="${file_path#"$base"/}"
-    break
-  fi
-done
-
-# The path resolved to the project root: same exposure as no path at all.
-if [[ "$rel" == "." || "$rel" == "./" || -z "$rel" ]]; then
-  if (( guarded && content_tool )); then
-    deny "path guard: a project-root ${tool_name} would search every file and can return files this agent may not read. Re-run it with an explicit in-scope 'path'."
-  fi
-  exit 0
-fi
-
-matches_any() {
-  local path="$1"; shift
-  local pattern
-  for pattern in "$@"; do
-    [[ -z "$pattern" ]] && continue
-    if [[ "$path" == $pattern ]]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-if [[ -n "${EXEMPT_GLOBS:-}" ]] && matches_any "$rel" $EXEMPT_GLOBS; then
-  exit 0
-fi
-
-if [[ -n "${DENY_GLOBS:-}" ]] && matches_any "$rel" $DENY_GLOBS; then
-  deny "path guard: '$rel' is out of scope for this agent (matched DENY_GLOBS)."
-fi
-
-if [[ -n "${ALLOW_GLOBS:-}" ]] && ! matches_any "$rel" $ALLOW_GLOBS; then
-  deny "path guard: '$rel' is out of scope for this agent (did not match ALLOW_GLOBS)."
-fi
-
-exit 0
 ````
 
-### 2. The write-capable agents
+Each per-agent skill repeats its own entry and explains its globs. The
+last entry is only needed if `security-auditor` has Bash.
+
+### 3. The write-capable agents
 
 Install in this order — each depends on the previous one's boundary being
 in place:
@@ -222,25 +233,28 @@ in place:
    guard properly; it is the one guard with a real bypass history.
 3. `agent-kit-coder` — implements against both.
 
-### 3. The read-only agents
+### 4. The read-only agents
 
 4. `agent-kit-reviewer`
 5. `agent-kit-security-auditor`
 
 Both emit JSON-only findings so the session can act on them mechanically.
-Neither needs `supervisor` pairing: with no write access they are
-structurally incapable of an unauthorized action.
+`reviewer` never needs `supervisor` pairing: with no write access and no
+Bash it is structurally incapable of an unauthorized action.
+`security-auditor` is in the same position **only while it has no Bash**
+— give it the fenced Bash and it joins the paired set. See that skill, and
+the supervisor protocol, for why.
 
-### 4. The watchdog
+### 5. The watchdog
 
 6. `agent-kit-supervisor` — **plus its session-side protocol**, which that
    skill spells out. The agent without the protocol is a report nobody
    acts on.
 
-### 5. Governance rules in `CLAUDE.md`
+### 6. Governance rules in `CLAUDE.md`
 
-The agents constrain the subagents. These constrain the session. Add them
-adjusted to the project (the supervisor section lives in
+The agent files constrain the subagents. These constrain the session. Add
+them adjusted to the project (the supervisor section lives in
 `agent-kit-supervisor`):
 
 ````markdown
@@ -260,12 +274,15 @@ is yours.
 **No exception for "mechanical" edits.** Every test file change goes
 through `test-author`, full stop — including a one-line formatting fix, a
 lint-only rename, or any other change that looks too small or too
-obviously safe to bother delegating. The same holds for `coder`'s and
-`architect`'s domains: "it's tiny" is never a reason to touch code, tests,
-or specs/schemas/ADRs directly. The top-level session's own tools stay
-limited to reconciling already-delegated work (applying a worker's own
-diff/commit, resolving a merge conflict) and to editing `CLAUDE.md`, agent
-definitions, and non-code governance docs it owns directly.
+obviously safe to bother delegating. `test-author` has no Bash and so
+cannot run a formatter itself; that means making the edit by hand with
+Edit until the content matches, not an excuse to make the edit directly
+instead. The same holds for `coder`'s and `architect`'s domains: "it's
+tiny" is never a reason to touch code, tests, or specs/schemas/ADRs
+directly. The top-level session's own tools stay limited to reconciling
+already-delegated work (applying a worker's own diff/commit, resolving a
+merge conflict) and to editing `CLAUDE.md`, agent definitions, and
+non-code governance docs it owns directly.
 
 **Agent configuration.** The top-level session may alter agent
 configuration — `.claude/agents/*.md`, including which model backs an
@@ -275,6 +292,20 @@ because the change would make the job in front of it easier or faster. If
 an agent's configuration looks like it is blocking legitimate work, say so
 and let the user decide; changing it unasked defeats the point of having
 the constraint.
+
+**Agent guards.** The subagent path and Bash guards live in
+`.claude/settings.json`, scoped per agent with `SCOPE_AGENT_TYPES`, and
+nowhere else. Never declare them in an agent file's `hooks:` frontmatter:
+a guard declared there did not fire in this environment (three probes),
+most likely because project-level frontmatter hooks require the workspace
+trust dialog to have been accepted, which a headless session never does.
+Hook configuration is read from the *main checkout*, not from a
+worktree-isolated agent's checkout — so a `coder` dispatch is fenced by
+whatever the main checkout's `settings.json` says at that moment, and the
+copy in its worktree is inert. Verify any guard change the only way that
+counts: put it in the main checkout, dispatch a real agent, and have it
+attempt an operation the policy must refuse. A test that pins the wiring
+is worth having, but a passing test is not a fired hook.
 
 ## Branch protection
 
@@ -317,7 +348,7 @@ commands so a failing one is actually visible — piping each to `tail`
 hides its exit status and will report a red gate as green.
 ````
 
-### 6. Optional: a pre-1.0 standing order
+### 7. Optional: a pre-1.0 standing order
 
 Useful while a project is young and the delegation overhead outweighs the
 back-and-forth. It removes the *waiting*, not the *telling*:
@@ -342,28 +373,46 @@ backdoor, secret exfiltration or a disabled safety check always stops.
 
 ## Verify the whole system
 
-Before trusting it with real work, run this once:
+Before trusting it with real work, run this once. Every step that says
+"dispatch" means a real subagent dispatch — nothing here can be checked by
+reading a config file.
 
-1. `bash -n .claude/hooks/path-guard.sh`; the file is executable; `jq` is
+1. `bash -n` passes on both hooks, both are executable, and `jq` is
    installed.
-2. `coder` is denied an edit to a test file and to a spec file.
+2. `coder` is denied an edit to a test file and to a spec file, and the
+   refusal text comes from the path guard. A platform message about
+   "allowed working directories" instead means the guard never ran.
 3. `test-author` is denied an unscoped `Grep`, a project-root `Grep`, a
    `Grep` at the *parent* of an implementation directory, and a `Read` of
    an implementation file.
 4. `architect` is denied a write outside its doc/schema allowlist, and has
    no `Agent` tool.
-5. `reviewer`, `security-auditor` and `supervisor` each return output that
-   parses with `jq`.
-6. `supervisor` catches a worker that touched one file beyond its brief.
+5. If `security-auditor` has Bash: it is denied a command whose name is
+   absent from `ALLOW_CMDS`, and the denial says `bash guard:`.
+6. `reviewer`, `security-auditor` and `supervisor` each return a final
+   message whose **last JSON object** parses with `jq`. Extract it rather
+   than parsing the whole message: in testing, agents prefixed the JSON
+   with a paragraph often enough that a whole-message parse is not a
+   contract you can build on.
+7. `supervisor` catches a worker that touched one file beyond its brief —
+   make it a change grepping cannot find, such as a deletion — *and* stays
+   quiet when given an honest report of an in-scope change. Give it the
+   git evidence; without it, the scope question is guesswork.
+8. The top-level session is *not* affected by any of the above — the
+   scoping is meant to leave it alone.
 
 A guard that has never been tested against its own bypass is a guard you
-are only assuming you have.
+are only assuming you have. The guard in this kit was reviewed nine times
+before anyone noticed it had never once been invoked.
 
 ## What this kit does not give you
 
-- **A sandbox.** `coder` keeps Bash, and the guard cannot inspect shell
-  commands. The boundary is a strong default plus `supervisor`, not
-  containment.
+- **A sandbox.** `coder` keeps an unfenced Bash, and `path-guard.sh`
+  cannot inspect shell commands. For `coder` the boundary is a strong
+  default plus `supervisor`, not containment. `bash-guard.sh` is a real
+  fence, but it is a shell script reasoning about shell syntax, not an
+  OS-enforced boundary — it is why `security-auditor` gets paired with
+  `supervisor` once it has Bash.
 - **Protection against a bad brief.** Every constraint here is about a
   worker exceeding its instructions. A worker that does exactly what a
   wrong brief said will pass every check in the kit.

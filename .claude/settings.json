@@ -1,0 +1,51 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCOPE_AGENT_TYPES='architect' ALLOW_GLOBS='docs/* README.md CHANGES internal/vfs/*' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCOPE_AGENT_TYPES='coder' DENY_GLOBS='*_test.go docs/* README.md CHANGES internal/vfs/* .claude/*' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCOPE_AGENT_TYPES='test-author' ALLOW_GLOBS='*_test.go' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCOPE_AGENT_TYPES='test-author' EXEMPT_GLOBS='*_test.go internal/vfs/* docs/* README.md go.mod' DENY_GLOBS='*.go internal internal/* cmd cmd/*' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SCOPE_AGENT_TYPES='security-auditor' ALLOW_CMDS='ls cat head tail wc stat find grep rg jq diff cmp git' ALLOW_GIT_SUBCMDS='log show diff status ls-files ls-tree cat-file blame rev-parse rev-list shortlog grep describe' ${CLAUDE_PROJECT_DIR}/.claude/hooks/bash-guard.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

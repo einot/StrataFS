@@ -5,8 +5,9 @@ over loopback NFSv3. See `README.md` for what it is and `docs/DESIGN.md` for
 where it is going.
 
 This file governs how work happens in this repo. The agent definitions in
-`.claude/agents/` constrain the subagents; the rules below constrain the
-top-level session.
+`.claude/agents/` constrain the subagents, the hook wiring in
+`.claude/settings.json` enforces those constraints, and the rules below
+constrain the top-level session.
 
 ## Project shape
 
@@ -24,6 +25,18 @@ Tests are Go-standard: `*_test.go` beside the package they exercise, with no
 separate tree. The path guard therefore splits test from implementation by
 filename suffix rather than by directory.
 
+## Where the guards live
+
+Every guard is wired in `.claude/settings.json`, never in an agent file's
+frontmatter. A `hooks:` block in an agent file is silently ignored in some
+environments — no error, no warning, the agent simply runs unfenced. Each
+entry carries `SCOPE_AGENT_TYPES` because a settings hook sees calls from
+every agent and from the top-level session, not just the agent its policy was
+written for.
+
+Hook configuration is read from the **main checkout**, not from a worktree, so
+a policy change must land here to affect a worktree-isolated agent.
+
 ## Orchestration role
 
 The top-level session acts as project manager only: delegate, reconcile,
@@ -40,12 +53,15 @@ is yours.
 **No exception for "mechanical" edits.** Every test file change goes
 through `test-author`, full stop — including a one-line formatting fix, a
 lint-only rename, or any other change that looks too small or too
-obviously safe to bother delegating. The same holds for `coder`'s and
-`architect`'s domains: "it's tiny" is never a reason to touch code, tests,
-or specs/schemas/ADRs directly. The top-level session's own tools stay
-limited to reconciling already-delegated work (applying a worker's own
-diff/commit, resolving a merge conflict) and to editing `CLAUDE.md`, agent
-definitions, and non-code governance docs it owns directly.
+obviously safe to bother delegating. `test-author` has no Bash and so
+cannot run a formatter itself; that means making the edit by hand with
+Edit until the content matches, not an excuse to make the edit directly
+instead. The same holds for `coder`'s and `architect`'s domains: "it's
+tiny" is never a reason to touch code, tests, or specs/schemas/ADRs
+directly. The top-level session's own tools stay limited to reconciling
+already-delegated work (applying a worker's own diff/commit, resolving a
+merge conflict) and to editing `CLAUDE.md`, agent definitions, and
+non-code governance docs it owns directly.
 
 **Agent configuration.** The top-level session may alter agent
 configuration — `.claude/agents/*.md`, including which model backs an
@@ -55,6 +71,20 @@ because the change would make the job in front of it easier or faster. If
 an agent's configuration looks like it is blocking legitimate work, say so
 and let the user decide; changing it unasked defeats the point of having
 the constraint.
+
+**Agent guards.** The subagent path and Bash guards live in
+`.claude/settings.json`, scoped per agent with `SCOPE_AGENT_TYPES`, and
+nowhere else. Never declare them in an agent file's `hooks:` frontmatter:
+a guard declared there did not fire in this environment (three probes),
+most likely because project-level frontmatter hooks require the workspace
+trust dialog to have been accepted, which a headless session never does.
+Hook configuration is read from the *main checkout*, not from a
+worktree-isolated agent's checkout — so a `coder` dispatch is fenced by
+whatever the main checkout's `settings.json` says at that moment, and the
+copy in its worktree is inert. Verify any guard change the only way that
+counts: put it in the main checkout, dispatch a real agent, and have it
+attempt an operation the policy must refuse. A test that pins the wiring
+is worth having, but a passing test is not a fired hook.
 
 ## Branch protection
 
@@ -98,11 +128,26 @@ hides its exit status and will report a red gate as green.
 
 ## Supervisor agent
 
-Every dispatch to `coder`, `test-author`, or `architect` (the only
-subagents with write access) must be paired with a `supervisor` review
+Every dispatch to `coder`, `test-author`, or `architect` (the subagents
+that can write or execute) must be paired with a `supervisor` review
 before acting on its output (merging, pushing, or handing off to another
-agent). Give `supervisor` exactly two things: the literal instructions
-given to the worker agent, and the worker's own report of what it changed.
+agent). Give `supervisor` four things: the literal instructions given to
+the worker agent, the worker's own report of what it changed, and the
+`git status --porcelain` and `git diff` covering exactly that dispatch,
+named as such along with the baseline commit the worker started from.
+
+Collecting that git evidence is the session's job, not `supervisor`'s.
+The session is the layer that can read the git state, which is the same
+reason dispatch lives here; `supervisor` stays read-only with no Bash and
+keeps the structural exemption that makes it trustworthy. For a worker
+running under `isolation: worktree`, collect the evidence **from that
+worker's worktree** — the main checkout shows nothing, because the changes
+are not there.
+
+Do not put claims about test runs into the brief expecting them to be
+checked. `supervisor` cannot execute anything, so a test-run claim comes
+back `unverified` every time; whether the suite passes is the session's
+own business, and `reviewer`'s.
 `supervisor` is read-only (Read/Grep/Glob only, no Bash, no Edit/Write, no
 spawning other agents) — it inspects the actual current file contents
 against the task's stated scope and flags anything out of the ordinary:
@@ -114,13 +159,29 @@ check.
 **Hard stop:** if `supervisor` reports any finding, report it to the user
 verbatim before doing anything else. That duty is unconditional — it
 survives every other rule in this file, and no finding is ever summarised,
-paraphrased, or held back. Then STOP ALL PROCESSING: do not merge, push,
-dispatch further agents, or continue reconciling, and let the user decide.
+paraphrased, or held back, including an `unverified` one. Then STOP ALL
+PROCESSING: do not merge, push, dispatch further agents, or continue
+reconciling, and let the user decide.
 
-`reviewer`/`security-auditor` are themselves read-only and structurally
-incapable of taking an unauthorized action (no write access at all), so
-routine supervisor coverage is scoped to the agents that can write;
-extend it to every dispatch if asked.
+The single exception to *stopping* — never to reporting — is a findings
+list whose every entry is `"category": "unverified"`. Those describe what
+`supervisor` could not check rather than anything the worker did, and
+`supervisor` has no Bash, so a worker's claim to have run the tests is
+almost always one. Report them verbatim and carry on. If even one entry is
+any other category, the stop applies in full.
+
+`reviewer` is read-only and structurally incapable of taking an
+unauthorized action — no Edit, no Write, no Bash — so routine supervisor
+coverage excludes it. Extend coverage to every dispatch if asked.
+
+`security-auditor` is exempt on the same grounds **only while it has no
+Bash tool**. If it is given the fenced Bash described in
+`agent-kit-security-auditor`, add it to the paired list above. A fence is
+not the same guarantee as not having the tool: the exemption rested on
+there being nothing to fence, and that stops being true the moment the
+tool exists. This is deliberately the cautious reading — the fence is
+default-deny and carefully written, but it is a shell script, and the cost
+of pairing is one extra read-only review per audit.
 
 Subagents do not dispatch other subagents. `architect` has no `Agent`
 tool: it settles the interface, writes ready-to-dispatch briefs, and hands
