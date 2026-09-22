@@ -147,7 +147,16 @@ type FS interface {
 	Access(ctx context.Context, c Caller, h Handle, want uint32) (uint32, error)
 
 	Read(ctx context.Context, c Caller, h Handle, off uint64, count uint32) (data []byte, eof bool, err error)
+
+	// Write may delay its return as backpressure when the implementation is
+	// holding more unwritten data than it is willing to buffer. NFSv3 permits
+	// this: an UNSTABLE write need not reach stable storage before the server
+	// replies, and nothing bounds how long the server may take to answer, so
+	// holding the reply is a legitimate way to slow a client down. A caller
+	// must therefore not impose its own per-call deadline on Write, and an
+	// implementation that delays must return promptly once ctx is done.
 	Write(ctx context.Context, c Caller, h Handle, off uint64, data []byte, how Stability) (uint32, Stability, error)
+
 	Commit(ctx context.Context, h Handle, off uint64, count uint32) error
 
 	Create(ctx context.Context, c Caller, dir Handle, name string, sa SetAttr, excl bool) (Handle, Attr, error)
