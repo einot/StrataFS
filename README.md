@@ -123,12 +123,62 @@ export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 ./strata -bucket s3://my-filesystem -region eu-west-1
 ```
 
-Against an on-premise or S3-compatible cluster — Dell ObjectScale, MinIO, Ceph:
+Against an on-premise or S3-compatible cluster — Dell ECS/ObjectScale, MinIO,
+Ceph:
 
 ```bash
 ./strata -bucket s3://my-filesystem \
-  -endpoint https://objectscale.example.net -path-style
+  -endpoint https://ecs.example.net -path-style
 ```
+
+`-path-style` is required unless the endpoint resolves `<bucket>.<endpoint>` in
+DNS, which on-premise clusters typically do not. The bucket must already exist;
+strata never creates one.
+
+### Passing credentials without writing them down
+
+Credentials come only from the environment — never from a flag, so they never
+appear in `ps` output. On macOS, keep them in the Keychain rather than in a
+file or a shell profile:
+
+```bash
+security add-generic-password -a "$USER" -s myfs-secret -w   # prompts; no shell history
+```
+
+```bash
+AWS_ACCESS_KEY_ID=$(security find-generic-password -a "$USER" -s myfs-key -w) \
+AWS_SECRET_ACCESS_KEY=$(security find-generic-password -a "$USER" -s myfs-secret -w) \
+./strata -bucket s3://my-filesystem -endpoint https://ecs.example.net -path-style
+```
+
+The value never lands in a file, in shell history, or on a command line.
+
+## Verified against
+
+| Implementation | How | Result |
+| --- | --- | --- |
+| AWS SigV4 spec | The published `get-vanilla` test vector, in `internal/store/sigv4_test.go` | Signature matches byte for byte |
+| MinIO | `-check` plus the full conformance and filesystem suites | All pass |
+| **Dell ECS** (`Server: ViPR/1.0`) | `-check` plus the conformance suite, against a live university cluster | **10/10 and 7/7** |
+| macOS kernel NFS client | A real mount driven by `scripts/smoke-test.sh` | 16/16 |
+| Linux kernel NFS client | — | **Not yet tested** |
+
+The result that matters on any new endpoint is **`stale If-Match is
+REJECTED`**. An endpoint can implement conditional writes well enough to pass
+the two checks before it and still *accept* a write conditioned on a superseded
+ETag — which looks like working conditional writes while providing no
+protection for the root pointer at all. ECS rejects it correctly, so a second
+writer there is detected rather than silently overwriting the first.
+
+Notes from the ECS run, which are likely to generalise to other on-premise
+clusters:
+
+- **Virtual-host addressing was unavailable**; `-path-style` was mandatory.
+- **TLS verified against the system trust store.** strata has no CA-bundle or
+  `-insecure` option, so a cluster using an internal CA needs that CA installed
+  in the system trust store.
+- The default region `us-east-1` was accepted, and no `x-emc-namespace` header
+  was needed — ECS derives the namespace from the authenticated object user.
 
 ## Checking an endpoint before you trust it
 
