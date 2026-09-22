@@ -17,6 +17,12 @@ against. A decision that only affects one function does not.
 - ADRs are append-only in spirit. A decision that turns out wrong is not
   edited away: a new ADR supersedes it, and the old one's status becomes
   `Superseded by NNNN`. The record of having been wrong is part of the value.
+  This governs the *decision*, not every sentence in the file. A restatement of
+  something normative — a number, a field width, a format — that the spec has
+  since changed is the "bug in one of them" the rule below names, and is
+  corrected in place, with a `**Revised:** YYYY-MM-DD` line in the header
+  recording what moved, why, and what did not. Superseding is for a decision
+  that turned out wrong, not for a fact that moved underneath one.
 - `Status` is one of `Proposed`, `Accepted`, `Rejected`, or
   `Superseded by NNNN`.
 - The normative text lives in `docs/DESIGN.md`. An ADR may restate a format
@@ -38,6 +44,7 @@ against. A decision that only affects one function does not.
 
 **Status:** Proposed | Accepted | Rejected | Superseded by NNNN
 **Date:** YYYY-MM-DD
+**Revised:** YYYY-MM-DD — what moved, why, what did not (omit if never revised)
 **Issue:** #N
 
 ## Context
@@ -67,3 +74,5 @@ URL, and what was taken from it.
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-file-trees-carry-chunk-spans.md) | File trees carry chunk spans | Accepted |
+| [0002](0002-duplicate-request-cache.md) | Duplicate request cache for non-idempotent NFS procedures | Accepted |
+| [0003](0003-write-backpressure.md) | Bounding buffered writes, and the blocking discipline that makes it safe | Accepted |

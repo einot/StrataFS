@@ -2,6 +2,14 @@
 
 **Status:** Accepted
 **Date:** 2026-09-22
+**Revised:** 2026-09-22 — the inline threshold this ADR restates from the spec
+moved from 160 bytes to 152, because `docs/DESIGN.md` section 4 took eight bytes
+of the inline area for the `change` field; the first size needing a chunk is
+therefore 153, not 161. Both restatements — the `depth` 0 bullet under
+*Assumptions* and the WAFL citation under *Sources* — are corrected in place,
+per the restatement rule in [README.md](README.md). Nothing else changed: the
+decision, the block format it pins (16-byte header, 40-byte entry, fanout 1638),
+and every other assumption, alternative and consequence are as first written.
 **Issue:** #18, blocking phase 2 of #15
 
 ## Context
@@ -133,7 +141,7 @@ Everything here that no issue, spec section or prior decision dictated.
   block.
 - **`depth` 0 means the root names a single data chunk**, and `root` is the zero
   hash exactly when the data is inline. This saves one object and one GET for
-  every file between 161 bytes and one chunk, which is the common case; the cost
+  every file between 153 bytes and one chunk, which is the common case; the cost
   is one branch in the walk. WAFL does the analogous thing with 16 direct
   pointers, but its thresholds are not ours.
 - **Canonical shape.** Adjacent holes are merged, and `depth` is the least that
@@ -307,7 +315,7 @@ future FastCDC would be too.
   files, data is stored in the inode itself in place of the block pointers."
   Used as evidence that the uniform-depth, position-implies-offset tree is
   WAFL's actual design (so alternative 1 is the faithful translation), and that
-  the paper sets no byte threshold for the inline case — the 160 bytes in
+  the paper sets no byte threshold for the inline case — the 152 bytes in
   section 4 is this project's number, not the paper's.
 - Wen Xia et al., *FastCDC: a Fast and Efficient Content-Defined Chunking
   Approach for Data Deduplication*, USENIX ATC 2016 —
