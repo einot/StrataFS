@@ -37,6 +37,12 @@ type Config struct {
 	// ReadOnly refuses every mutating operation at the VFS layer.
 	ReadOnly bool
 
+	// SkipChunkVerification stops fetched chunks from being checked against
+	// the hash that names them. Verification is on unless this is set: the
+	// negative sense is deliberate, so that the zero value is the safe one
+	// for every caller that never thinks about it.
+	SkipChunkVerification bool
+
 	// SnapshotRetention is how many superseded namespace snapshots to keep.
 	// Zero selects the default; a negative value disables pruning entirely.
 	SnapshotRetention int
@@ -54,6 +60,7 @@ type FS struct {
 	ownerUID       uint32
 	ownerGID       uint32
 	readOnly       bool
+	skipVerify     bool
 
 	// mu guards the namespace: the inode table, the allocator, the epoch and
 	// the dirty flags.
@@ -144,6 +151,7 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 		ownerUID:       cfg.OwnerUID,
 		ownerGID:       cfg.OwnerGID,
 		readOnly:       cfg.ReadOnly,
+		skipVerify:     cfg.SkipChunkVerification,
 		retention:      cfg.SnapshotRetention,
 		open:           make(map[uint64]*openFile),
 		cache:          newChunkCache(cfg.CacheBytes),
@@ -889,6 +897,24 @@ func (f *FS) loadChunk(ctx context.Context, ref chunkRef) ([]byte, error) {
 			return nil, vfs.ErrIO
 		}
 		return nil, fmt.Errorf("read chunk %s: %w", ref.Hash, err)
+	}
+	// The key is the SHA-256 of the contents, so checking what came back costs
+	// one hash of bytes already in memory and catches bit rot, a truncated
+	// transfer that still returned 200, and our own mixed-up references. Bad
+	// data must not reach the cache or the known-chunk set: a hash recorded as
+	// present would let a later putChunk of the correct content skip its
+	// upload, cementing the corruption.
+	if !f.skipVerify {
+		sum := sha256.Sum256(data)
+		got := hex.EncodeToString(sum[:])
+		if got != ref.Hash {
+			f.log.Error("chunk failed verification",
+				"key", chunkPrefix+ref.Hash,
+				"expected", ref.Hash,
+				"got", got,
+				"bytes", len(data))
+			return nil, fmt.Errorf("chunk %s failed verification: bucket returned %d bytes hashing to %s: %w", ref.Hash, len(data), got, vfs.ErrIO)
+		}
 	}
 	f.cache.put(ref.Hash, data)
 	f.markKnown(ref.Hash)
