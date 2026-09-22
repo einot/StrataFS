@@ -1,4 +1,4 @@
-# stratafs
+# StrataFS
 
 A filesystem that stores itself in a single S3-compatible bucket and mounts
 over loopback NFSv3. See `README.md` for what it is and `docs/DESIGN.md` for
@@ -24,6 +24,12 @@ constrain the top-level session.
 Tests are Go-standard: `*_test.go` beside the package they exercise, with no
 separate tree. The path guard therefore splits test from implementation by
 filename suffix rather than by directory.
+
+The project is **StrataFS**, but the Go module path is `strata` and the
+binary lives in `cmd/strata/`. That mismatch is deliberate, not a leftover
+from the rename: the module path is internal and never published, so
+changing it would touch every import for no benefit. Do not "fix" it on
+your own initiative.
 
 ## Where the guards live
 
@@ -128,13 +134,14 @@ hides its exit status and will report a red gate as green.
 
 ## Supervisor agent
 
-Every dispatch to `coder`, `test-author`, or `architect` (the subagents
-that can write or execute) must be paired with a `supervisor` review
-before acting on its output (merging, pushing, or handing off to another
-agent). Give `supervisor` four things: the literal instructions given to
-the worker agent, the worker's own report of what it changed, and the
-`git status --porcelain` and `git diff` covering exactly that dispatch,
-named as such along with the baseline commit the worker started from.
+Every dispatch to `coder`, `test-author`, `architect`, or
+`security-auditor` (the subagents that can write or execute) must be
+paired with a `supervisor` review before acting on its output (merging,
+pushing, or handing off to another agent). Give `supervisor` four things:
+the literal instructions given to the worker agent, the worker's own
+report of what it changed, and the `git status --porcelain` and
+`git diff` covering exactly that dispatch, named as such along with the
+baseline commit the worker started from.
 
 Collecting that git evidence is the session's job, not `supervisor`'s.
 The session is the layer that can read the git state, which is the same
@@ -174,14 +181,30 @@ any other category, the stop applies in full.
 unauthorized action — no Edit, no Write, no Bash — so routine supervisor
 coverage excludes it. Extend coverage to every dispatch if asked.
 
-`security-auditor` is exempt on the same grounds **only while it has no
-Bash tool**. If it is given the fenced Bash described in
-`agent-kit-security-auditor`, add it to the paired list above. A fence is
-not the same guarantee as not having the tool: the exemption rested on
-there being nothing to fence, and that stops being true the moment the
-tool exists. This is deliberately the cautious reading — the fence is
-default-deny and carefully written, but it is a shell script, and the cost
-of pairing is one extra read-only review per audit.
+`security-auditor` **is not exempt**, because it now has the fenced Bash
+described in `agent-kit-security-auditor`: `Bash` is in its `tools:` line
+and the `bash-guard.sh` fence is wired for it in `.claude/settings.json`.
+That is the condition this file previously set for moving it onto the
+paired list above, so it has been moved. A fence is not the same guarantee
+as not having the tool — the exemption rested on there being nothing to
+fence, and that stopped being true the moment the tool existed. This is
+deliberately the cautious reading: the fence is default-deny and carefully
+written, but it is a shell script, and the cost of pairing is one extra
+read-only review per audit.
+
+The evidence for a `security-auditor` pairing looks different from a
+worker's, because a correct audit changes nothing. Collect and hand over
+the same four things anyway — the literal brief, the auditor's own report,
+and the `git status --porcelain` and `git diff` against the baseline. The
+expected diff is empty, and that is precisely what `supervisor` is being
+asked to confirm: that an agent holding a shell left the tree untouched.
+An audit that comes back with a non-empty diff is a finding, whatever the
+report says about it.
+
+If `security-auditor` is ever reduced to Read/Grep/Glob again, the
+structural exemption returns and this rule should be reverted rather than
+left standing out of caution — a pairing requirement that no longer
+protects anything is just a cost.
 
 Subagents do not dispatch other subagents. `architect` has no `Agent`
 tool: it settles the interface, writes ready-to-dispatch briefs, and hands
