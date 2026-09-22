@@ -1,0 +1,1 @@
+Chunks are verified against the hash that names them when fetched from the bucket; a mismatch fails the operation with NFS3ERR_IO. New -verify-chunks flag, default on.
