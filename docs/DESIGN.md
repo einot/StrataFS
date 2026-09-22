@@ -141,6 +141,41 @@ capability. A holder can fetch exactly the subtree whose root they were given
 and enumerate nothing else. That is a finer-grained sharing primitive than any
 bucket split, and it needs no structural support.
 
+### Keys, integrity and the cache
+
+A block's key is its prefix followed by the SHA-256 of its body as 64 lowercase
+hex characters: `b/9f86d081…` or `m/9f86d081…`. The kind selects the prefix and
+nothing else — bodies are opaque at this level, and what a body *means* is
+decided by the referrer that led you to it.
+
+Four rules govern every block, and they are the whole of the block layer's
+contract:
+
+- **Storing is idempotent.** A block whose key already exists is not uploaded
+  again. This is deduplication and crash-recovery reuse in one step (section 5,
+  step 3), and it is safe precisely because an existing object under that key
+  necessarily has those contents.
+- **Fetching verifies.** The body is hashed and compared against the key it was
+  asked for. A mismatch is corruption, not staleness: the object can never
+  become correct, so it is never cached and never retried as though the failure
+  were transient. This applies to data and metadata alike.
+- **A block is a pure function of what it represents.** Reserved fields are
+  zero; no timestamps, no writer identity, no uninitialised padding. A single
+  incidental byte would give two identical subtrees two different hashes and
+  stop them sharing storage, which is the property section 8's economics rest
+  on.
+- **The block layer never deletes.** Objects are removed only by the sweeper of
+  section 8, which works from a listing rather than through this path.
+
+The cache is keyed by the full object key, so it preserves the prefix split
+rather than dissolving it: a block stored under `b/` cannot be served to a
+reader that asked for it under `m/`. Cached entries are never invalidated —
+section 7 explains why they cannot go stale — and callers must treat what they
+get back as read-only, because it is shared.
+
+`fsinfo` is not a block. It is mutable and lives at a fixed key, so none of
+this applies to it.
+
 ## 4. The tree
 
 ```
@@ -176,15 +211,89 @@ fixed key. It is the only object in the bucket that is ever modified.
 
 | Parameter | Value | Reasoning |
 |---|---|---|
-| Metadata block | 64 KiB | One round trip fetches 2048 references or 256 inodes |
-| Reference | 32 B | Bare SHA-256; no address needed |
-| Fanout | 2048 | `log₂₀₄₈(10⁹)` ≈ 3 levels for a billion blocks |
+| Metadata block | 64 KiB | One round trip fetches 1638 references or 256 inodes |
+| Reference | 40 B | 32-byte SHA-256 plus the 8-byte span it covers |
+| Fanout | 1638 | `16 + 1638 × 40 = 65536`; ≈ 3 levels for a billion chunks |
 | Inode record | 256 B | Fits pointers, times, and small files inline |
-| Data chunk | 1 MiB default | Amortizes request cost; content-defined chunking is a later option |
+| Data chunk | fixed 1 MiB today | Amortizes request cost; where the boundaries fall is policy, not format |
+
+A data block and a chunk are the same object seen from two directions — the
+storage layer's kind and the file's leaf unit — and the words are used
+interchangeably below.
+
+How a file's bytes are divided into chunks is a **policy**. The chunker maps a
+byte stream to a sequence of chunks; the tree stores whatever it produces and
+cannot tell one chunker from another. Today it cuts every 1 MiB. Whether it
+should cut on content instead is issue #18, which [ADR 0001](adr/0001-file-trees-carry-chunk-spans.md)
+narrows to a question the tree no longer constrains. Any chunker must declare a
+minimum, an average and a maximum size, and the maximum is the one that matters:
+verifying a block's hash means fetching all of it, so the largest chunk is the
+read amplification of the smallest random read.
 
 WAFL stores very small files in the inode itself in place of block pointers
 (§3.1). We keep that: up to 160 bytes of file data, or a symlink target, live
 inline, so a small file costs zero extra objects.
+
+### Indirect blocks
+
+A reference is not bare: it carries the number of file bytes its child's subtree
+covers. Position therefore does not imply offset, which is what makes the tree
+indifferent to the chunker. ADR 0001 records why, what it costs, and what it
+deliberately leaves open.
+
+An indirect block is a 16-byte header followed by up to 1638 packed 40-byte
+entries. All integers are big-endian.
+
+```
+header  offset size field
+        0      4    magic     ASCII "SIND"
+        4      1    version   1
+        5      1    level     0 = children are chunks; n = children are indirect
+                              blocks of level n−1
+        6      2    count     entries present, 1..1638
+        8      8    reserved  zero
+
+entry   0      32   hash      SHA-256 of the child, or 32 zero bytes: a hole
+        32     8    span      file bytes covered by this child's subtree
+```
+
+The body is `16 + 40 × count` bytes. Blocks are not padded, so the last block of
+each level is short, and `count` must agree with the body's length.
+
+Six rules make the shape canonical, so that one leaf sequence always yields one
+root hash and therefore always deduplicates:
+
+1. **Levels are packed left to right.** Level 0 holds the leaf entries, 1638 per
+   block; each level above holds one entry per block of the level below, in
+   order. Only the last block of a level may be short.
+2. **`depth` is the least that fits.** For *n* leaf entries, `depth` is the
+   smallest *d* ≥ 1 with *n* ≤ 1638^*d*, and `root` names the single block of
+   level *d*−1 — unless rule 3 applies.
+3. **`depth` 0 is the small-file case.** Either the data is inline (`size` ≤
+   160) and `root` is the zero hash, or the file is exactly one stored chunk and
+   `root` is that chunk's hash. A file over 160 bytes that is entirely a hole is
+   depth 1 with a single hole entry.
+4. **Spans sum to `size`.** At every level the entries' spans sum to their
+   parent's span, and at the root to the inode's `size`. Extending a file by
+   truncation appends a hole entry rather than leaving the tree short.
+5. **Holes live only at level 0.** A hole's span is arbitrary, so a hole of any
+   length is one entry and upper-level holes would buy nothing.
+6. **Adjacent holes merge.** Two hole entries never sit side by side.
+
+Locating the byte at offset *x*: start at `root` with *x*; at each level, sum
+entry spans until the running total exceeds *x*, then descend into that entry
+with *x* reduced by the total before it. A zero hash on the way down means the
+region was never written and reads as zeros. The walk costs `depth` metadata
+fetches and one data fetch, and the metadata blocks are hot.
+
+An edit that leaves the number of leaf entries unchanged rewrites only the
+blocks holding the changed entries and their ancestors — the root-to-leaf path
+section 11 sells. An edit that changes how many entries cover a region repacks
+that level from the first changed entry onward, at 40 bytes of indirect block
+per megabyte of file beyond the edit.
+
+One structure carries every file, the inode file and the directories included,
+because in this design those *are* files (§3.2).
 
 ### Inode record (256 bytes)
 
@@ -196,22 +305,35 @@ offset size field
 12     4    uid
 16     4    gid
 20     8    size            logical length in bytes
-28     8    blocks          blocks actually stored (sparse files count less)
+28     8    used            bytes actually stored; holes count nothing
 36     24   atime/mtime/ctime, nanoseconds
 60     4    depth           levels of indirection below this inode
 64     32   root            hash of this file's top block
 96     160  inline          file data or symlink target when it fits
 ```
 
+`used` is in bytes rather than blocks because there is no fixed block to count
+once chunk sizes vary, and because it feeds NFSv3's `fattr3.used`, which RFC
+1813 defines in bytes. It is the sum of the spans of the non-hole leaves.
+
 `depth` makes the tree self-describing: a reader knows how many indirect levels
-to walk without consulting anything else, and a file grows a level simply by
-incrementing it and pushing the old root down.
+to walk without consulting anything else, and a file grows a level by writing
+one new top block whose single entry is the old root. It is also *authoritative*
+rather than a cross-check — with variable-length leaves the number of leaves
+depends on the data, so `depth` cannot be recomputed from `size`.
 
 ### Directories
 
 A directory is a file whose blocks are `dirent` blocks: entries sorted by name,
 each `{name_len, inode, type, name}`. A lookup binary-searches the block index,
 so a directory of a million entries costs two or three GETs rather than a scan.
+
+Directory entries are variable-length, so a `dirent` block is as long as the
+entries packed into it and no longer. That works only because a reference
+carries its span: a layout where position implied offset would force every
+`dirent` block but the last to be padded to 64 KiB, and a directory's `size`
+would stop meaning anything. This is the reason the span layout would be right
+even if issue #18 were closed tomorrow with fixed chunking kept forever.
 
 This replaces the PoC's inline `map[string]uint64`, which forced the entire
 directory to be rewritten — and re-serialized into the global snapshot — on
@@ -284,8 +406,10 @@ primitive and belong in the daemon, not the format.
 `GETATTR(ino)`: read `inode_file[ino × 256]` — one block fetch, usually cached.
 
 `READ(ino, offset, n)`: walk `depth` indirect levels from the inode's root hash,
-then fetch the data blocks. At depth 2 with 2048 fanout that is at most three
-fetches, and in practice the indirect blocks are hot.
+accumulating spans to choose a child at each level, then fetch the chunks. At
+depth 2 that is at most three fetches, and in practice the indirect blocks are
+hot. Depth 3 at a fanout of 1638 covers about 4 PiB of 1 MiB chunks, so nothing
+stored here needs a fourth level.
 
 Every fetched block is cacheable forever without invalidation, because its key
 is its hash. That is worth stating plainly: **a content-addressed cache has no
@@ -423,8 +547,9 @@ Worth stating plainly, because the PoC is better at some things:
   levels of indirection. The `depth` field means shallow trees stay shallow, but
   there is a floor.
 - **Implementation complexity is several times larger.** Indirect-block walking,
-  block splitting, `IN_CP` deferral and sweeping are all real code with real
-  edge cases. The PoC fits in a day; this does not.
+  repacking a level when the number of leaves changes, `IN_CP` deferral and
+  sweeping are all real code with real edge cases. The PoC fits in a day; this
+  does not.
 - **Sweeping is a background job that can go wrong.** A bug deletes live data.
   It must be conservative, restartable, and dry-runnable before it ever deletes.
 
@@ -448,11 +573,18 @@ and exactly the trade convergent encryption tries to blur.
 Each phase is independently testable, and the existing NFS, RPC and store layers
 carry over unchanged — only `blobfs` is replaced.
 
-1. **Block layer.** Typed blocks, hashing, the two-bucket router, cache.
-   Test: round-trip every block type; verify data blocks never land in metadata.
-2. **File trees.** Indirect walking, read/write/truncate at arbitrary offsets,
-   sparse holes, growing and shrinking `depth`.
-   Test: differential against `os.File` under random operation sequences.
+1. **Block layer.** Typed blocks, hashing, prefix routing, cache — section 3's
+   four rules, over opaque bodies. The indirect-block format belongs to phase 2,
+   which is what keeps this phase independent of issue #18.
+   Test: round-trip every block type; verify data blocks never land in metadata;
+   verify a body that does not hash to its key is rejected rather than served.
+2. **File trees.** Indirect walking over the span-carrying format of section 4,
+   read/write/truncate at arbitrary offsets, sparse holes, growing and shrinking
+   `depth`.
+   Test: differential against `os.File` under random operation sequences, run
+   twice — once with the fixed chunker and once with a deterministic chunker
+   that emits adversarial sizes, since the tree must not be able to tell them
+   apart.
 3. **Inode file and directories.** Inode file as a regular file, `dirent`
    blocks, binary-searched lookup.
    Test: a million-entry directory; verify block touch counts, not just results.
@@ -474,12 +606,14 @@ features the PoC cannot have at all.
 
 ## 15. Open questions
 
-- **Content-defined chunking?** Fixed chunks mean inserting a byte at the front
-  of a file rewrites everything. Rolling-hash boundaries fix it and improve
-  dedup, at some CPU cost and with variable block sizes complicating the offset
-  arithmetic. Tracked as issue #18 — and it *is* on the critical path after all:
-  the indirect-block layout in section 4 assumes position implies offset, so
-  this has to be decided before phase 2 of section 14 rather than after.
+- **Which chunker?** *Narrowed.* The layout question is settled: references
+  carry spans, so the tree is indifferent to where boundaries fall
+  ([ADR 0001](adr/0001-file-trees-carry-chunk-spans.md)), and phase 2 of section
+  14 is no longer blocked. What remains open is whether to cut on content rather
+  than by byte count — issue #18 — which is an optimization and is held to #18's
+  own bar: measured dedup ratios over a documented corpus, at parameters derived
+  for object storage rather than borrowed from backup tools. Adopting it later
+  replaces the chunker and the write path's re-chunking rule, and nothing else.
 - **Should the inode file be sparse?** Freed inodes leave holes. WAFL keeps an
   inode-map file (§3.2). A free list in `fsinfo` is simpler and probably enough.
 - **Multi-writer.** Single-writer-with-detection is correct and limiting. Doing
@@ -487,3 +621,17 @@ features the PoC cannot have at all.
   larger design.
 - **Where does the snapshot schedule live?** Policy in the daemon, but the names
   and rotation have to survive restarts, so something must persist in `fsinfo`.
+
+---
+
+## 16. Decision records
+
+Decisions that constrain work not yet done live in `docs/adr/`, one file per
+decision, each with its alternatives and the assumptions behind it. The
+convention and the index are in [docs/adr/README.md](adr/README.md). This
+document is normative: where it and an ADR disagree, one of them has a bug and
+it is not this one.
+
+| ADR | Decision | Sections it constrains |
+|---|---|---|
+| [0001](adr/0001-file-trees-carry-chunk-spans.md) | File trees carry chunk spans; the chunker is a policy | 3, 4, 7, 14 |
