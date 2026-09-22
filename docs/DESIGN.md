@@ -359,9 +359,7 @@ record cannot grow instead: 256 bytes is what puts inode *n* at offset
 *n* × 256 and fits 256 inodes in one metadata block. The inline threshold was
 always this project's number rather than a derived one — the WAFL paper sets
 none — so moving it costs nothing but the handful of files between 153 and 160
-bytes, which gain one object each. ADR 0001 mentions the old threshold in
-passing ("every file between 161 bytes and one chunk"); it predates this and is
-not edited, per the append-only ADR convention. This document is normative.
+bytes, which gain one object each.
 
 [nfsv4-assessment.md](nfsv4-assessment.md) records why this field is here now
 rather than when an NFSv4 server is actually written, and what else such a
@@ -680,3 +678,5 @@ it is not this one.
 | ADR | Decision | Sections it constrains |
 |---|---|---|
 | [0001](adr/0001-file-trees-carry-chunk-spans.md) | File trees carry chunk spans; the chunker is a policy | 3, 4, 7, 14 |
+| [0002](adr/0002-duplicate-request-cache.md) | A duplicate request cache, keyed per connection instance, replays the reply to a retransmitted non-idempotent call | none — it constrains `internal/sunrpc` and `internal/nfs`, which section 14 carries over unchanged |
+| [0003](adr/0003-write-backpressure.md) | Buffered writes are bounded by a byte budget; a writer that has to wait performs the drain itself | 5, 9 |
