@@ -29,3 +29,9 @@ id_rsa*
 id_ed25519*
 credentials
 .aws/
+
+# Subagent worktrees. The harness creates these under .claude/worktrees/ when a
+# worktree-isolated agent runs, and removes them again -- but while one exists
+# it shows up as untracked here, one `git add -A` away from being committed
+# into the repository it is a checkout of.
+.claude/worktrees/
