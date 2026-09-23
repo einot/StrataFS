@@ -84,6 +84,38 @@
   subsection *On a shared memory budget in phase 1*; the three earlier *What
   this does not decide* bullets; the earlier *References*; the title; and the
   2026-09-22 revision. Status stays `Accepted`.
+- **Revised:** 2026-09-24 — clarifications from findings made while
+  implementing and testing the budget, and one testability claim corrected. The
+  decision did not move, and neither did §4's steps, their check order, what
+  each of the four outcomes does, or the meaning of G1 and G2; no name,
+  signature or number changed, and `errDrainPanicked` gained its initializer.
+  One requirement is stated more widely rather than changed: §4 required a
+  settle on every way out of `drain`, and now requires it on every way out of
+  the drainer's window, which also covers the Info record's log call, with a
+  panic there and a `runtime.Goexit` settled as *Panicked*. And G3 is
+  qualified: it holds when the Error record's log call returns, and a panic or
+  `Goexit` in that call continues out of `await` in its place. What changed:
+  **§4** — `warnAfter`'s pinned comment and the test surface agree, with §7,
+  that a test may set it to any value before the budget is first used, where
+  two of the three said "lower"; `errDrainPanicked` is declared with
+  `errors.New`, its text unpinned, so that the declaration agrees with its
+  comment; the settle paragraph and *Panicked* say that the settle covers the
+  window from election to relock, that a panic in the Info record's log call
+  and a `runtime.Goexit` are settled as *Panicked*, and that the settle cannot
+  rely on `recover`; G2 says that a failure reaches the calls still parked
+  when the drain is settled, not a call admitted before it; and G3 says what
+  the drainer gets when the Error record's log call panics or calls
+  `runtime.Goexit`.
+  **§7** — a `runtime.Goexit` is logged by nothing.
+  **Assumptions** — 2 cites #47; 9 says which calls a failure reaches, that a
+  call admitted before the settle is not failed retroactively, and that which
+  of the two a woken call gets is scheduling, and it no longer claims that the
+  other check order would be neither predictable nor testable, because this
+  one leaves a race of its own; 11 records the judgement calls behind the
+  settle's reach, and why G3's exception is pinned rather than left open; 12
+  says a test may raise `warnAfter` as well as lower it.
+  ***What this does not decide*** — the chunk-cache bullet cites #47 and #46.
+  ***References*** — `runtime.Goexit` and the built-in `recover`.
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
 - **Affects:** `internal/blobfs`, `cmd/strata`, doc comment on `vfs.FS.Write`
 
@@ -547,7 +579,8 @@ func (b *budget) await(ctx context.Context, drain func(context.Context) error) e
 type budget struct {
 	// warnAfter is how long an await call may stay blocked before it logs
 	// the Warn record (§7). newBudget sets it to stallWarnAfter. A test may
-	// lower it before the budget is first used; nothing writes it after that.
+	// set it to any value before the budget is first used; nothing writes it
+	// after that.
 	warnAfter time.Duration
 
 	// The rest of the struct is not pinned.
@@ -555,10 +588,11 @@ type budget struct {
 
 const stallWarnAfter = 5 * time.Second
 
-// errDrainPanicked is what a call returns when it was parked on a drain that
-// panicked (G2 below). It is a sentinel made with errors.New and compared
-// with errors.Is; its text is not pinned.
-var errDrainPanicked error
+// errDrainPanicked is what a call returns when the drain it was parked on is
+// settled as Panicked (see below, and G2). It is a sentinel, compared with
+// errors.Is. The declaration's form is pinned; the text given to errors.New
+// is not.
+var errDrainPanicked = errors.New("...")
 ```
 
 `FS` gains `budget *budget`, built in `New` from the limit §1 describes and from
@@ -582,36 +616,65 @@ may assume its logger is not nil.
       all**, relock, and settle the drain as below. Otherwise park on the
       condition variable until woken, and go round again.
 
-A drain is settled on every way out of `drain`, a panic included: clear the
-in-progress mark, count the drain as ended, and broadcast. What follows depends
-on how `drain` ended:
+A drain is settled on every way out of the drainer's window: the part of step
+3.4 that runs from its election, when it marks a drain in progress, to its
+relock. The window covers the Info record's log call as well as `drain`, and it
+can end in a return from `drain`, a panic, or a `runtime.Goexit`. Settling
+clears the in-progress mark, counts the drain as ended, and broadcasts, in the
+same hold of `b.mu` as whatever the outcome below records, so no call sees one
+without the other. What follows depends on how the window ended:
 
-- **Succeeded** (it returned nil): go round the loop. The drainer is admitted by
-  step 3.2 like anyone else. If other writers refilled the budget while it
-  drained, it drains again, unless its `ctx` is done by then. Admitting it
-  outright instead would let a drain that freed nothing admit a writer over the
-  limit, which would break §6's bound.
-- **Failed** (it returned an error, and the drainer's `ctx` is not done): record
-  the error as the latest failure, unlock, log the Error record (§7), and return
-  the error unchanged (G3).
-- **Abandoned** (it returned an error, and the drainer's `ctx` is done by
+- **Succeeded** (`drain` returned nil): go round the loop. The drainer is
+  admitted by step 3.2 like anyone else. If other writers refilled the budget
+  while it drained, it drains again, unless its `ctx` is done by then. Admitting
+  it outright instead would let a drain that freed nothing admit a writer over
+  the limit, which would break §6's bound.
+- **Failed** (`drain` returned an error, and the drainer's `ctx` is not done):
+  record the error as the latest failure, unlock, log the Error record (§7), and
+  return the error unchanged (G3).
+- **Abandoned** (`drain` returned an error, and the drainer's `ctx` is done by
   then): record nothing and log nothing, and return `ctx.Err()`. The parked
   calls go round again, and one of them becomes the next drainer, with its own
   `ctx` (Assumption 10).
-- **Panicked**: record `errDrainPanicked` as the latest failure, log nothing,
-  and let the panic continue out of `await` unchanged, so that the `recover` in
-  `dispatch` (ADR 0002 §6) still turns it into `SYSTEM_ERR` for the drainer's
-  `WRITE`. A later call can become the next drainer (Assumption 11).
+- **Panicked** (the window ended without `drain` returning: `drain` panicked or
+  called `runtime.Goexit`, or the Info record's log call did so before `drain`
+  was called): record `errDrainPanicked` as the latest failure, log nothing,
+  and let the panic or the `Goexit` continue unchanged, so `await` does not
+  return. A panic still reaches the `recover` in `dispatch` (ADR 0002 §6), which
+  turns it into `SYSTEM_ERR` for the drainer's `WRITE`. A later call can become
+  the next drainer (Assumption 11).
+
+The settle for a window that ends without `drain` returning has to be deferred,
+and it cannot rely on `recover`. During a `runtime.Goexit`, `recover` returns
+nil (*References*), so a settle that runs only when `recover` reports a panic
+never runs for one: the in-progress mark stays set, and every later call over
+the limit parks for good. During a panic, calling `recover` stops it, which
+Assumption 11 rules out. A deferred settle that asks whether `drain` returned
+covers both. The Info record stays inside the window, where step 3.4 and §7 put
+it, and the deferred settle must already be in place when it is logged, so that
+a log handler that panics is settled exactly as a drain that panics is. The
+Error record is logged after the settle (*Failed*), so a handler that panics
+there, or calls `runtime.Goexit`, leaves nothing unsettled; G3 says what the
+drainer gets.
 
 **The failure contract.** Three rules, observable from outside, fix which calls
 see a drain's failure:
 
 - **G1.** A call never returns a failure from a drain that ended before the call
   began.
-- **G2.** A call that is parked when a drain fails, or panics, returns that
-  failure — `errDrainPanicked` for a panic — or the failure of a later drain.
+- **G2.** A call still parked when a drain is settled as *Failed* or *Panicked*
+  returns that failure — `errDrainPanicked` for *Panicked* — or the failure of a
+  later drain. Still parked means waiting in step 3.4 at the settle, including
+  a call that a broadcast has woken but that has not yet reacquired `b.mu`. A
+  call that a release woke while the drain ran, and that found room at step 3.2
+  before the settle, has been admitted with nil, and the failure does not reach
+  it.
 - **G3.** The drainer returns its own drain's failure: the error value `drain`
-  returned, unchanged.
+  returned, unchanged. This holds when the Error record's log call returns. If
+  that call panics or calls `runtime.Goexit`, the panic or `Goexit` continues
+  out of `await` unchanged in place of the return, and the calls still parked
+  get the drain's error all the same, because the settle recorded it before
+  the call (Assumption 11).
 
 The first version kept only the latest drain's result, so a failed drain
 followed by a successful one before a parked call ran would admit that call
@@ -682,8 +745,9 @@ reach them without reading `fs.go`:
   chunk index to buffer; `openFile.pendingTrim`, a slice whose length is all a
   test needs; and `openFile.bytes`, the `atomic.Int64` of §2.
 
-A test may read all of these. It may write only `warnAfter`, and only before the
-budget is first used. Renaming any of them changes this ADR's interface.
+A test may read all of these. It may write only `warnAfter`, to any value, and
+only before the budget is first used. Renaming any of them changes this ADR's
+interface.
 
 ### 5. What happens when the commit fails, and whether there is a timeout
 
@@ -815,7 +879,8 @@ three.
   wakes, which during a hang would be never, the case the record exists for.
   `waited` is the time since entry at that moment, and `dirty_bytes` and
   `limit` are read then too. `warnAfter` is a budget field that `newBudget` sets
-  to `stallWarnAfter`, five seconds; a test may lower it (§4). A natural
+  to `stallWarnAfter`, five seconds; a test may set it to any value before the
+  budget is first used (§4). A natural
   mechanism is one `time.AfterFunc` timer per call that gets past the fast
   path, stopped on every way out. `Timer.Stop` does not wait for a callback that
   has already started (*References*), so the callback checks under `b.mu` that
@@ -824,7 +889,8 @@ three.
 - **Error.** `err` is the error `drain` returned. There is no Error record for
   an abandoned drain, whose error is only the drainer's cancellation, or for a
   panicked one, which `dispatch` already logs when it recovers the panic
-  (`internal/sunrpc/rpc.go:283`).
+  (`internal/sunrpc/rpc.go:283`). A `runtime.Goexit`, which §4 also settles as
+  *Panicked*, is logged by nothing (Assumption 11).
 
 Attributes are top-level key–value pairs, not grouped. `dirty_bytes` and
 `limit` are `int64` (`slog.KindInt64`), `waited` is a `time.Duration`
@@ -899,8 +965,7 @@ Recorded because the issue did not specify them.
    while the buffer stays resident at its full capacity. A flushed buffer
    holding 4 KiB of data in 1 MiB of capacity is charged 4 KiB and holds 1 MiB —
    §2's argument, applied to the other pool — so the cache can hold many times
-   its configured size. That is left to a separate, unfiled issue (*What this
-   does not decide*).
+   its configured size. That is left to #47 (*What this does not decide*).
 3. **No timeout.** §5. The issue asked only that the commit path make progress.
 4. **Fairness is not guaranteed.** `sync.Cond.Broadcast` wakes everyone and the
    winner is whoever is scheduled first, so a writer can in principle be starved
@@ -978,12 +1043,23 @@ calls it made while pinning what the first version left open.
    on it follows from *Consequences* ("fails every write that is waiting on
    it"); keeping the latest failure apart from the count of drains is my
    mechanism for it. Checking for a failure before checking for room is a
-   judgement of its own: a parked call fails even when the failed drain freed
-   enough room for it. I chose it because the first version's §5 has every
-   waiter return the failure, and because a rule that depended on how much a
-   failing drain happened to free before it failed would be neither predictable
-   nor testable. The cost is that a partly successful drain fails some writes
-   that could have been admitted.
+   judgement of its own: a call still parked when a failed drain is settled
+   fails, even if that drain freed enough room for it before it failed. The
+   failure reaches no call but those and the drainer (G2, G3). A drain frees
+   room through `release`, which broadcasts (§4, *Admission while a drain
+   runs*), so a parked call can wake, find room and be admitted with nil while
+   the drain is still running. It is not failed retroactively when the drain
+   then fails, and its write goes ahead. So when a failing drain frees room
+   before it fails, whether a woken call is admitted or failed depends on
+   whether it looks before the settle or after it. That is scheduling: both
+   outcomes conform, and a test cannot force either without a hook inside
+   `await`. If nothing frees room before the settle, every call still parked
+   then fails, and that is what a test can pin. I chose this order because the
+   first version's §5 has every waiter return the failure, and *Consequences*
+   gives the reason: they would all fail in turn anyway, and failing them
+   together gives the client a prompt, honest answer. The cost is that a partly
+   successful drain fails some writes that could have been admitted, and which
+   ones is not determined.
 10. **An abandoned drain publishes nothing.** §4. When `drain` fails and the
     drainer's own `ctx` is done by then, the error is most likely that
     cancellation, not a verdict on the bucket, and broadcasting it would fail
@@ -1004,6 +1080,33 @@ calls it made while pinning what the first version left open.
     still does, rather than being turned into an error value the drainer's
     caller would misread as a store failure. And the budget logs nothing for it,
     because `dispatch` logs the recovered panic itself.
+
+    The same goes for the rest of the drainer's window (§4). A panic in the Info
+    record's log call, before `drain` is called, and a `runtime.Goexit` anywhere
+    in the window are settled as *Panicked* too. That they are settled at all is
+    again not a judgement, since left unsettled either would leave the
+    in-progress mark set, just as a panicking drain would. Settling them as
+    *Panicked*, rather than as abandoned drains whose parked calls elect
+    another drainer, is a judgement: neither leaves an error to publish, and
+    each means a bug that the next drainer would likely meet again, because it
+    logs the same Info record and runs the same `drain`. It has two costs. The
+    sentinel says the drain panicked when the fault may have been the log
+    handler's, or a `Goexit`. And a `Goexit` is logged by nothing: the budget
+    logs nothing for a *Panicked* drain, and `dispatch` logs only a panic that
+    its `recover` returns (`internal/sunrpc/rpc.go:282-283`). Nothing in this
+    repository calls `runtime.Goexit` outside its tests, so I left that silence
+    alone rather than give it a record of its own.
+
+    A panic or `Goexit` in the Error record's log call comes after the settle,
+    so it needs none, and it continues out of `await` in place of G3's return
+    (§4). I pinned that rather than leave it open. A `Goexit` leaves no choice,
+    since `await` cannot return once one has begun. For a panic, the
+    alternative is to recover it and return the drain's error, which would make
+    that log call the one place the budget recovers, and would treat a handler
+    that breaks there unlike one that breaks on the Info record. The cost falls
+    on the drainer's `WRITE`: `dispatch` answers it `SYSTEM_ERR` rather than
+    `NFS3ERR_IO`, and logs the handler's panic rather than the drain's error
+    (`internal/sunrpc/rpc.go:282-285`, `:293-295`).
 12. **The Warn record is per call, fires while the call is blocked, counts the
     drainer, and its threshold is a field.** §7. The first version's "a waiter
     that has been waiting more than 5 s" could mean logging on wake-up, which is
@@ -1011,8 +1114,10 @@ calls it made while pinning what the first version left open.
     the threshold is crossed; or repeatedly. And "waiter" could exclude the
     drainer, in which case a single stalled writer never logs anything. I chose
     once, at the crossing, drainer included, measured from entry. `warnAfter` is
-    a field rather than a bare constant so that a test need not wait five
-    seconds; the five seconds are the first version's.
+    a field rather than a bare constant so that a test can choose the
+    threshold: lower, so that it need not wait five seconds, or higher, so that
+    a short wait is sure to stay under it. The five seconds are the first
+    version's.
 13. **`waiters()` excludes the drainer.** §4. A test needs to know when calls
     have parked. Excluding the drainer makes "one drain in progress and seven
     parked" read 7, and makes the count change only when a call parks or wakes,
@@ -1157,10 +1262,11 @@ to answer speculatively now.
   stall makes them as old as the stall, and they can predate changes other
   clients made in the meantime. Capturing them after the wait needs them to come
   from inside `Write`; this ADR does not decide how.
-- **Chunk-cache accounting.** A separate, unfiled issue (Assumption 2): the
-  cache charges an entry by `len` while holding a flushed buffer at its full
-  capacity. Caching a copy would fix it, and would also stop the cache holding
-  buffers that a write can still mutate in place after a flush fails partway.
+- **Chunk-cache accounting** (#47; Assumption 2). The cache charges an entry by
+  `len` while holding a flushed buffer at its full capacity. Caching a copy
+  would fix it, and would also stop the cache holding buffers that a write can
+  still mutate in place after a flush fails partway, changing a cached chunk's
+  bytes (#46).
 - **Stale reads and resurrected truncated bytes** (#41, #40). `Read` copies the
   chunk list before the dirty buffers (`internal/blobfs/fs.go:988`,
   `:1004-1011`), so a flush in between can make it return older contents than
@@ -1217,3 +1323,20 @@ it returned when asked for verbatim text.
   with AfterFunc(d, f), if t.Stop returns false, then the timer has already
   expired and the function f has been started in its own goroutine; Stop does
   not wait for f to complete before returning."
+
+The two entries below were added by the 2026-09-24 revision and fetched while it
+ran, through the same tool; they are quoted on the same terms.
+
+- Go standard library, `runtime.Goexit`. <https://pkg.go.dev/runtime#Goexit>
+  Cited in §4 and Assumption 11 for why the settle cannot rely on `recover`:
+  "Goexit runs all deferred calls before terminating the goroutine. Because
+  Goexit is not a panic, any recover calls in those deferred functions will
+  return nil."
+- Go standard library, the built-in `recover`.
+  <https://pkg.go.dev/builtin#recover> Cited in §4 for what calling it during a
+  panic does: "Executing a call to recover inside a deferred function (but not
+  any function called by it) stops the panicking sequence by restoring normal
+  execution and retrieves the error value passed to the call of panic."
+  **Honesty note:** this is the `builtin` package's doc comment, not the
+  language specification. My fetch of the specification's *Handling panics*
+  section came back truncated, so I cite the doc comment in its place.
