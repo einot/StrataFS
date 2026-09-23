@@ -59,10 +59,10 @@ is yours.
 **No exception for "mechanical" edits.** Every test file change goes
 through `test-author`, full stop — including a one-line formatting fix, a
 lint-only rename, or any other change that looks too small or too
-obviously safe to bother delegating. `test-author` has no Bash and so
-cannot run a formatter itself; that means making the edit by hand with
-Edit until the content matches, not an excuse to make the edit directly
-instead. The same holds for `coder`'s and `architect`'s domains: "it's
+obviously safe to bother delegating. `test-author` and `coder` have no
+Bash and so cannot run a formatter themselves; that means making the
+edit by hand with Edit until the content matches, not an excuse to make
+the edit directly instead. The same holds for `coder`'s and `architect`'s domains: "it's
 tiny" is never a reason to touch code, tests, or specs/schemas/ADRs
 directly. The top-level session's own tools stay limited to reconciling
 already-delegated work (applying a worker's own diff/commit, resolving a
@@ -87,8 +87,20 @@ trust dialog to have been accepted, which a headless session never does.
 Hook configuration is read from the *main checkout*, not from a
 worktree-isolated agent's checkout — so a `coder` dispatch is fenced by
 whatever the main checkout's `settings.json` says at that moment, and the
-copy in its worktree is inert. Verify any guard change the only way that
-counts: put it in the main checkout, dispatch a real agent, and have it
+copy in its worktree is inert.
+
+`coder` has no Bash, on purpose. The path guard only sees Edit and Write,
+so it is a boundary only for an agent with no other way to write — and a
+fence on `coder`'s shell would not have made it one, because the shell's
+job is `go test`, which runs code `coder` wrote and that code can write
+anywhere. The cost is that `coder` works blind: it cannot build, format,
+test or commit. The session therefore runs the merge bar in `coder`'s
+worktree after every dispatch, commits `coder`'s changes there itself, and
+resumes the same `coder` with any failure output rather than starting a
+fresh one. Those gate runs are the only test runs `coder`'s work gets, so
+they are the authority, not a double-check.
+
+Verify any guard change the only way that counts: put it in the main checkout, dispatch a real agent, and have it
 attempt an operation the policy must refuse. A test that pins the wiring
 is worth having, but a passing test is not a fired hook.
 
