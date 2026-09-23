@@ -57,6 +57,72 @@
   entries, 120 s, FIFO ordered by `finish`, refresh-nothing lookup and degraded
   path, §8's three states, `begin`, `abandon`, `len` and named constants, and
   Assumptions 1–11 and 13–15. Status stays `Accepted`.
+- **Revised:** 2026-09-23 — answers two findings from the review of the
+  implementation. The decision and every behaviour are unchanged, so no code
+  and no test moves; this corrects what the document says about capacity and
+  memory. **The shared budget, stated and kept.** The security review showed
+  that one connection can push out every other connection's *done* entries
+  with about 4096 *completed* calls sent one after another. The ADR's only
+  degraded case had been "more than 4096 concurrent non-idempotent calls",
+  which is a different mechanism (every entry in flight), and §7's bullet for
+  that case stands. Per-connection fairness was weighed and deferred on cost.
+  **§7's "Nothing reclaims" bullet** no longer implies that connection churn
+  is how a live connection's entries go early. **§7 gains a last bullet**,
+  "One budget for all connections", which makes the shared budget an
+  explicit decision. ***Alternatives considered*** gains "Give each
+  connection a fair share of the 4096 entries". **Assumption 8** is reframed,
+  because it presented churn as the mechanism and a purge as the remedy, and
+  the added **Assumption 17** records the judgement. **The *Consequences*
+  bullet "Under sustained overload"** is replaced by two, one per mechanism:
+  "Any connection can flush every other connection's done entries" and "When
+  every entry is in flight". **The memory arithmetic, corrected.** The
+  *Consequences* bullet **"Memory"** counted reply lengths and said "under
+  2 MiB". Under §5's no-copy rule an entry retains its reply's whole 512-byte
+  `xdr.Writer` array, so the buffers alone are 2 MiB, and with the map and the
+  queue the ceiling is about 2.7 MiB. The bullet also named CREATE as the
+  longest reply, but RENAME's is longer, 260 bytes to 256. It now counts
+  capacity, itemises the bookkeeping, and says that on Go 1.24 the arithmetic
+  does not bound the map under this cache's churn. It also weighs the no-copy
+  rule against copying, and the rule stays. **§5** gains one sentence pointing
+  at that cost. The added **Assumption 18** records what the figure rests on,
+  and ***References*** gains the sources for both parts. Those places — §5's
+  no-copy paragraph, §7's "Nothing reclaims" bullet and its new last bullet,
+  the new *Alternatives considered* entry, Assumptions 8, 17 and 18 with the
+  line introducing 17 and 18, the *Consequences* bullets "Memory", "Any
+  connection can flush every other connection's done entries" and "When
+  every entry is in flight", the *References* additions with the line
+  introducing them, and this entry — are the whole of this revision.
+  Unchanged: §1–§4, §6, §7's bounds, eviction order, four-step `begin`,
+  refresh-nothing lookup, in-flight bullet and degraded-case bullet, §8
+  entire, Assumptions 1–7 and 9–16, and the three earlier revisions. Status
+  stays `Accepted`.
+- **Revised:** 2026-09-23 — narrows an overclaim introduced by the fourth
+  revision, directly above. The decision and every behaviour are unchanged,
+  so no code and no test moves. That revision said in four places that a
+  retransmission arriving while its original is still executing is always
+  dropped, whatever the load. Review found that this contradicts §6's table,
+  §7's degraded-case bullet and the implementation, which follows them: an
+  original that arrives when all 4096 entries are already in flight gets no
+  marker, and a retransmission of it runs again. What stays true, and is
+  kept, is that nothing evicts an installed marker, however many other calls
+  complete. Each of the four sentences now makes the guarantee conditional on
+  the original having a marker, and points at the degraded case rather than
+  restating it. **§7's last bullet**: the sentence ending "whatever else is
+  happening" becomes three, the third saying that no number of completed
+  calls can leave an original without a marker. ***Alternatives considered***,
+  sub-bullet "What it protects is a narrow tail": the sentence saying the
+  retransmission "is safe from any amount of other traffic" becomes two.
+  **Assumption 17**, sub-bullet "The exposed tail is narrow over TCP": the
+  last sentence, saying the retransmission "is protected by a marker",
+  becomes two. ***Consequences***, bullet "Any connection can flush every
+  other connection's done entries": the sentence ending "meets a marker,
+  which nothing evicts" becomes two, the second naming the degraded case as
+  the next bullet's mechanism and not this one's. No assumption is added,
+  because each corrected sentence follows from §7's step 3 and its in-flight
+  bullet. Those four replacements and this entry are the whole of this
+  revision. Unchanged: everything else, including §6, §7's degraded-case
+  bullet, the *Consequences* bullet "When every entry is in flight", every
+  other assumption, and the four earlier revisions. Status stays `Accepted`.
 - **Issue:** #2 — *Retransmitted requests are re-executed: no duplicate request cache*
 - **Affects:** `internal/sunrpc`, `internal/nfs`
 
@@ -253,7 +319,9 @@ slice as given rather than copying it, and `begin` returns that same slice on a
 hit; both directions are read-only by contract, so a caller must not modify a
 slice it has handed to `finish` or received from `begin`. That is what lets
 concurrent replays of one entry share the bytes without copying and without
-racing.
+racing. Storing the slice as given also keeps its whole backing array alive
+for the entry's life, not just the bytes the reply uses; *Consequences* counts
+the memory that costs and weighs it against copying.
 
 Replies are cached **whatever their status**, including `GARBAGE_ARGS` and
 `SYSTEM_ERR`. Byte-identical replay is the whole point, and carving out statuses
@@ -423,9 +491,12 @@ statement about a live call, never a tombstone for a dead one.
 - **Nothing reclaims a connection's entries when it closes.** They age out or
   are evicted like any other. With a per-connection-instance key that is a
   capacity question and not a correctness one, and the 4096 bound holds either
-  way; a connection-churning workload can push a live connection's entries out
-  early, which degrades dedup towards today's behaviour and nothing worse. See
-  *Alternatives considered*.
+  way; a connection-churning workload fills the budget with entries that can
+  never match again and so pushes a live connection's entries out early, which
+  degrades dedup towards today's behaviour and nothing worse. Churn is one way
+  for a live connection to lose its entries early, and neither the only way
+  nor the likeliest: the last bullet of this section has the other, which a
+  purge would not touch. See *Alternatives considered*.
 - **In-flight entries occupy capacity, and are never evicted or expired.** They
   count towards `maxEntries`, and towards `len` (§8), exactly as done entries
   do: the bound is on entries held, not on replies stored. That is what makes
@@ -449,6 +520,28 @@ statement about a live call, never a tombstone for a dead one.
   bound absolute. `begin` still reports a miss in that case, so the caller does
   not need to know; `finish` completes only an entry that exists and is in
   flight, and does nothing for a key that was never installed.
+- **One budget for all connections, with no per-connection share.** There is
+  one done queue, and step 3 evicts its head whichever connection owns it. A
+  done entry therefore survives until it is `maxAge` old or until roughly
+  `maxEntries` later calls, from *any* connection, have been installed behind
+  it, whichever comes first. The count is only rough for two reasons: markers
+  in flight hold places outside the queue, and an abandoned call gives its
+  place back. The count comes first whenever the whole server sustains more
+  than about 34 non-idempotent calls a second (4096 / 120 s). So every
+  connection's traffic shortens every other connection's dedup memory, and a
+  single connection can push out all the others' done entries without churn
+  and without concurrency, by completing about 4096 calls one after another
+  (*Consequences*). Two things bound the loss. Once `begin` has installed a
+  marker for an original, nothing evicts it, so a retransmission that arrives
+  while that original is still executing is dropped as §6 says, whatever
+  other traffic follows. Only an original that arrives when all 4096 entries
+  are already in flight gets no marker, and a retransmission of it runs again
+  (the degraded case above). No number of completed calls can bring that
+  about, because `begin` evicts a done entry to make room. And an entry
+  pushed out costs its own connection one re-execution of that call, which is
+  today's behaviour, and never another connection's reply (§2). The shared
+  budget is deliberate. Per-connection fairness was considered and deferred
+  (*Alternatives considered*, Assumption 17).
 
 **Neither bound is a flag.** Both are dictated by client retransmission
 behaviour, which is a protocol fact rather than a property of the host, and the
@@ -589,6 +682,70 @@ different feature — recognising duplicates *across* connections, which
 per-connection identity deliberately does not attempt — and it costs a hash on
 every non-idempotent call. Orthogonal to this fix.
 
+**Give each connection a fair share of the 4096 entries.** Proposed by the
+security review of the implementation, after it showed that one connection
+can push out every other connection's done entries (§7's last bullet,
+*Consequences*). The review suggested two shapes: cap each connection at N
+entries, or evict the requesting connection's own oldest done entry before
+anyone else's. Deferred rather than rejected outright. It is not unsafe; it
+costs more than it returns today:
+
+- *It does nothing for the common deployment, and a cap makes that deployment
+  worse.* One mount is one long-lived connection (Assumption 17). There, the
+  traffic that ages a connection's entries is its own, and no division of the
+  budget changes that. A cap below 4096 shortens that connection's memory
+  outright.
+- *What it protects is a narrow tail.* The case *Context* leads with, a
+  retransmission that meets a still-executing original, is safe from any
+  amount of other traffic once `begin` has installed a marker for that
+  original, because nothing evicts an installed marker. An original that
+  arrives when all 4096 entries are already in flight gets no marker, and a
+  retransmission of it runs again (§7's degraded case; *Consequences*, "When
+  every entry is in flight").
+  Fairness protects only a quiet connection's *done* entry. That entry is
+  needed by a retransmission the server reads after the original completed,
+  either because it crossed the reply or because it sat unread behind its own
+  connection's 64 in-flight calls. Fairness helps only if about 4096 other
+  calls complete in that gap.
+- *It costs the structure §7 is built on.* To take one particular
+  connection's oldest done entry while still expiring in global `finish`
+  order, the cache must remove entries from the middle of its queue. Today
+  entries leave the queue only at its head, which is what lets an
+  implementation keep it in a plain slice, as this one does. Fairness needs
+  per-connection queues threaded through the global one, which means two sets
+  of links per entry. The alternative is lazy deletion, and it must compact:
+  otherwise stale queue references pile up at the flood rate for up to 120 s
+  and the memory bound in *Consequences* is gone. Fairness also
+  rewrites §7 step 3, the part of `begin` that two implementations must agree
+  on. And it adds per-connection bookkeeping whose life has to end with the
+  connection's last entry, because the cache deliberately has no close hook.
+- *The mainstream precedent is a shared cache.* Linux's NFS server keeps one
+  cache with no per-client limit. Its source describes itself as "currently a
+  global cache, but this may change in the future and be a per-client cache".
+  It keeps flushing rare by size, not by partitioning: it scales the entry
+  count with RAM, up to 256K entries (*References*).
+
+This is a different objection from the one against purging on close. The purge
+lost because its correctness hung on the order of three events in `serveConn`.
+A quota would run inside `begin` under the cache's lock, as eviction does
+today. It would need no API method and has no ordering hazard, so the only
+case against it is cost. Nor is either one a substitute for the other. A purge
+frees entries that can never match again, while a quota restrains a
+connection that is still open. A purge would do nothing about the flooding
+above, because the connection doing it has not closed.
+
+Fairness can be added later without reopening anything else. Take a victim
+rule that lets a lone connection use all 4096 entries and keeps each
+connection's own entries in `finish` order, for example "evict from the
+connection holding the most done entries". It changes §7's eviction rule and
+the queue's structure, and nothing in §2, §5, §6 or §8. The API, the
+constructor and the named constants stay. Every test written against this ADR
+that exercises eviction today uses one connection, so none of them would
+become wrong, though the new rule would need tests of its own. What would
+reopen the question is any of these: several long-lived clients per server
+becoming a supported deployment, a non-loopback listener, or a re-execution
+traced to cross-connection eviction.
+
 ## Assumptions
 
 Recorded because the issue did not specify them and a reader should be able to
@@ -639,11 +796,20 @@ push back on them individually.
    size-setting `SETATTR`, which may fetch a chunk.
 8. **Letting entries outlive their connection is acceptable.** Nothing reclaims
    a closed connection's entries before they age out (§7). That is a capacity
-   judgement, not a correctness one, and it is unmeasured: I am assuming a mount
-   holds one long-lived connection, and that nothing else on the host opens
-   connections fast enough, with enough non-idempotent traffic, to evict a live
-   connection's entries inside 120 s. If that proves wrong the remedy is a
-   purge, which would change no other part of this design.
+   judgement, not a correctness one, and it is unmeasured. I am assuming a
+   mount holds one long-lived connection, so that entries left behind by
+   closed connections, which can never match again, are a small share of the
+   4096. If that proves wrong the remedy is a purge, which would change no
+   other part of this design. A purge is a remedy for dead entries only,
+   though. Connection churn is neither the only way nor the likeliest way for
+   a live connection's entries to be pushed out early. The shared budget (§7's
+   last bullet) lets one connection that never closes push out every other
+   connection's done entries by completing about 4096 non-idempotent calls.
+   Those are *completed* calls, issued one after another, not 4096 at once. No
+   churn and no concurrency is needed, and a busy honest client does it as
+   readily as a hostile one. A purge would not touch that, because the
+   connection doing it is still open. Accepting it is a separate judgement,
+   Assumption 17.
 9. **The connection serial needs no unpredictability, and 64 bits is enough.**
    It is process-local, never leaves the process, and is not derived from
    anything a client sends, so starting at 1 leaks nothing and no client can aim
@@ -721,20 +887,149 @@ Assumption 16 comes from the 2026-09-23 revision.
     implementation and a clean-room test cannot disagree about a case neither
     of them can reach.
 
+Assumptions 17 and 18 come from the second 2026-09-23 revision, which answered
+two findings from the review of the implementation.
+
+17. **One shared budget is acceptable, and per-connection fairness is not yet
+    worth its cost.** The security review showed that any connection can push
+    out every other connection's done entries (§7's last bullet). I kept the
+    single queue anyway, on three judgements. The first two are mine and
+    unmeasured. The third is the security review's, and I agree with it:
+    - *The common deployment is one mount, and so one long-lived connection.*
+      There, no division of the budget helps, and a cap would hurt.
+    - *The exposed tail is narrow over TCP.* On a live connection the
+      original's reply is always written, so a client stops retransmitting
+      once that reply arrives. A done entry therefore matters only for a
+      retransmission that was already on its way, and that the server reads
+      after the original completed. That happens when it crossed the reply, or
+      when it sat unread behind its connection's 64 in-flight calls. The
+      retransmission that meets a still-executing original is protected by
+      that original's marker, which nothing evicts, provided `begin` installed
+      one. An original that arrives when all 4096 entries are already in
+      flight gets none, and a retransmission of it runs again (§7's degraded
+      case).
+    - *No one gains from doing it on purpose.* AUTH_SYS lets anyone who can
+      reach the socket perform any operation as any uid, which is more than
+      defeating another client's dedup. The argument does not depend on the
+      loopback binding, only on AUTH_SYS.
+
+    If the first two prove wrong, per-connection fairness is the remedy.
+    That would mean several long-lived clients per server becoming a
+    supported deployment, or a re-execution traced to cross-connection
+    eviction. *Alternatives considered* says what fairness would and would not
+    disturb. Raising `maxEntries` is the other lever, and it trades memory at
+    the rate *Consequences* gives.
+18. **The memory figure rests on the Go runtime's internals as read from its
+    source, and on a Go 1.25 or later toolchain.** The 2 MiB of reply buffers
+    follows from this repo's code alone. The map and queue figures do not. They
+    come from reading Go's source and documentation (*References*): groups of
+    8 slots behind an 8-byte control word, tables that grow past 7/8 full and
+    split at 1024 slots, slices that grow by about a quarter past 256
+    elements, and large allocations rounded up to 8 KiB pages. None of that was
+    measured, and a runtime change can move it. The map figure also needs Go
+    1.25 or later, because Go 1.24 gets back the capacity deletions tie up as
+    tombstones only by growing a table (golang/go#70886). Whether to require
+    1.25 in `go.mod` is not this ADR's call. Three more judgements are mine
+    alone:
+    - that 512 bytes per entry holds only while every reply the cache can hold
+      fits in `xdr.NewWriter`'s initial buffer, a fact of today's code and not
+      a rule, so a non-idempotent procedure with longer replies would mean
+      redoing the arithmetic;
+    - that the default 256 MiB chunk cache is the right yardstick for "a user
+      would not notice";
+    - and that under 1 MiB of difference does not justify changing a tested
+      rule.
+
 ## Consequences
 
-- **Memory.** Bounded by arithmetic, not measured: the largest cached reply is a
-  `CREATE`/`MKDIR`/`SYMLINK` reply — status, `post_op_fh3` over a 16-byte handle,
-  `post_op_attr`, `wcc_data`, plus the 24-byte RPC reply header — which is under
-  300 bytes. 4096 entries at under 300 bytes plus a 24-byte key is under 2 MiB.
-  In-flight entries count towards the 4096 (§7) but hold no reply bytes, so
-  that figure bounds any mix of the two.
+- **Memory.** Bounded by arithmetic, not measured: about 2.7 MiB at the
+  4096-entry ceiling, and under 3 MiB. A done entry holds three things.
+  - *A reply buffer, counted by capacity and not by length.* §5 stores the
+    slice `dispatch` returns without copying it, so an entry keeps that
+    slice's whole backing array alive. Every reply `dispatch` can cache,
+    success or error, is built in an `xdr.Writer`, which starts with a
+    512-byte array, and no cached reply outgrows it. With this filesystem's
+    16-byte handles the longest is RENAME's, at most 260 bytes: the 24-byte
+    RPC reply header, a status and two `wcc_data`. Next come successful
+    CREATE, MKDIR and SYMLINK replies, at most 256 bytes, and LINK's, 232.
+    Every other cached NFS reply is at most 144 bytes, and `GARBAGE_ARGS`
+    and `SYSTEM_ERR` replies are 24. Even NFSv3's 64-byte maximum handle
+    would take CREATE's only to 304. So every done entry holds exactly one
+    512-byte array. That is a Go allocator size class, so nothing rounds it
+    up, and 4096 of them come to **2 MiB** however short the replies are.
+    This bullet first counted reply lengths and arrived at "under 2 MiB" for
+    the whole cache. Length is the wrong measure, because a 24-byte reply
+    retains as much as a 260-byte one.
+  - *A map slot:* a 24-byte key and a 24-byte slice header. Go's maps (Swiss
+    tables since Go 1.24) keep 8 slots per group behind an 8-byte control
+    word, which comes to 49 bytes a slot here. They grow a table once it is
+    more than 7/8 full and split it at 1024 slots. A 1024-slot table
+    therefore splits in two once it passes 896 entries, and with an even hash
+    the tables split at about the same time, so 4096 entries sit in about 8
+    tables of 1024 slots, each about half full. Each table is 128 groups of
+    392 bytes, and because that allocation is over 32 KiB it is rounded up to
+    whole 8 KiB pages, which makes 56 KiB a table and about **448 KiB** in
+    all. A Go map does not shrink when entries are deleted, so the map
+    reaches that size the first time the cache fills and stays there.
+  - *A queue reference:* the key again and a 24-byte `time.Time`, 48 bytes,
+    in a slice used as a FIFO. Past 256 elements Go grows a slice by about a
+    quarter at a time and rounds a large allocation up to whole pages, so the
+    queue's array peaks at 5461 references, **256 KiB**.
+
+  2 MiB + 448 KiB + 256 KiB is 2,818,048 bytes. An in-flight entry has a map
+  slot but no buffer and no queue reference, so any mix of in-flight and done
+  entries is inside that figure. Two costs are left out, because they belong
+  to the runtime and not to this cache: the old array a queue reallocation
+  leaves for the collector, and the headroom Go's collector keeps over the
+  live heap. The map's share also assumes Go 1.25 or later (Assumption 18).
+  Go 1.24, which `go.mod` still admits, gets back the capacity that deletions
+  tie up as tombstones only by growing a table. Once this cache is full it
+  deletes one entry for every one it inserts. golang/go#70886 reports that
+  same churn growing a constant-size map eightfold. On that toolchain this
+  arithmetic does not bound the map.
+
+  **The no-copy rule stays.** If each reply were copied into an allocation of
+  its own length, an entry would retain at most 288 bytes (RENAME's 260,
+  rounded up to its size class), or 1.125 MiB in all. That saves at most
+  0.875 MiB, about a third of the total, and costs an allocation and a copy
+  on every non-idempotent call. The process's chunk cache defaults to 256 MiB
+  (`-cache`), and against that neither figure is one a user would notice. If
+  the entry bound ever grows enough for the buffers to matter, a copy is not
+  the cheapest fix. `dispatch` could instead allocate each reply record at its
+  exact length in the first place. That saves the same memory with no copy
+  and no extra allocation, and it changes no rule in this ADR.
 - **Not covered, deliberately:** a duplicate that arrives after a server restart
   (the cache is in memory; RFC 1813 §4.5 notes this limitation of the technique
   generally), and a duplicate that arrives on a new connection — including a
   reconnect by the same client (Assumption 1).
-- **Under sustained overload** (more than 4096 concurrent non-idempotent calls)
-  protection degrades gracefully to today's behaviour rather than failing.
+- **Any connection can flush every other connection's done entries.** §7's
+  budget is shared, so each connection's dedup memory is whatever the whole
+  server's traffic leaves it. A busy honest client does this without meaning
+  to. A build, an `rm -rf` or an untar on a second mount can complete
+  thousands of non-idempotent calls a second over loopback, by estimate, and
+  that cycles all 4096 entries within a second or two. Doing it on purpose
+  takes about 4096 *completed* calls, sent one after another. It needs no
+  concurrency, and at those rates it takes a second or two over loopback, or
+  less. The cheapest such calls change nothing. MKNOD always answers
+  `NFS3ERR_NOTSUPP` (§4), and a non-idempotent call whose arguments do not
+  decode is cached as `GARBAGE_ARGS` (§5). Neither needs a valid file handle.
+  What the victim loses is exactly what this ADR adds and no more: a
+  retransmission the server reads after its original completed is executed
+  again, which is today's behaviour for that one call. No reply ever reaches
+  another connection (§2). A retransmission that arrives while its original
+  is still executing meets the original's marker, which nothing evicts,
+  provided `begin` installed one. An original that arrives when all 4096
+  entries are already in flight gets none, and a retransmission of it runs
+  again; that is the next bullet's mechanism, not this one's. None of this
+  crosses a security boundary: AUTH_SYS already lets anyone who can reach the
+  socket perform any operation as any uid, which is more than defeating
+  another client's dedup. The shared budget is deliberate (§7,
+  *Alternatives considered*, Assumptions 8 and 17).
+- **When every entry is in flight,** a new call runs uncached (§7's degraded
+  case). That takes more than 4096 concurrent non-idempotent calls, which at
+  64 per connection means at least 65 connections, and `Serve` does not cap
+  connections. The result is today's behaviour for that call. It is never a
+  failure, and the cache never grows past its bound.
 - `sunrpc.Server.dispatch` needs to know which connection a call arrived on,
   which today it does not; `serveConn` takes a serial from the `Server`'s
   counter once per accepted connection and passes it in. Nothing outside
@@ -808,3 +1103,61 @@ Assumption 16 comes from the 2026-09-23 revision.
   the kernel's compiled-in constant, not a measurement: I have no way to run or
   observe anything here.
   <https://raw.githubusercontent.com/torvalds/linux/master/include/net/tcp.h>
+
+The entries below were added by the second 2026-09-23 revision.
+
+- Linux `fs/nfsd/nfscache.c`, `torvalds/linux` master as fetched 2026-09-23.
+  Cited in *Alternatives considered* as precedent for a shared cache. Three
+  things were taken from it:
+  - the file's header comment, "Request reply cache. This is currently a
+    global cache, but this may change in the future and be a per-client
+    cache.";
+  - `nfsd_cache_size_limit`, which computes `limit = (16 *
+    int_sqrt(low_pages)) << (PAGE_SHIFT-10)` and returns `min_t(unsigned
+    int, limit, 256*1024)`;
+  - `nfsd_prune_bucket_locked`, which walks a bucket's LRU "ordered
+    oldest-first" and stops once the entry count is within the maximum and
+    the entry is younger than `RC_EXPIRE`.
+
+  No per-client limit appears in the file.
+  <https://github.com/torvalds/linux/blob/master/fs/nfsd/nfscache.c>
+  **Honesty note:** the raw-file fetch returned HTTP 429, so these quotes came
+  through the fetch tool's rendering of the GitHub page, asked for verbatim
+  text. I did not read the file end to end, and "no per-client limit" is that
+  rendering's answer, not my own reading of every line.
+- Go runtime source, `release-branch.go1.24`, fetched 2026-09-23, for the
+  memory figure in *Consequences* and Assumption 18:
+  - `src/internal/runtime/maps/table.go` has `const maxTableCapacity = 1024`,
+    commented "Maximum size of a table before it is split at the directory
+    level". Its `rehash` grows or splits the table. It carries a TODO that
+    tombstones are not reclaimed in place, and `split` creates two tables of
+    `maxTableCapacity` slots each.
+  - `src/internal/runtime/maps/group.go` has `maxAvgGroupLoad = 7`,
+    commented "Maximum load factor prior to growing. 7/8 is the same load
+    factor used by Abseil".
+  - `src/runtime/slice.go` has `nextslicecap`, which doubles below 256
+    elements and then grows by `newcap += (newcap + 3*threshold) >> 2`.
+    `growslice` then rounds the result up with `roundupsize`.
+  - `src/runtime/sizeclasses.go` lists 512 bytes as size class 26 and 288 as
+    class 19, with `_MaxSmallSize = 32768` and `_PageShift = 13`.
+
+  <https://github.com/golang/go/tree/release-branch.go1.24/src>
+- Go tip, `src/internal/runtime/maps/table.go`, fetched 2026-09-23. When a
+  table's `growthLeft` reaches 0 on insert it first calls `pruneTombstones`
+  ("If we have no space left, first try to remove some tombstones"). That
+  function declines unless tombstones are at least 10% of capacity. Go 1.24's
+  source has no such step.
+  <https://tip.golang.org/src/internal/runtime/maps/table.go>
+- *Faster Go maps with Swiss Tables*, the Go blog. Taken from it: groups "of
+  8 slots each", "a 64-bit control word for metadata", and "An individual
+  table stores a maximum of 1024 entries." <https://go.dev/blog/swisstable>
+- golang/go#70886, *runtime: Swiss Table maps can double size multiple times
+  when deleting/adding elements*. The reporter's map, held at a constant
+  count, grew from 128 to 1024 table slots under delete/add churn. The issue
+  is closed in the Go 1.25 milestone. **Honesty note:** the fetched page did
+  not show which change closed it. Linking it to `pruneTombstones` is my
+  inference from the tip source above.
+  <https://github.com/golang/go/issues/70886>
+- golang/go#20135, *runtime: shrink map as elements are deleted*, open as
+  fetched 2026-09-23. Cited for the fact that a Go map does not give storage
+  back on delete. <https://github.com/golang/go/issues/20135>
