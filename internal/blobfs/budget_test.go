@@ -1,9 +1,9 @@
 package blobfs
 
 // Clean-room tests for the write-backpressure budget, written from
-// docs/adr/0003-write-backpressure.md as revised 2026-09-23: §3 (the lock
-// rules), §4 (*The budget* and *The test surface*), §7 (the three log records)
-// and Assumptions 8-14. They exercise the budget type on its own. drain is a
+// docs/adr/0003-write-backpressure.md as revised 2026-09-23, including its
+// second pass: §3 (the lock rules), §4 (*The budget* and *The test surface*),
+// §7 (the three log records) and Assumptions 8-14. They exercise the budget type on its own. drain is a
 // plain func(context.Context) error that each test supplies, and no FS is
 // built.
 //
@@ -19,12 +19,15 @@ package blobfs
 // One test is probabilistic: TestBudgetFailureSurvivesLaterSuccess. Its doc
 // comment explains why it can never fail on a correct budget.
 //
-// Not covered: Assumption 9's "a parked call fails even when the failed drain
-// freed enough room for it". A drain frees room through release, which
-// broadcasts (§4, *Admission while a drain runs*), so a parked call can wake
-// and be admitted before the drain settles. Returning nil and returning the
-// failure are then both correct, and no test can force one without a hook
-// inside await.
+// Not covered: Assumption 9's "a call still parked when a failed drain is
+// settled fails, even if that drain freed enough room for it before it
+// failed", when the room was freed through release. Assumption 9 itself says
+// why: "when a failing drain frees room before it fails, whether a woken call
+// is admitted or failed depends on whether it looks before the settle or after
+// it. That is scheduling: both outcomes conform, and a test cannot force
+// either without a hook inside await." What it says a test can pin, "If
+// nothing frees room before the settle, every call still parked then fails",
+// is covered by TestBudgetFailedDrainFailsEveryWaiter and others.
 
 import (
 	"context"
@@ -75,11 +78,13 @@ func btTag(ctx context.Context) string {
 	return s
 }
 
-// btCall is one call to await running in its own goroutine. err, panicked and
-// pval may be read only once done is closed.
+// btCall is one call to await running in its own goroutine. err, returned,
+// panicked and pval may be read only once done is closed. A call that is done
+// with neither returned nor panicked set ended in runtime.Goexit.
 type btCall struct {
 	done     chan struct{}
 	err      error
+	returned bool
 	panicked bool
 	pval     any
 }
@@ -97,6 +102,7 @@ func btAwait(ctx context.Context, b *budget, drain func(context.Context) error) 
 			}
 		}()
 		c.err = b.await(ctx, drain)
+		c.returned = true
 	}()
 	return c
 }
@@ -122,14 +128,17 @@ func btWait(t *testing.T, what string, c *btCall) {
 }
 
 // btResult waits for c and returns what await returned. A panic out of await
-// fails the test: await panics only when its own drain does (ADR 0003 §4), and
-// the one test that expects that reads c.pval itself.
+// fails the test. ADR 0003 §4 lets a panic continue out of await only when the
+// drainer's window ends in one: its drain panics, or the Info record's log
+// call does. The tests that set that up read c.pval themselves.
+// TestBudgetErrorHandlerPanicAfterSettle, where a panic out of the drainer is
+// allowed but not required, does not call btResult on the drainer.
 func btResult(t *testing.T, what string, c *btCall) error {
 	t.Helper()
 	btWait(t, what, c)
 	if c.panicked {
-		t.Fatalf("%s panicked with %v; await lets a panic out only when its own "+
-			"drain panics (ADR 0003 §4)", what, c.pval)
+		t.Fatalf("%s panicked with %v; await lets a panic out only when the "+
+			"drainer's own window panics (ADR 0003 §4)", what, c.pval)
 	}
 	return c.err
 }
@@ -625,8 +634,8 @@ func TestBudgetDrainErrorReturnedUnchanged(t *testing.T) {
 }
 
 // TestBudgetDrainsAgainAfterSuccessWithoutRoom (B6) pins ADR 0003 §4,
-// "Succeeded (it returned nil): go round the loop. The drainer is admitted by
-// step 3.2 like anyone else. If other writers refilled the budget while it
+// "Succeeded (drain returned nil): go round the loop. The drainer is admitted
+// by step 3.2 like anyone else. If other writers refilled the budget while it
 // drained, it drains again", and "Admitting it outright instead would let a
 // drain that freed nothing admit a writer over the limit".
 func TestBudgetDrainsAgainAfterSuccessWithoutRoom(t *testing.T) {
@@ -722,7 +731,10 @@ func TestBudgetOneDrainForManyWaiters(t *testing.T) {
 }
 
 // TestBudgetFailedDrainFailsEveryWaiter (B8) pins ADR 0003 §4, G2: "A call
-// that is parked when a drain fails ... returns that failure", and G3: "The
+// still parked when a drain is settled as Failed or Panicked returns that
+// failure", which here, with nothing freed before the settle, is every parked
+// call (Assumption 9: "If nothing frees room before the settle, every call
+// still parked then fails, and that is what a test can pin"), and G3: "The
 // drainer returns its own drain's failure: the error value drain returned,
 // unchanged." Also Consequences: "One failing commit fails every write that is
 // waiting on it, at once."
@@ -901,7 +913,7 @@ func TestBudgetParkedCallWakesOnDeadline(t *testing.T) {
 }
 
 // TestBudgetAbandonedDrainPublishesNothing (B12) pins ADR 0003 §4, "Abandoned
-// (it returned an error, and the drainer's ctx is done by then): record
+// (drain returned an error, and the drainer's ctx is done by then): record
 // nothing and log nothing, and return ctx.Err(). The parked calls go round
 // again, and one of them becomes the next drainer, with its own ctx", and
 // Assumption 10: broadcasting the error "would fail other writers with someone
@@ -998,10 +1010,11 @@ func TestBudgetAdmitsWhileDrainRuns(t *testing.T) {
 // btPanicValue is what the drain in TestBudgetDrainPanic panics with.
 type btPanicValue struct{ why string }
 
-// TestBudgetDrainPanic (B14) pins ADR 0003 §4, "Panicked: record
-// errDrainPanicked as the latest failure, log nothing, and let the panic
-// continue out of await unchanged ... A later call can become the next
-// drainer (Assumption 11)", and G2's "errDrainPanicked for a panic". §7:
+// TestBudgetDrainPanic (B14) pins ADR 0003 §4, "Panicked (the window ended
+// without drain returning: drain panicked ...): record errDrainPanicked as the
+// latest failure, log nothing, and let the panic or the Goexit continue
+// unchanged, so await does not return ... A later call can become the next
+// drainer (Assumption 11)", and G2's "errDrainPanicked for Panicked". §7:
 // there is no Error record for "a panicked one".
 func TestBudgetDrainPanic(t *testing.T) {
 	c := newBTCapture(false)
@@ -1264,14 +1277,17 @@ func btScenarioWarn(t *testing.T, c *btCapture) {
 // await call, while that call is still blocked", "counted from when it entered
 // await and including any time it spends draining. So the drainer counts",
 // "waited is a time.Duration (slog.KindDuration)", and §4's warnAfter, which
-// "A test may lower ... before the budget is first used". Assumption 12.
+// "A test may set it to any value before the budget is first used".
+// Assumption 12.
 func TestBudgetWarnRecordWhileBlocked(t *testing.T) {
 	btScenarioWarn(t, newBTCapture(false))
 }
 
 // TestBudgetNoWarnForShortWait (B18) pins ADR 0003 §7: "A call logs it once it
 // has been blocked longer than warnAfter". A call that drains at once, with
-// warnAfter an hour, is never blocked that long.
+// warnAfter an hour, is never blocked that long. Raising warnAfter is allowed:
+// Assumption 12 lets a test set it "higher, so that a short wait is sure to
+// stay under it".
 func TestBudgetNoWarnForShortWait(t *testing.T) {
 	c := newBTCapture(false)
 	b := newBudget(1000, c.logger())
@@ -1310,7 +1326,9 @@ func TestBudgetLogsOutsideItsLock(t *testing.T) {
 // TestBudgetDefaults (B20) pins ADR 0003 §4's pinned declarations: "const
 // stallWarnAfter = 5 * time.Second", "newBudget sets it [warnAfter] to
 // stallWarnAfter", "limit reports the limit the budget was built with,
-// unchanged", and errDrainPanicked, "a sentinel made with errors.New". A fresh
+// unchanged", and errDrainPanicked, declared "var errDrainPanicked =
+// errors.New(...)": "It is a sentinel, compared with errors.Is. The
+// declaration's form is pinned; the text given to errors.New is not." A fresh
 // budget holds nothing, since used() is exactly Σadd − Σrelease, and has no
 // parked calls.
 func TestBudgetDefaults(t *testing.T) {
@@ -1338,8 +1356,8 @@ func TestBudgetDefaults(t *testing.T) {
 	}
 }
 
-// TestBudgetAbandonedIsDecidedByCtxNotError pins ADR 0003 §4, "Abandoned (it
-// returned an error, and the drainer's ctx is done by then): record nothing
+// TestBudgetAbandonedIsDecidedByCtxNotError pins ADR 0003 §4, "Abandoned
+// (drain returned an error, and the drainer's ctx is done by then): record nothing
 // and log nothing, and return ctx.Err(). The parked calls go round again, and
 // one of them becomes the next drainer, with its own ctx", and Assumption 10,
 // "a genuine store failure that coincides with the drainer's cancellation is
@@ -1391,7 +1409,7 @@ func TestBudgetAbandonedIsDecidedByCtxNotError(t *testing.T) {
 	}
 }
 
-// TestBudgetCanceledFromLiveDrainerIsFailure pins ADR 0003 §4, "Failed (it
+// TestBudgetCanceledFromLiveDrainerIsFailure pins ADR 0003 §4, "Failed (drain
 // returned an error, and the drainer's ctx is not done): record the error as
 // the latest failure, unlock, log the Error record (§7), and return the error
 // unchanged (G3)", together with G2. Here the drain returns context.Canceled
@@ -1446,17 +1464,17 @@ func TestBudgetCanceledFromLiveDrainerIsFailure(t *testing.T) {
 }
 
 // TestBudgetDrainGoexit pins ADR 0003 §4, "A drain is settled on every way out
-// of drain, a panic included: clear the in-progress mark, count the drain as
-// ended, and broadcast", with a drain that calls runtime.Goexit. Goexit is not
-// a panic: recover returns nil while it unwinds, so a settle that works by
-// recovering and re-panicking never runs, the in-progress mark stays set, and
-// every later call over the limit parks for good. Goexit ends the drainer's
-// goroutine, so A never returns from await.
-//
-// Of §4's four outcomes, Goexit returns no value, so it is neither Succeeded,
-// Failed nor Abandoned. This test reads it as Panicked, the one outcome with
-// no return value: B, parked on the drain, returns errDrainPanicked, and a
-// later call can become the next drainer (Assumption 11).
+// of the drainer's window ... it can end in a return from drain, a panic, or a
+// runtime.Goexit. Settling clears the in-progress mark, counts the drain as
+// ended, and broadcasts", with a drain that calls runtime.Goexit, and
+// "Panicked (the window ended without drain returning: drain panicked or
+// called runtime.Goexit ...): record errDrainPanicked as the latest failure,
+// log nothing, and let the panic or the Goexit continue unchanged, so await
+// does not return ... A later call can become the next drainer". Also §4:
+// "During a runtime.Goexit, recover returns nil (*References*), so a settle
+// that runs only when recover reports a panic never runs for one: the
+// in-progress mark stays set, and every later call over the limit parks for
+// good." B, parked on the drain, returns errDrainPanicked (G2).
 func TestBudgetDrainGoexit(t *testing.T) {
 	b := newBudget(1000, quietLog())
 	b.add(2000)
@@ -1803,7 +1821,7 @@ func TestBudgetAfterFuncStoppedOnReturn(t *testing.T) {
 }
 
 // TestBudgetDrainerCtxCancelledDuringSuccessfulDrain pins ADR 0003 §4,
-// "Succeeded (it returned nil): go round the loop ... If other writers
+// "Succeeded (drain returned nil): go round the loop ... If other writers
 // refilled the budget while it drained, it drains again, unless its ctx is
 // done by then", and step 3's order: 3.2 "Room" is checked before 3.3
 // "Cancellation". The drain cancels its caller's ctx and then succeeds. If it
@@ -1870,12 +1888,13 @@ const (
 	btFailRaceBudget = 3 * time.Second
 )
 
-// TestBudgetFailureSurvivesLaterSuccess pins ADR 0003 §4, G2: "A call that is
-// parked when a drain fails ... returns that failure ... or the failure of a
-// later drain", and Assumption 9's reason for keeping "the latest failure
-// apart from the count of drains that have ended": "a failed drain followed by
-// a successful one before a parked call ran would admit that call instead of
-// failing it". That was the first version's bug.
+// TestBudgetFailureSurvivesLaterSuccess pins ADR 0003 §4, G2: "A call still
+// parked when a drain is settled as Failed or Panicked returns that failure
+// ... or the failure of a later drain", and §4's reason for "Keeping the
+// latest failure apart from the count of drains that have ended": "The first
+// version kept only the latest drain's result, so a failed drain followed by a
+// successful one before a parked call ran would admit that call instead of
+// failing it." Assumption 9 records the mechanism.
 //
 // Each iteration parks X on drain D1, run by A, which fails. The moment the
 // budget logs D1's Error record, which it does after settling D1, a hook
@@ -1884,8 +1903,9 @@ const (
 //
 // The test is probabilistic, because nothing in the pinned surface can force
 // D2 to finish before X re-checks. A budget with the bug fails only in runs
-// where that ordering happens. The assertion itself is not probabilistic: X
-// was parked when D1 failed, and no later drain fails, so on a correct budget
+// where that ordering happens. The assertion itself is not probabilistic: D1
+// frees nothing, so X is still parked when D1 is settled as Failed, and no
+// later drain fails, so on a correct budget
 // X returns D1's failure however the goroutines are scheduled. A failure here
 // is always a real violation of G2.
 func TestBudgetFailureSurvivesLaterSuccess(t *testing.T) {
@@ -1952,5 +1972,231 @@ func btFailureThenSuccess(t *testing.T, iter int) {
 	if err := btResult(t, "Z's await", z); err != nil {
 		t.Fatalf("iteration %d: Z, started after D1 had ended, returned %v, want "+
 			"nil after its own drain freed everything (G1)", iter, err)
+	}
+}
+
+// btWaitChan waits under btHangBound for ch to be closed.
+func btWaitChan(t *testing.T, what string, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(btHangBound):
+		t.Fatalf("%s did not happen within %v", what, btHangBound)
+	}
+}
+
+// btFault describes a log handler fault. It fires once, on the first record
+// whose message is msg: reached is closed, the handler waits for gate if gate
+// is set, and then fault runs, panicking or calling runtime.Goexit. Every
+// other record, including later ones with the same message, is logged
+// normally.
+type btFault struct {
+	msg     string
+	fault   func()
+	gate    *btGate
+	reached chan struct{}
+	fired   atomic.Bool
+}
+
+func newBTFault(msg string, fault func(), gate *btGate) *btFault {
+	return &btFault{msg: msg, fault: fault, gate: gate, reached: make(chan struct{})}
+}
+
+// logger returns a logger that applies f and passes every record it does not
+// fault on to c.
+func (f *btFault) logger(c *btCapture) *slog.Logger {
+	return slog.New(&btFaultHandler{f: f, inner: &btHandler{c: c}})
+}
+
+// btFaultHandler is the slog.Handler behind btFault.logger. Handlers derived
+// through WithAttrs and WithGroup share its btFault, so the fault fires once
+// however the budget logs.
+type btFaultHandler struct {
+	f     *btFault
+	inner slog.Handler
+}
+
+func (h *btFaultHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *btFaultHandler) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == h.f.msg && h.f.fired.CompareAndSwap(false, true) {
+		close(h.f.reached)
+		if h.f.gate != nil {
+			<-h.f.gate.ch
+		}
+		h.f.fault()
+	}
+	return h.inner.Handle(ctx, r)
+}
+
+func (h *btFaultHandler) WithAttrs(as []slog.Attr) slog.Handler {
+	return &btFaultHandler{f: h.f, inner: h.inner.WithAttrs(as)}
+}
+
+func (h *btFaultHandler) WithGroup(name string) slog.Handler {
+	return &btFaultHandler{f: h.f, inner: h.inner.WithGroup(name)}
+}
+
+// btInfoHandlerFaults runs TestBudgetInfoHandlerPanic and
+// TestBudgetInfoHandlerGoexit. The drainer's Info record reaches a handler
+// that holds it until a second call has parked, and then panics or, with
+// goexit set, calls runtime.Goexit. drain is never reached.
+func btInfoHandlerFaults(t *testing.T, goexit bool) {
+	t.Helper()
+	c := newBTCapture(false)
+	gate := newBTGate(t)
+	p := &btPanicValue{why: "budget test: the Info record's handler panics"}
+	fault := func() { panic(p) }
+	if goexit {
+		fault = runtime.Goexit
+	}
+	f := newBTFault(btMsgInfo, fault, gate)
+	b := newBudget(1000, f.logger(c))
+	b.add(2000)
+	d := &btDrainLog{}
+	drain := func(ctx context.Context) error {
+		d.enter(ctx)
+		btFreeAll(b)
+		return nil
+	}
+
+	a := btAwait(context.Background(), b, drain)
+	btWaitChan(t, "the drainer's Info record reaching the log handler", f.reached)
+	parked := btAwait(context.Background(), b, drain)
+	btEventually(t, "B to park", func() bool { return b.waiters() == 1 }, btState(b, d))
+	if n := d.count(); n != 0 {
+		t.Fatalf("drain was called %d times before the Info record was out, "+
+			"want 0: the record is out before drain is called (§7)", n)
+	}
+	gate.open()
+
+	btWait(t, "the drainer's await", a)
+	switch {
+	case goexit && a.returned:
+		t.Errorf("the drainer's await returned %v, but its Info record's log "+
+			"call called runtime.Goexit, which must continue unchanged, so "+
+			"await does not return", a.err)
+	case goexit && a.panicked:
+		t.Errorf("the drainer's await panicked with %v, but its Info record's "+
+			"log call called runtime.Goexit, which is not a panic", a.pval)
+	case !goexit && !a.panicked:
+		t.Errorf("the drainer's await did not panic (returned: %v, err: %v); "+
+			"a panic in the Info record's log call must continue unchanged, so "+
+			"await does not return", a.returned, a.err)
+	case !goexit && a.pval != p:
+		t.Errorf("the drainer's await panicked with %v (%T), want the log "+
+			"handler's own panic value %v, unchanged", a.pval, a.pval, p)
+	}
+
+	err := btResult(t, "B's await", parked)
+	if err == nil || !errors.Is(err, errDrainPanicked) {
+		t.Errorf("B's await, parked when the drainer's window ended in its Info "+
+			"record's log call, = %v, want errDrainPanicked (§4, Panicked; G2)", err)
+	}
+	if n := d.count(); n != 0 {
+		t.Errorf("drain was called %d times, want 0: the drainer's window ended "+
+			"before drain, and B must not drain in its place", n)
+	}
+	if recs := c.atLevel(slog.LevelError); len(recs) != 0 {
+		t.Errorf("a window settled as Panicked logged %d Error records (first: "+
+			"%q), want none: Panicked logs nothing", len(recs), recs[0].Message)
+	}
+
+	later := btAwait(context.Background(), b, drain)
+	if err := btResult(t, "a later over-limit await", later); err != nil {
+		t.Errorf("a later over-limit await, with the log handler no longer "+
+			"faulting, = %v, want nil: it becomes the next drainer "+
+			"(Assumption 11, G1)", err)
+	}
+	if n := d.count(); n != 1 {
+		t.Errorf("drain was called %d times in total, want 1, by the later call", n)
+	}
+}
+
+// TestBudgetInfoHandlerPanic pins ADR 0003 §4, "A drain is settled on every
+// way out of the drainer's window: the part of step 3.4 that runs from its
+// election, when it marks a drain in progress, to its relock. The window
+// covers the Info record's log call as well as drain", and "Panicked (the
+// window ended without drain returning: ... or the Info record's log call did
+// so before drain was called): record errDrainPanicked as the latest failure,
+// log nothing, and let the panic or the Goexit continue unchanged, so await
+// does not return ... A later call can become the next drainer". Also "the
+// deferred settle must already be in place when it is logged, so that a log
+// handler that panics is settled exactly as a drain that panics is", and
+// Assumption 11. A budget that armed its settle after the Info record would
+// leave the in-progress mark set, and B would park for good.
+func TestBudgetInfoHandlerPanic(t *testing.T) {
+	btInfoHandlerFaults(t, false)
+}
+
+// TestBudgetInfoHandlerGoexit pins the same sentences as
+// TestBudgetInfoHandlerPanic for a log handler that calls runtime.Goexit on
+// the Info record: "Panicked (the window ended without drain returning: drain
+// panicked or called runtime.Goexit, or the Info record's log call did so
+// before drain was called)", and §4's "During a runtime.Goexit, recover
+// returns nil (*References*), so a settle that runs only when recover reports
+// a panic never runs for one".
+func TestBudgetInfoHandlerGoexit(t *testing.T) {
+	btInfoHandlerFaults(t, true)
+}
+
+// TestBudgetErrorHandlerPanicAfterSettle pins ADR 0003 §4, "Failed (drain
+// returned an error, and the drainer's ctx is not done): record the error as
+// the latest failure, unlock, log the Error record (§7), and return the error
+// unchanged (G3)", and "The Error record is logged after the settle (Failed),
+// so a handler that panics there leaves nothing unsettled", with G2. The
+// drain fails, and the Error record's log call panics. By then the drain has
+// been settled as Failed, so the parked call returns the drain's error, not
+// errDrainPanicked, and a later call can drain.
+//
+// How the drainer's own call ends, returning E or panicking, is not pinned,
+// and nothing is asserted about it. btAwait recovers a panic either way, and
+// the drainer is waited for with btWait, not btResult, only so that it cannot
+// outlive the test.
+func TestBudgetErrorHandlerPanicAfterSettle(t *testing.T) {
+	errE := errors.New("budget test: drain failed (E)")
+	c := newBTCapture(false)
+	p := &btPanicValue{why: "budget test: the Error record's handler panics"}
+	f := newBTFault(btMsgError, func() { panic(p) }, nil)
+	b := newBudget(1000, f.logger(c))
+	b.add(2000)
+	gate := newBTGate(t)
+	d := &btDrainLog{}
+	drain := func(ctx context.Context) error {
+		if d.enter(ctx) == 1 {
+			<-gate.ch
+			return errE
+		}
+		btFreeAll(b)
+		return nil
+	}
+
+	a := btAwait(context.Background(), b, drain)
+	btEventually(t, "A to enter drain", func() bool { return d.count() == 1 }, btState(b, d))
+	parked := btAwait(context.Background(), b, drain)
+	btEventually(t, "B to park", func() bool { return b.waiters() == 1 }, btState(b, d))
+	gate.open()
+
+	err := btResult(t, "B's await", parked)
+	if !errors.Is(err, errE) || errors.Is(err, errDrainPanicked) {
+		t.Errorf("B's await = %v, want the drain's error E (G2): the drain was "+
+			"settled as Failed before its Error record was logged, so a panic "+
+			"in that log call is not a Panicked window", err)
+	}
+
+	btWait(t, "the drainer's await", a)
+	if !f.fired.Load() {
+		t.Errorf("no %q record reached the log handler, so the scenario this "+
+			"test is about did not happen; a failed drain logs the Error "+
+			"record (§4, Failed)", btMsgError)
+	}
+
+	later := btAwait(context.Background(), b, drain)
+	if err := btResult(t, "a later over-limit await", later); err != nil {
+		t.Errorf("a later over-limit await = %v, want nil: the failed drain "+
+			"was settled, so this call becomes the next drainer (G1)", err)
+	}
+	if n := d.count(); n != 2 {
+		t.Errorf("drain was called %d times in total, want 2", n)
 	}
 }
