@@ -84,15 +84,17 @@
   subsection *On a shared memory budget in phase 1*; the three earlier *What
   this does not decide* bullets; the earlier *References*; the title; and the
   2026-09-22 revision. Status stays `Accepted`.
-- **Revised:** 2026-09-23, second pass — clarifications from findings made while
+- **Revised:** 2026-09-24 — clarifications from findings made while
   implementing and testing the budget, and one testability claim corrected. The
   decision did not move, and neither did §4's steps, their check order, what
-  each of the four outcomes does, or the meaning of G1–G3; no name, signature
-  or number changed, and `errDrainPanicked` gained its initializer. One
-  requirement is stated more widely rather than changed: §4 required a settle on
-  every way out of `drain`, and now requires it on every way out of the
-  drainer's window, which also covers the Info record's log call, with a panic
-  there and a `runtime.Goexit` settled as *Panicked*. What changed:
+  each of the four outcomes does, or the meaning of G1 and G2; no name,
+  signature or number changed, and `errDrainPanicked` gained its initializer.
+  One requirement is stated more widely rather than changed: §4 required a
+  settle on every way out of `drain`, and now requires it on every way out of
+  the drainer's window, which also covers the Info record's log call, with a
+  panic there and a `runtime.Goexit` settled as *Panicked*. And G3 is
+  qualified: it holds when the Error record's log call returns, and a panic or
+  `Goexit` in that call continues out of `await` in its place. What changed:
   **§4** — `warnAfter`'s pinned comment and the test surface agree, with §7,
   that a test may set it to any value before the budget is first used, where
   two of the three said "lower"; `errDrainPanicked` is declared with
@@ -100,15 +102,18 @@
   comment; the settle paragraph and *Panicked* say that the settle covers the
   window from election to relock, that a panic in the Info record's log call
   and a `runtime.Goexit` are settled as *Panicked*, and that the settle cannot
-  rely on `recover`; and G2 says that a failure reaches the calls still parked
-  when the drain is settled, not a call admitted before it.
+  rely on `recover`; G2 says that a failure reaches the calls still parked
+  when the drain is settled, not a call admitted before it; and G3 says what
+  the drainer gets when the Error record's log call panics or calls
+  `runtime.Goexit`.
   **§7** — a `runtime.Goexit` is logged by nothing.
   **Assumptions** — 2 cites #47; 9 says which calls a failure reaches, that a
   call admitted before the settle is not failed retroactively, and that which
   of the two a woken call gets is scheduling, and it no longer claims that the
   other check order would be neither predictable nor testable, because this
   one leaves a race of its own; 11 records the judgement calls behind the
-  settle's reach; 12 says a test may raise `warnAfter` as well as lower it.
+  settle's reach, and why G3's exception is pinned rather than left open; 12
+  says a test may raise `warnAfter` as well as lower it.
   ***What this does not decide*** — the chunk-cache bullet cites #47 and #46.
   ***References*** — `runtime.Goexit` and the built-in `recover`.
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
@@ -649,7 +654,8 @@ covers both. The Info record stays inside the window, where step 3.4 and §7 put
 it, and the deferred settle must already be in place when it is logged, so that
 a log handler that panics is settled exactly as a drain that panics is. The
 Error record is logged after the settle (*Failed*), so a handler that panics
-there leaves nothing unsettled.
+there, or calls `runtime.Goexit`, leaves nothing unsettled; G3 says what the
+drainer gets.
 
 **The failure contract.** Three rules, observable from outside, fix which calls
 see a drain's failure:
@@ -664,7 +670,11 @@ see a drain's failure:
   before the settle, has been admitted with nil, and the failure does not reach
   it.
 - **G3.** The drainer returns its own drain's failure: the error value `drain`
-  returned, unchanged.
+  returned, unchanged. This holds when the Error record's log call returns. If
+  that call panics or calls `runtime.Goexit`, the panic or `Goexit` continues
+  out of `await` unchanged in place of the return, and the calls still parked
+  get the drain's error all the same, because the settle recorded it before
+  the call (Assumption 11).
 
 The first version kept only the latest drain's result, so a failed drain
 followed by a successful one before a parked call ran would admit that call
@@ -1086,6 +1096,17 @@ calls it made while pinning what the first version left open.
     its `recover` returns (`internal/sunrpc/rpc.go:282-283`). Nothing in this
     repository calls `runtime.Goexit` outside its tests, so I left that silence
     alone rather than give it a record of its own.
+
+    A panic or `Goexit` in the Error record's log call comes after the settle,
+    so it needs none, and it continues out of `await` in place of G3's return
+    (§4). I pinned that rather than leave it open. A `Goexit` leaves no choice,
+    since `await` cannot return once one has begun. For a panic, the
+    alternative is to recover it and return the drain's error, which would make
+    that log call the one place the budget recovers, and would treat a handler
+    that breaks there unlike one that breaks on the Info record. The cost falls
+    on the drainer's `WRITE`: `dispatch` answers it `SYSTEM_ERR` rather than
+    `NFS3ERR_IO`, and logs the handler's panic rather than the drain's error
+    (`internal/sunrpc/rpc.go:282-285`, `:293-295`).
 12. **The Warn record is per call, fires while the call is blocked, counts the
     drainer, and its threshold is a field.** §7. The first version's "a waiter
     that has been waiting more than 5 s" could mean logging on wake-up, which is
@@ -1303,8 +1324,8 @@ it returned when asked for verbatim text.
   expired and the function f has been started in its own goroutine; Stop does
   not wait for f to complete before returning."
 
-The two entries below were added by the second 2026-09-23 pass, fetched that
-day through the same tool and quoted on the same terms.
+The two entries below were added by the 2026-09-24 revision and fetched while it
+ran, through the same tool; they are quoted on the same terms.
 
 - Go standard library, `runtime.Goexit`. <https://pkg.go.dev/runtime#Goexit>
   Cited in §4 and Assumption 11 for why the settle cannot rely on `recover`:
