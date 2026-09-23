@@ -123,6 +123,24 @@
   revision. Unchanged: everything else, including §6, §7's degraded-case
   bullet, the *Consequences* bullet "When every entry is in flight", every
   other assumption, and the four earlier revisions. Status stays `Accepted`.
+- **Revised:** 2026-09-23 — corrects **Assumption 7**, which said a
+  size-setting `SETATTR` "may fetch a chunk". Truncation never fetches one: it
+  consults only the in-memory chunk cache and on a miss defers the trim to the
+  next flush, so no non-idempotent procedure fetches anything. What can hold
+  one up is waiting for a lock, and Assumption 7 now names both waits and which
+  procedures meet each. Every non-idempotent procedure can wait on `FS.mu`
+  while a commit holds it across its snapshot PUT and root-pointer swap (#43).
+  The mutating ones take `FS.mu` for writing, and every non-idempotent handler
+  reads attributes under it for its reply, including MKNOD's and LINK's, which
+  change nothing. A size-setting `SETATTR`, and an UNCHECKED `CREATE` that
+  carries a size and so truncates through the same path, can also wait on the
+  file's `openFile.mu` while a flush uploads that file's chunks. ADR 0003's
+  drains make both waits more frequent. The assumption's conclusion, that
+  dropping an in-flight duplicate is acceptable on TCP, is unchanged. The
+  decision and every behaviour are unchanged, so no code and no test moves.
+  Assumption 7 and this entry are the whole of this revision. Nothing else
+  moved: §1–§8, *Alternatives considered*, *Consequences*, *References*, every
+  other assumption, and the five earlier revisions. Status stays `Accepted`.
 - **Issue:** #2 — *Retransmitted requests are re-executed: no duplicate request cache*
 - **Affects:** `internal/sunrpc`, `internal/nfs`
 
@@ -792,8 +810,27 @@ push back on them individually.
    calls per second; treating that as impossible is a deliberate assumption.
 7. **Dropping an in-flight duplicate is acceptable on TCP.** The client's own
    retransmission timer is the recovery mechanism. Non-idempotent procedures in
-   this filesystem are short (in-memory namespace work) with the exception of a
-   size-setting `SETATTR`, which may fetch a chunk.
+   this filesystem do in-memory namespace work and fetch nothing. That includes
+   a size-setting `SETATTR`, which this assumption first said "may fetch a
+   chunk": truncation never does. It consults only the in-memory chunk cache
+   (`internal/blobfs/fs.go:1255`), and on a miss it defers the trim to the next
+   flush (`fs.go:1258`). What can hold one of these calls up is waiting for a
+   lock:
+   - Any of them can wait on `FS.mu` while a commit holds it for writing across
+     its snapshot PUT and root-pointer swap (`internal/blobfs/commit.go:129-134`,
+     with the PUT at `commit.go:163` and the swap at `:180`; #43). The mutating
+     procedures take `FS.mu` for writing, and every non-idempotent handler,
+     MKNOD's and LINK's included, reads attributes under it for its reply
+     (`internal/nfs/nfs3.go:59-68`).
+   - A size-setting `SETATTR`, and an UNCHECKED `CREATE` that carries a size
+     (`nfs3.go:341-345`), can also wait on the file's `openFile.mu`, which a
+     flush holds while it uploads that file's chunks (`fs.go:1297`, uploads at
+     `:1330`).
+
+   ADR 0003's drains are commits, so they make both waits more frequent. Each
+   wait ends when the commits or flushes ahead of it do, it is a delay and not
+   a leak, and §7 already accepts a slow call holding its marker, so the
+   conclusion stands.
 8. **Letting entries outlive their connection is acceptable.** Nothing reclaims
    a closed connection's entries before they age out (§7). That is a capacity
    judgement, not a correctness one, and it is unmeasured. I am assuming a
