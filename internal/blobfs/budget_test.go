@@ -10,10 +10,14 @@ package blobfs
 // Every call to await runs in its own goroutine (btAwait) and is waited for
 // under btHangBound (btWait), so a hang fails the test instead of the package.
 // Tests reach a state by polling with a deadline (btEventually), never by
-// sleeping. The one fixed wait, in btScenarioWarn, checks that something does
-// NOT happen. Reads of the budget from the test goroutine while calls are in
-// flight also go through a bound (btBounded), because a budget that deadlocks
-// on its own mutex would otherwise hang the test goroutine too.
+// sleeping. The fixed waits, in btScenarioWarn, btScenarioParkedWarn and
+// TestBudgetNoWarnAfterReturn, only check that something does NOT happen.
+// Reads of the budget from the test goroutine while calls are in flight also
+// go through a bound (btBounded), because a budget that deadlocks on its own
+// mutex would otherwise hang the test goroutine too.
+//
+// One test is probabilistic: TestBudgetFailureSurvivesLaterSuccess. Its doc
+// comment explains why it can never fail on a correct budget.
 //
 // Not covered: Assumption 9's "a parked call fails even when the failed drain
 // freed enough room for it". A drain frees room through release, which
@@ -28,6 +32,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1330,5 +1335,622 @@ func TestBudgetDefaults(t *testing.T) {
 		if got := b.waiters(); got != 0 {
 			t.Errorf("newBudget(%d, log).waiters() = %d, want 0", limit, got)
 		}
+	}
+}
+
+// TestBudgetAbandonedIsDecidedByCtxNotError pins ADR 0003 §4, "Abandoned (it
+// returned an error, and the drainer's ctx is done by then): record nothing
+// and log nothing, and return ctx.Err(). The parked calls go round again, and
+// one of them becomes the next drainer, with its own ctx", and Assumption 10,
+// "a genuine store failure that coincides with the drainer's cancellation is
+// not published either". Unlike TestBudgetAbandonedDrainPublishesNothing, the
+// drain returns a store error, not ctx.Err(). A budget that decided between
+// failed and abandoned by looking at the error value would publish it.
+func TestBudgetAbandonedIsDecidedByCtxNotError(t *testing.T) {
+	errStore := errors.New("budget test: store failed while the drainer was cancelled")
+	c := newBTCapture(false)
+	b := newBudget(1000, c.logger())
+	b.add(2000)
+	d := &btDrainLog{}
+	drain := func(ctx context.Context) error {
+		if d.enter(ctx) == 1 {
+			<-ctx.Done()
+			return errStore
+		}
+		btFreeAll(b)
+		return nil
+	}
+
+	ctxA, cancelA := context.WithCancel(btCtx(context.Background(), "A"))
+	defer cancelA()
+	a := btAwait(ctxA, b, drain)
+	btEventually(t, "A to enter drain", func() bool { return d.count() == 1 }, btState(b, d))
+	parked := btAwait(btCtx(context.Background(), "B"), b, drain)
+	btEventually(t, "B to park", func() bool { return b.waiters() == 1 }, btState(b, d))
+
+	cancelA()
+	errA := btResult(t, "A's await", a)
+	if !errors.Is(errA, context.Canceled) || errors.Is(errA, errStore) {
+		t.Errorf("A's await = %v, want context.Canceled: a drain that fails "+
+			"after its drainer's ctx is done is abandoned, and the drainer "+
+			"returns ctx.Err(), not the drain's error", errA)
+	}
+	if err := btResult(t, "B's await", parked); err != nil {
+		t.Errorf("B's await = %v, want nil: an abandoned drain publishes "+
+			"nothing, so B must drain in turn", err)
+	}
+	if n := d.count(); n != 2 {
+		t.Fatalf("drain was called %d times, want 2: B must become the next drainer", n)
+	}
+	if tag := btTag(d.ctxAt(2)); tag != "B" {
+		t.Errorf("the second drain was given a ctx tagged %q, want B's own ctx", tag)
+	}
+	if recs := c.atLevel(slog.LevelError); len(recs) != 0 {
+		t.Errorf("an abandoned drain logged %d Error records (first: %q), want none",
+			len(recs), recs[0].Message)
+	}
+}
+
+// TestBudgetCanceledFromLiveDrainerIsFailure pins ADR 0003 §4, "Failed (it
+// returned an error, and the drainer's ctx is not done): record the error as
+// the latest failure, unlock, log the Error record (§7), and return the error
+// unchanged (G3)", together with G2. Here the drain returns context.Canceled
+// while its drainer's ctx is still live. What decides failed against abandoned
+// is the drainer's ctx, so this is a failure like any other, even though the
+// value looks like a cancellation.
+func TestBudgetCanceledFromLiveDrainerIsFailure(t *testing.T) {
+	c := newBTCapture(false)
+	b := newBudget(1000, c.logger())
+	b.add(2000)
+	gate := newBTGate(t)
+	d := &btDrainLog{}
+	drain := func(ctx context.Context) error {
+		if d.enter(ctx) == 1 {
+			<-gate.ch
+			return context.Canceled
+		}
+		btFreeAll(b)
+		return nil
+	}
+	a := btAwait(context.Background(), b, drain)
+	btEventually(t, "A to enter drain", func() bool { return d.count() == 1 }, btState(b, d))
+	parked := btAwait(context.Background(), b, drain)
+	btEventually(t, "B to park", func() bool { return b.waiters() == 1 }, btState(b, d))
+	gate.open()
+
+	if err := btResult(t, "A's await", a); err != context.Canceled {
+		t.Errorf("A's await = %v, want context.Canceled, the value its drain "+
+			"returned, unchanged (G3)", err)
+	}
+	// B's own ctx is never done, so context.Canceled can only be the failure
+	// of the drain it was parked on.
+	if err := btResult(t, "B's await", parked); !errors.Is(err, context.Canceled) {
+		t.Errorf("B's await = %v, want context.Canceled, the failure of the "+
+			"drain it was parked on (G2)", err)
+	}
+	if n := d.count(); n != 1 {
+		t.Errorf("drain was called %d times, want 1: the failure is published, "+
+			"so B must not drain again", n)
+	}
+	recs := c.withMessage(btMsgError)
+	if len(recs) != 1 {
+		t.Fatalf("captured %d %q records, want exactly 1: a drain that fails "+
+			"with its drainer's ctx live is a failed drain", len(recs), btMsgError)
+	}
+	if v, ok := btAttr(recs[0], "err"); !ok {
+		t.Errorf("the Error record has no top-level attribute \"err\"")
+	} else if v.Any() != context.Canceled {
+		t.Errorf("the Error record's err attribute is %v (kind %v), want "+
+			"context.Canceled, the error value drain returned", v.Any(), v.Kind())
+	}
+}
+
+// TestBudgetDrainGoexit pins ADR 0003 §4, "A drain is settled on every way out
+// of drain, a panic included: clear the in-progress mark, count the drain as
+// ended, and broadcast", with a drain that calls runtime.Goexit. Goexit is not
+// a panic: recover returns nil while it unwinds, so a settle that works by
+// recovering and re-panicking never runs, the in-progress mark stays set, and
+// every later call over the limit parks for good. Goexit ends the drainer's
+// goroutine, so A never returns from await.
+//
+// Of §4's four outcomes, Goexit returns no value, so it is neither Succeeded,
+// Failed nor Abandoned. This test reads it as Panicked, the one outcome with
+// no return value: B, parked on the drain, returns errDrainPanicked, and a
+// later call can become the next drainer (Assumption 11).
+func TestBudgetDrainGoexit(t *testing.T) {
+	b := newBudget(1000, quietLog())
+	b.add(2000)
+	gate := newBTGate(t)
+	d := &btDrainLog{}
+	drain := func(ctx context.Context) error {
+		if d.enter(ctx) == 1 {
+			<-gate.ch
+			runtime.Goexit()
+		}
+		btFreeAll(b)
+		return nil
+	}
+
+	var (
+		aReturned atomic.Bool
+		aPanicked atomic.Bool
+	)
+	aExited := make(chan struct{})
+	go func() {
+		defer close(aExited)
+		defer func() {
+			if r := recover(); r != nil {
+				aPanicked.Store(true)
+			}
+		}()
+		_ = b.await(context.Background(), drain)
+		aReturned.Store(true)
+	}()
+	btEventually(t, "A to enter drain", func() bool { return d.count() == 1 }, btState(b, d))
+	parked := btAwait(context.Background(), b, drain)
+	btEventually(t, "B to park", func() bool { return b.waiters() == 1 }, btState(b, d))
+	gate.open()
+
+	select {
+	case <-aExited:
+	case <-time.After(btHangBound):
+		t.Fatalf("A's goroutine has not ended %v after its drain called "+
+			"runtime.Goexit, so await is hung", btHangBound)
+	}
+	if aReturned.Load() {
+		t.Errorf("A's await returned, but its drain called runtime.Goexit, which " +
+			"ends the goroutine without returning")
+	}
+	if aPanicked.Load() {
+		t.Errorf("A's await panicked, but its drain called runtime.Goexit, which " +
+			"is not a panic")
+	}
+
+	err := btResult(t, "B's await, parked on a drain that called runtime.Goexit", parked)
+	if err == nil || !errors.Is(err, errDrainPanicked) {
+		t.Errorf("B's await = %v, want errDrainPanicked: the drain it was "+
+			"parked on ended without returning (§4, Panicked; G2)", err)
+	}
+	if n := d.count(); n != 1 {
+		t.Fatalf("drain was called %d times before the later call, want 1", n)
+	}
+
+	later := btAwait(context.Background(), b, drain)
+	if err := btResult(t, "a later over-limit await", later); err != nil {
+		t.Errorf("a later over-limit await = %v, want nil: the drain that "+
+			"called runtime.Goexit must have been settled, so this call can "+
+			"become the next drainer (Assumption 11, G1)", err)
+	}
+	if n := d.count(); n != 2 {
+		t.Errorf("drain was called %d times in total, want 2", n)
+	}
+}
+
+// btScenarioParkedWarn runs TestBudgetWarnRecordForParkedCall with capture c.
+// Call A drains, blocked, and is let log its own Warn record first. Only then
+// is call B started and parked, so the second Warn record is B's. The ADR
+// gives a record no field that names its call, so apart from that ordering
+// the records are checked only for their count, kinds and values.
+func btScenarioParkedWarn(t *testing.T, c *btCapture) {
+	t.Helper()
+	const limit, charge = 1000, 2000
+	b := newBudget(limit, c.logger())
+	b.warnAfter = time.Millisecond
+	c.attach(b)
+	b.add(charge)
+	gate := newBTGate(t)
+	d := &btDrainLog{}
+	drain := func(ctx context.Context) error {
+		if d.enter(ctx) == 1 {
+			<-gate.ch
+		}
+		btFreeAll(b)
+		return nil
+	}
+	a := btAwait(context.Background(), b, drain)
+	btEventually(t, "the drainer's Warn record",
+		func() bool { return len(c.withMessage(btMsgWarn)) >= 1 }, btState(b, d))
+	parked := btAwait(context.Background(), b, drain)
+	btEventually(t, "B to park", func() bool { return b.waiters() == 1 }, btState(b, d))
+	btEventually(t, "a second Warn record, the parked call's",
+		func() bool { return len(c.withMessage(btMsgWarn)) >= 2 }, btState(b, d))
+	if a.finished() || parked.finished() {
+		t.Fatalf("a call returned while the only drain was still blocked")
+	}
+
+	// A fixed wait, to check that something does not happen: neither call
+	// logs a second Warn record, however long it stays blocked.
+	time.Sleep(50 * time.Millisecond)
+	warns := c.withMessage(btMsgWarn)
+	if len(warns) != 2 {
+		t.Errorf("50ms later, %d %q records for two blocked calls, want 2 (at "+
+			"most once per await call, the parked call included)", len(warns), btMsgWarn)
+	}
+	for i, r := range warns {
+		what := fmt.Sprintf("Warn record %d", i+1)
+		btWantLevel(t, what, r, slog.LevelWarn)
+		if v, ok := btAttr(r, "waited"); !ok {
+			t.Errorf("%s has no top-level attribute \"waited\"", what)
+		} else if v.Kind() != slog.KindDuration {
+			t.Errorf("%s: waited is of kind %v, want %v", what, v.Kind(), slog.KindDuration)
+		} else if v.Duration() < time.Millisecond {
+			t.Errorf("%s: waited = %v, want at least warnAfter = 1ms", what, v.Duration())
+		}
+		btWantInt64(t, what, r, "dirty_bytes", charge)
+		btWantInt64(t, what, r, "limit", limit)
+	}
+
+	gate.open()
+	if err := btResult(t, "A's await", a); err != nil {
+		t.Errorf("A's await = %v, want nil", err)
+	}
+	if err := btResult(t, "B's await", parked); err != nil {
+		t.Errorf("B's await = %v, want nil", err)
+	}
+	if n := len(c.withMessage(btMsgWarn)); n != 2 {
+		t.Errorf("after both calls returned, %d %q records, want 2", n, btMsgWarn)
+	}
+	if n := d.count(); n != 1 {
+		t.Errorf("drain was called %d times, want 1", n)
+	}
+}
+
+// TestBudgetWarnRecordForParkedCall pins ADR 0003 §7's Warn row, "at most once
+// per await call, while that call is still blocked", for a call that is parked
+// rather than draining, and Assumption 12. TestBudgetWarnRecordWhileBlocked
+// covers only the drainer. The reentrant run pins §3's "Nothing is logged
+// while the budget's mutex is held" on the parked call's path too.
+func TestBudgetWarnRecordForParkedCall(t *testing.T) {
+	t.Run("plain", func(t *testing.T) { btScenarioParkedWarn(t, newBTCapture(false)) })
+	t.Run("reentrant", func(t *testing.T) { btScenarioParkedWarn(t, newBTCapture(true)) })
+}
+
+// TestBudgetNoWarnAfterReturn pins ADR 0003 §7: the Warn timer is "stopped on
+// every way out", and "a callback that loses the race with its call's return
+// logs nothing". The call drains at once. If the timer outlived the call it
+// would fire warnAfter after entry, well inside the wait below.
+func TestBudgetNoWarnAfterReturn(t *testing.T) {
+	const warnAfter = 200 * time.Millisecond
+	c := newBTCapture(false)
+	b := newBudget(1000, c.logger())
+	b.warnAfter = warnAfter
+	b.add(2000)
+	d := &btDrainLog{}
+	drain := func(ctx context.Context) error {
+		d.enter(ctx)
+		btFreeAll(b)
+		return nil
+	}
+	start := time.Now()
+	err := btResult(t, "await", btAwait(context.Background(), b, drain))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("await = %v, want nil", err)
+	}
+	if n := d.count(); n != 1 {
+		t.Errorf("drain was called %d times, want 1", n)
+	}
+	if elapsed >= warnAfter {
+		t.Skipf("await took %v, at least warnAfter = %v, so a Warn record would "+
+			"be legitimate and this run cannot check the timer is stopped",
+			elapsed, warnAfter)
+	}
+
+	// A fixed wait, to check that something does not happen.
+	time.Sleep(2 * warnAfter)
+	if n := len(c.withMessage(btMsgWarn)); n != 0 {
+		t.Errorf("captured %d %q records after a call that returned within %v; "+
+			"the timer must be stopped on every way out, and a callback that "+
+			"loses the race with the call's return logs nothing", n, btMsgWarn, elapsed)
+	}
+}
+
+// btAFCtx is a context that implements AfterFunc(func()) func() bool. The
+// standard library documents that context.AfterFunc uses such a method to
+// schedule its call when ctx has one. btAFCtx counts every registration, and
+// how many of the stop functions it handed out have been called.
+//
+// It is not built on a context from the context package, because
+// context.AfterFunc registers with such a context directly and would never
+// call this method. It embeds context.Background only for Deadline and Value.
+//
+// cancelWithoutCallbacks makes it done without running what was registered.
+// If the registered functions ran, context.AfterFunc's own stop function would
+// never reach the one btAFCtx returned, and a missing stop could not be seen.
+type btAFCtx struct {
+	context.Context
+
+	done chan struct{}
+	once sync.Once
+
+	mu      sync.Mutex
+	err     error
+	pending map[int]func()
+	regs    int
+	stopped int
+}
+
+func newBTAFCtx() *btAFCtx {
+	return &btAFCtx{
+		Context: context.Background(),
+		done:    make(chan struct{}),
+		pending: map[int]func(){},
+	}
+}
+
+func (c *btAFCtx) Done() <-chan struct{} { return c.done }
+
+func (c *btAFCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+func (c *btAFCtx) AfterFunc(f func()) func() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	id := c.regs
+	c.regs++
+	c.pending[id] = f
+	var once sync.Once
+	return func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		once.Do(func() { c.stopped++ })
+		_, ok := c.pending[id]
+		delete(c.pending, id)
+		return ok
+	}
+}
+
+func (c *btAFCtx) cancelWithoutCallbacks() {
+	c.once.Do(func() {
+		c.mu.Lock()
+		c.err = context.Canceled
+		c.mu.Unlock()
+		close(c.done)
+	})
+}
+
+// counts reports how many functions were registered and how many distinct
+// stop functions were called.
+func (c *btAFCtx) counts() (regs, stopped int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.regs, c.stopped
+}
+
+// TestBudgetAfterFuncStoppedOnReturn pins ADR 0003 §4, *Waking on
+// cancellation*: "await registers context.AfterFunc(ctx, f) before it first
+// parks ... and it calls the returned stop function on every way out". Call A
+// drains, blocked; call B parks with a btAFCtx. B then leaves in three ways:
+// woken by a release that makes room; woken by A's drain settling, which fails
+// without freeing anything, so that B returns its failure (G2); and cancelled.
+// When B's await has returned, every registration made on its ctx must have
+// been stopped. The number of registrations is not asserted.
+//
+// In the cancelled case the ctx is made done without running the registered
+// functions (see btAFCtx), and a release(0) wakes B instead. Its wake-up is
+// then not the one AfterFunc provides, but its way out is still the
+// cancellation return, step 3.3, and that return must stop the registration.
+// release(0) is a valid call: release takes n >= 0 and "wakes every parked
+// call".
+func TestBudgetAfterFuncStoppedOnReturn(t *testing.T) {
+	errE := errors.New("budget test: drain failed (E)")
+	cases := []struct {
+		name     string
+		drainErr error
+		leave    func(t *testing.T, b *budget, gate *btGate, actx *btAFCtx)
+		want     error
+	}{
+		{"woken by release", nil, func(t *testing.T, b *budget, _ *btGate, _ *btAFCtx) {
+			btDo(t, "release(2000)", func() { b.release(2000) })
+		}, nil},
+		// The drain fails without freeing anything, so no release wakes B
+		// first: the settle's broadcast is what wakes it.
+		{"woken by a drain that settles", errE, func(t *testing.T, _ *budget, gate *btGate, _ *btAFCtx) {
+			gate.open()
+		}, errE},
+		{"cancelled", nil, func(t *testing.T, b *budget, _ *btGate, actx *btAFCtx) {
+			actx.cancelWithoutCallbacks()
+			btDo(t, "release(0)", func() { b.release(0) })
+		}, context.Canceled},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBudget(1000, quietLog())
+			b.add(2000)
+			gate := newBTGate(t)
+			d := &btDrainLog{}
+			drain := func(ctx context.Context) error {
+				if d.enter(ctx) == 1 {
+					<-gate.ch
+					if tc.drainErr != nil {
+						return tc.drainErr
+					}
+				}
+				btFreeAll(b)
+				return nil
+			}
+			a := btAwait(context.Background(), b, drain)
+			btEventually(t, "A to enter drain", func() bool { return d.count() == 1 }, btState(b, d))
+			actx := newBTAFCtx()
+			parked := btAwait(actx, b, drain)
+			btEventually(t, "B to park", func() bool { return b.waiters() == 1 }, btState(b, d))
+
+			tc.leave(t, b, gate, actx)
+			err := btResult(t, "B's await", parked)
+			if !errors.Is(err, tc.want) {
+				t.Errorf("B's await = %v, want %v", err, tc.want)
+			}
+			regs, stopped := actx.counts()
+			if regs != stopped {
+				t.Errorf("B's await returned with %d functions registered through "+
+					"context.AfterFunc on its ctx and %d stopped; await calls the "+
+					"returned stop function on every way out", regs, stopped)
+			}
+			if regs == 0 {
+				t.Logf("await registered nothing on B's ctx through context.AfterFunc, " +
+					"so this run checks nothing about stopping")
+			}
+
+			gate.open()
+			if err := btResult(t, "A's await", a); err != tc.drainErr {
+				t.Errorf("A's await = %v, want %v, its drain's result", err, tc.drainErr)
+			}
+		})
+	}
+}
+
+// TestBudgetDrainerCtxCancelledDuringSuccessfulDrain pins ADR 0003 §4,
+// "Succeeded (it returned nil): go round the loop ... If other writers
+// refilled the budget while it drained, it drains again, unless its ctx is
+// done by then", and step 3's order: 3.2 "Room" is checked before 3.3
+// "Cancellation". The drain cancels its caller's ctx and then succeeds. If it
+// freed nothing, the call returns ctx.Err() without draining again. If it freed
+// everything, the call returns nil, because room comes first.
+func TestBudgetDrainerCtxCancelledDuringSuccessfulDrain(t *testing.T) {
+	cases := []struct {
+		name string
+		free bool
+		want error
+	}{
+		{"frees nothing", false, context.Canceled},
+		{"frees everything", true, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBudget(1000, quietLog())
+			b.add(2000)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			d := &btDrainLog{}
+			drain := func(dctx context.Context) error {
+				if d.enter(dctx) == 1 {
+					cancel()
+					if tc.free {
+						btFreeAll(b)
+					}
+					return nil
+				}
+				// A second drain is itself a failure, reported below. It
+				// frees everything so that a wrong budget still terminates.
+				btFreeAll(b)
+				return nil
+			}
+			err := btResult(t, "await", btAwait(ctx, b, drain))
+			if !errors.Is(err, tc.want) {
+				t.Errorf("await = %v, want %v", err, tc.want)
+			}
+			if n := d.count(); n != 1 {
+				t.Errorf("drain was called %d times, want exactly 1", n)
+			}
+		})
+	}
+}
+
+// btHookHandler passes every record to onRecord and captures nothing.
+type btHookHandler struct{ onRecord func(slog.Record) }
+
+func (h *btHookHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *btHookHandler) Handle(_ context.Context, r slog.Record) error {
+	h.onRecord(r)
+	return nil
+}
+
+func (h *btHookHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *btHookHandler) WithGroup(string) slog.Handler { return h }
+
+// Bounds for TestBudgetFailureSurvivesLaterSuccess: at most btFailRaceIters
+// iterations, and no new iteration once btFailRaceBudget has passed.
+const (
+	btFailRaceIters  = 200
+	btFailRaceBudget = 3 * time.Second
+)
+
+// TestBudgetFailureSurvivesLaterSuccess pins ADR 0003 §4, G2: "A call that is
+// parked when a drain fails ... returns that failure ... or the failure of a
+// later drain", and Assumption 9's reason for keeping "the latest failure
+// apart from the count of drains that have ended": "a failed drain followed by
+// a successful one before a parked call ran would admit that call instead of
+// failing it". That was the first version's bug.
+//
+// Each iteration parks X on drain D1, run by A, which fails. The moment the
+// budget logs D1's Error record, which it does after settling D1, a hook
+// starts Z over the limit. Z's drain D2 frees everything and succeeds, and it
+// may run before X gets the lock back to re-check.
+//
+// The test is probabilistic, because nothing in the pinned surface can force
+// D2 to finish before X re-checks. A budget with the bug fails only in runs
+// where that ordering happens. The assertion itself is not probabilistic: X
+// was parked when D1 failed, and no later drain fails, so on a correct budget
+// X returns D1's failure however the goroutines are scheduled. A failure here
+// is always a real violation of G2.
+func TestBudgetFailureSurvivesLaterSuccess(t *testing.T) {
+	start := time.Now()
+	iters := 0
+	for iters < btFailRaceIters {
+		if iters > 0 && time.Since(start) >= btFailRaceBudget {
+			break
+		}
+		btFailureThenSuccess(t, iters)
+		iters++
+	}
+	t.Logf("%d iterations in %v", iters, time.Since(start).Round(time.Millisecond))
+}
+
+// btFailureThenSuccess runs one iteration of
+// TestBudgetFailureSurvivesLaterSuccess on a fresh budget.
+func btFailureThenSuccess(t *testing.T, iter int) {
+	t.Helper()
+	errD1 := errors.New("budget test: drain D1 failed")
+	gate := newBTGate(t)
+	d := &btDrainLog{}
+	var b *budget
+	drain := func(ctx context.Context) error {
+		if d.enter(ctx) == 1 {
+			<-gate.ch
+			return errD1
+		}
+		btFreeAll(b)
+		return nil
+	}
+	zc := make(chan *btCall, 1)
+	var zOnce sync.Once
+	hook := &btHookHandler{onRecord: func(r slog.Record) {
+		if r.Level == slog.LevelError {
+			zOnce.Do(func() { zc <- btAwait(context.Background(), b, drain) })
+		}
+	}}
+	b = newBudget(1000, slog.New(hook))
+	b.add(2000)
+
+	a := btAwait(context.Background(), b, drain)
+	btEventually(t, "A to enter D1", func() bool { return d.count() == 1 }, btState(b, d))
+	x := btAwait(context.Background(), b, drain)
+	btEventually(t, "X to park", func() bool { return b.waiters() == 1 }, btState(b, d))
+	gate.open()
+
+	if err := btResult(t, "X's await", x); !errors.Is(err, errD1) {
+		t.Fatalf("iteration %d: X, parked when D1 failed, returned %v, want D1's "+
+			"failure (G2); a successful drain after the failure must not hide it "+
+			"from a call that was parked on the failed one", iter, err)
+	}
+	if err := btResult(t, "A's await", a); err != errD1 {
+		t.Fatalf("iteration %d: A, which ran D1, returned %v, want D1's error "+
+			"unchanged (G3)", iter, err)
+	}
+	var z *btCall
+	select {
+	case z = <-zc:
+	case <-time.After(btHangBound):
+		t.Fatalf("iteration %d: no Error-level record was logged within %v of "+
+			"D1 failing", iter, btHangBound)
+	}
+	if err := btResult(t, "Z's await", z); err != nil {
+		t.Fatalf("iteration %d: Z, started after D1 had ended, returned %v, want "+
+			"nil after its own drain freed everything (G1)", iter, err)
 	}
 }
