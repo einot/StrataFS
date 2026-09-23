@@ -33,6 +33,23 @@ func NewServer(fs vfs.FS, verf [8]byte, log *slog.Logger) *Server {
 
 func (s *Server) HasProc(proc uint32) bool { return proc < procCount }
 
+// Idempotent is an allow-list so that a procedure added later is protected by
+// the duplicate request cache until someone deliberately says otherwise.
+// SETATTR is excluded because its guarded form fails with NFS3ERR_NOT_SYNC on
+// replay, and the RPC layer cannot see the guard. WRITE and COMMIT are
+// included: a replayed write puts the same bytes at the same offset, and the
+// write verifier is stable for the life of the process.
+func (s *Server) Idempotent(proc uint32) bool {
+	switch proc {
+	case procNull, procGetAttr, procLookup, procAccess, procReadlink,
+		procRead, procWrite, procReaddir, procReaddirPlus, procFSStat,
+		procFSInfo, procPathconf, procCommit:
+		return true
+	default:
+		return false
+	}
+}
+
 func callerFrom(c sunrpc.Cred) vfs.Caller {
 	return vfs.Caller{UID: c.UID, GID: c.GID, GIDs: c.GIDs}
 }

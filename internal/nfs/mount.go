@@ -66,6 +66,10 @@ func NewMountServer(fs vfs.FS, export string, log *slog.Logger) *MountServer {
 
 func (m *MountServer) HasProc(proc uint32) bool { return proc < mountProcCount }
 
+// Idempotent is true for every procedure: the mount table is informational,
+// so replaying MNT, UMNT or UMNTALL changes nothing a client can observe.
+func (m *MountServer) Idempotent(proc uint32) bool { return true }
+
 func (m *MountServer) Call(ctx context.Context, proc uint32, cred sunrpc.Cred, r *xdr.Reader, w *xdr.Writer) error {
 	switch proc {
 	case mountProcNull:
