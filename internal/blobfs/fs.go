@@ -1071,8 +1071,39 @@ func (f *FS) Write(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, 
 	id := n.ID
 	f.mu.RUnlock()
 
-	of := f.getOpen(id)
+	// bufferWrite has released of.mu by the time it returns, which the sync
+	// below depends on: flushOpen takes of.mu itself, and sync.Mutex is not
+	// reentrant. Another write may slip in before the flush and be made
+	// durable along with this one; that costs nothing, since the promise is
+	// only that this write's bytes are stable before the reply.
+	written, err := f.bufferWrite(ctx, h, f.getOpen(id), off, data)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	// Report honestly what was made durable. Buffered data is not stable, so
+	// unless the client asked for a stable write and we committed, we answer
+	// UNSTABLE and let the client send COMMIT. DATA_SYNC gets the full sync:
+	// the chunk list that makes the data retrievable lives in the namespace,
+	// so there is no cheaper DATA_SYNC to offer, and FILE_SYNC is a permitted
+	// answer to it.
+	if how == vfs.FileSync || how == vfs.DataSync {
+		if err := f.syncFileAndNamespace(ctx, id); err != nil {
+			return uint32(written), vfs.Unstable, err
+		}
+		return uint32(written), vfs.FileSync, nil
+	}
+	return uint32(written), vfs.Unstable, nil
+}
+
+// bufferWrite copies data into the file's dirty chunks and extends the file to
+// cover it, returning how many bytes it took. It holds of.mu throughout and
+// releases it by defer, so that a panic underneath (a store fetch, the cache)
+// cannot leave the lock held: every later flush, and so every Sync, would
+// hang behind it.
+func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off uint64, data []byte) (int, error) {
 	of.mu.Lock()
+	defer of.mu.Unlock()
 
 	// The chunk list must be read under of.mu, not before it. flushOpen
 	// repoints n.Chunks and empties of.dirty while holding of.mu, so a list
@@ -1081,7 +1112,7 @@ func (f *FS) Write(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, 
 	// earlier write was acknowledged for.
 	var refs []chunkRef
 	f.mu.RLock()
-	n, err = f.resolve(h)
+	n, err := f.resolve(h)
 	gone := err != nil
 	if !gone {
 		refs = append([]chunkRef(nil), n.Chunks...)
@@ -1091,7 +1122,7 @@ func (f *FS) Write(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, 
 	cs := uint64(f.chunkSize)
 	written := 0
 	if gone {
-		// Unlinked since the checks above. Like the size update below, treat
+		// Unlinked since Write's checks. Like the size update below, treat
 		// the write as having landed just before the unlink: it succeeds, and
 		// its bytes go wherever the rest of the file went. Buffering them
 		// would only upload chunks nothing references.
@@ -1115,8 +1146,7 @@ func (f *FS) Write(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, 
 					if written > 0 {
 						break // report the partial write rather than losing it
 					}
-					of.mu.Unlock()
-					return 0, 0, err
+					return 0, err
 				}
 				// Copy: the cache hands out shared slices that must not be
 				// mutated in place.
@@ -1147,25 +1177,7 @@ func (f *FS) Write(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, 
 	}
 	f.dirty = true
 	f.mu.Unlock()
-	// Released before any sync: flushOpen takes of.mu itself, and sync.Mutex
-	// is not reentrant. Another write may slip in before the flush below and
-	// be made durable along with this one; that costs nothing, since the
-	// promise is only that this write's bytes are stable before the reply.
-	of.mu.Unlock()
-
-	// Report honestly what was made durable. Buffered data is not stable, so
-	// unless the client asked for a stable write and we committed, we answer
-	// UNSTABLE and let the client send COMMIT. DATA_SYNC gets the full sync:
-	// the chunk list that makes the data retrievable lives in the namespace,
-	// so there is no cheaper DATA_SYNC to offer, and FILE_SYNC is a permitted
-	// answer to it.
-	if how == vfs.FileSync || how == vfs.DataSync {
-		if err := f.syncFileAndNamespace(ctx, id); err != nil {
-			return uint32(written), vfs.Unstable, err
-		}
-		return uint32(written), vfs.FileSync, nil
-	}
-	return uint32(written), vfs.Unstable, nil
+	return written, nil
 }
 
 // syncFileAndNamespace makes one file's data and the namespace durable, which
