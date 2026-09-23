@@ -1,1 +1,2 @@
+A non-idempotent NFS request retransmitted on the same connection gets the original reply instead of being executed a second time; a duplicate request cache remembers recent replies.
 Chunks are verified against the hash that names them when fetched from the bucket; a mismatch fails the operation with NFS3ERR_IO. New -verify-chunks flag, default on.
