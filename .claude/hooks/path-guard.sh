@@ -84,6 +84,23 @@
 # agent must therefore name an in-scope path it wants to search. The same
 # applies to a `path` that resolves to the project root itself.
 #
+# PATH SPELLING. Globs are matched against the path as written, and one
+# file has many spellings on this machine, so for a guarded agent the path
+# must be in the one form the globs can judge: plain (no '//', '.' or '..'
+# segment), printable ASCII only, not starting with '~', and inside the
+# caller's own cwd -- for a worktree agent that is its worktree, not the
+# main checkout CLAUDE_PROJECT_DIR points at. Glob's `pattern` must also
+# stay relative to its `path` (no absolute alternative, no '..', '~' or
+# backslash). Deny globs match ignoring case (the volume is
+# case-insensitive); allow and exempt globs match exactly. Where a policy
+# must be airtight, write it as ALLOW_GLOBS: an allowlist refuses every
+# spelling it does not recognise, where a denylist admits every spelling
+# it does not anticipate -- the worktree copies under .claude/worktrees/
+# held the whole implementation and matched no 'internal/*' deny, because
+# that glob is anchored at the root. Symlinks are NOT resolved: a link
+# inside an allowed tree that points out of it still gets through. No
+# guarded agent without Bash can create one.
+#
 # Caveat (documented, not a bug): this only intercepts the tool calls named
 # in the subagent's own `matcher` (Edit|Write or Read|Grep|Glob). It does
 # NOT inspect Bash commands, so an agent that also has the Bash tool could
@@ -92,6 +109,11 @@
 # strong default rather than a sandbox for agents that keep Bash.
 
 set -f -e -u -o pipefail
+
+# Byte semantics throughout. The ASCII check below relies on it, and so
+# does nocasematch: under the C locale it folds only A-Z/a-z, which is
+# exactly the folding that matters once non-ASCII paths are refused.
+export LC_ALL=C
 
 input="$(cat)"
 tool_name="$(printf '%s' "$input" | jq -r '.tool_name // empty')"
@@ -161,12 +183,71 @@ if [[ -z "$file_path" ]]; then
   exit 0
 fi
 
+# A guarded agent's path must already be in plain form: no empty segment
+# ('//'), no '.' segment and no '..' segment, anywhere in it. The globs
+# below match the path as written, not where it resolves, so any spelling
+# that names the same file differently can land outside every deny glob:
+# '<root>/./internal/x' strips to './internal/x', '<root>//internal/x' to
+# '/internal/x', and 'docs/../internal/x' matches an exempt 'docs/*'. Probes
+# on 2026-09-23 got all three shapes past a test-author guard that denies
+# 'internal/*' -- the Read tool resolves some of them before this hook runs,
+# but Grep and Glob pass their `path` through verbatim. Checking the path
+# as given, before the root is stripped, is what catches a stray segment
+# right after the root. Refusing rather than normalizing keeps this
+# fail-closed: no legitimate call needs a non-plain path, and a normalizer
+# that got one case wrong would reopen the hole silently. One trailing
+# slash is allowed, since naming a directory that way is ordinary.
+# Symlinks are not resolved; a link inside an exempt tree that points out
+# of it would still get through.
+if (( guarded )); then
+  plain="${file_path%/}"
+  [[ -z "$plain" ]] && plain="/"
+  if [[ "$plain" == /* ]]; then plain="$plain/"; else plain="/$plain/"; fi
+  case "$plain" in
+    *//* | */./* | */../*)
+      deny "path guard: '$file_path' is not in plain form -- it contains an empty ('//'), '.' or '..' segment. This guard matches the path as written, not where it resolves, so it refuses those. Re-run with the plain path."
+      ;;
+  esac
+  # '~' is expanded by the tool, not by this hook, so '~/...' would be
+  # matched as a relative path named '~' while naming the home directory.
+  # Only printable ASCII. The volume folds case with Unicode rules (e.g.
+  # U+017F LONG S folds to 's'), which no bash glob reproduces, so a
+  # non-ASCII spelling could name a denied file while missing every deny
+  # glob. Refusing it is fail-closed; this repo has no non-ASCII paths.
+  if [[ "$file_path" == *[![:print:]]* ]]; then
+    deny "path guard: '$file_path' contains a byte outside printable ASCII, which this guard cannot match reliably against a case-insensitive volume. Re-run with an ASCII path."
+  fi
+  if [[ "$file_path" == "~"* ]]; then
+    deny "path guard: '$file_path' starts with '~', which the tool expands but this guard cannot. Re-run with the path inside the project, written out in full."
+  fi
+  # Glob's `pattern` is a second path: an absolute pattern ignores `path`
+  # entirely (a probe listed internal/blobfs/fs.go with path 'docs' and an
+  # absolute pattern), and '..' in a pattern climbs out of it. Braces are
+  # checked too, since an alternative can itself be absolute.
+  if [[ "$tool_name" == "Glob" ]]; then
+    glob_pattern="$(printf '%s' "$input" | jq -r '.tool_input.pattern // empty')"
+    # A backslash can escape a '/' or a brace in the Glob engine, turning a
+    # pattern that passes the literal checks into an absolute one.
+    if [[ "$glob_pattern" == /* || "$glob_pattern" == *"~"* || "$glob_pattern" == *".."* \
+          || "$glob_pattern" == *"{/"* || "$glob_pattern" == *",/"* \
+          || "$glob_pattern" == *\\* || "$glob_pattern" == *[![:print:]]* ]]; then
+      deny "path guard: Glob pattern '$glob_pattern' could reach outside the searched path (it is absolute, uses '~' or '..', or has an absolute alternative). Use a pattern relative to 'path'."
+    fi
+  fi
+fi
+
 # Normalize to a path relative to the project/worktree root when possible.
 # Note the exact-match arm: without it, a path equal to the root itself
 # fell through with `rel` still absolute and matched no glob at all.
-project_dir="${CLAUDE_PROJECT_DIR:-$cwd}"
+# The root is the caller's own cwd, and only that. For a worktree-isolated
+# agent CLAUDE_PROJECT_DIR is the MAIN checkout while cwd is its worktree
+# (a probe on 2026-09-23 established both), so accepting either root would
+# let a worktree agent write the main checkout's files by absolute path --
+# skipping its worktree, the diff the session collects from it, and review.
+# CLAUDE_PROJECT_DIR is only a fallback for a payload with no cwd.
+project_dir="${cwd:-${CLAUDE_PROJECT_DIR:-}}"
 rel="$file_path"
-for base in "$cwd" "$project_dir"; do
+for base in "$project_dir"; do
   [[ -z "$base" ]] && continue
   base="${base%/}"
   if [[ "$file_path" == "$base" ]]; then
@@ -177,6 +258,18 @@ for base in "$cwd" "$project_dir"; do
     break
   fi
 done
+
+# A guarded agent may only name paths inside the project. `rel` is still
+# absolute exactly when the path did not start with the root's own bytes,
+# which is every other way of reaching the same files: another letter
+# case on this case-insensitive volume ('/users/eino/...'), the firmlink
+# ('/System/Volumes/Data/Users/...'), or a parent directory whose search
+# covers the project ('/Users/eino'). None of those can be judged by the
+# globs, which are written relative to the root, so they are refused
+# rather than guessed at.
+if (( guarded )) && [[ "$rel" == /* ]]; then
+  deny "path guard: '$file_path' is not inside the project root as this guard spells it ('${project_dir%/}'). Re-run with the path written from that root."
+fi
 
 # The path resolved to the project root: same exposure as no path at all.
 if [[ "$rel" == "." || "$rel" == "./" || -z "$rel" ]]; then
@@ -198,11 +291,28 @@ matches_any() {
   return 1
 }
 
+# DENY_GLOBS are matched ignoring case; EXEMPT_GLOBS and ALLOW_GLOBS are
+# not. The volume is case-insensitive, so 'Internal/VFS/vfs.go' is the same
+# file as 'internal/vfs/vfs.go' and must hit the same deny. The asymmetry is
+# deliberate: case-folding an allow rule would let an agent allowed only
+# '*_test.go' create 'x_TEST.go', which Go compiles as ordinary source. So
+# deny rules fold to catch more, and allow rules stay exact to admit less.
+matches_any_nocase() {
+  local path="$1"; shift
+  local was_set=0
+  shopt -q nocasematch && was_set=1
+  shopt -s nocasematch
+  local rc=1
+  matches_any "$path" "$@" && rc=0
+  (( was_set )) || shopt -u nocasematch
+  return $rc
+}
+
 if [[ -n "${EXEMPT_GLOBS:-}" ]] && matches_any "$rel" $EXEMPT_GLOBS; then
   exit 0
 fi
 
-if [[ -n "${DENY_GLOBS:-}" ]] && matches_any "$rel" $DENY_GLOBS; then
+if [[ -n "${DENY_GLOBS:-}" ]] && matches_any_nocase "$rel" $DENY_GLOBS; then
   deny "path guard: '$rel' is out of scope for this agent (matched DENY_GLOBS)."
 fi
 
