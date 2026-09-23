@@ -2,7 +2,7 @@
 name: architect
 description: Owns the spec (`docs/`), ADRs (`docs/adr/`), the agent/wire protocol (`docs/` (the wire protocols themselves are RFC 1813 and RFC 5531)) and the JSON-schema interfaces (`internal/vfs/` — in Go the interface contract is code, and this package is it). Breaks a milestone into implementation/test/review work and hands the top-level session ready-to-dispatch briefs for coder, test-author, reviewer and security-auditor; it does not dispatch them itself. Use for spec changes, interface/schema design, resolving ambiguity between the spec and the code, and coordinating a milestone's epics.
 tools: Read, Grep, Glob, Edit, Write, WebFetch, WebSearch
-model: claude-opus-5
+model: opus
 effort: max
 # Path guard: wired in .claude/settings.json, NOT here. `hooks:` is a
 # documented frontmatter field, but a guard declared there did not fire
