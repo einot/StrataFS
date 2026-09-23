@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"strata/internal/xdr"
 )
@@ -65,9 +66,17 @@ func (c Cred) Root() bool { return c.UID == 0 }
 // the server reply GARBAGE_ARGS; any other error becomes SYSTEM_ERR.
 type Handler interface {
 	Call(ctx context.Context, proc uint32, cred Cred, args *xdr.Reader, res *xdr.Writer) error
-	// Procs reports whether a procedure number exists, so the server can
+	// HasProc reports whether a procedure number exists, so the server can
 	// answer PROC_UNAVAIL rather than mis-decoding.
 	HasProc(proc uint32) bool
+
+	// Idempotent reports whether executing proc more than once is equivalent
+	// to executing it once. The server caches and replays replies for
+	// procedures where this is false, so that a retransmission does not
+	// re-execute the operation. Implementations should answer false for any
+	// procedure they are unsure of: a needless cache entry is cheap, a
+	// wrongly re-executed operation is not.
+	Idempotent(proc uint32) bool
 }
 
 var ErrGarbageArgs = errors.New("sunrpc: garbage arguments")
@@ -86,6 +95,12 @@ type Server struct {
 	// maxInFlight bounds concurrent request goroutines per connection so a
 	// client cannot make the server spawn without limit.
 	maxInFlight int
+
+	// cache replays replies to retransmitted non-idempotent calls. connSerial
+	// names each accepted connection for its keys; it starts at zero and is
+	// incremented before use, so no connection is ever 0 and none is reused.
+	cache      *replyCache
+	connSerial atomic.Uint64
 }
 
 func NewServer(log *slog.Logger) *Server {
@@ -94,6 +109,7 @@ func NewServer(log *slog.Logger) *Server {
 		versions:    make(map[uint32][]uint32),
 		log:         log,
 		maxInFlight: 64,
+		cache:       newReplyCache(replyCacheMaxEntries, replyCacheMaxAge),
 	}
 }
 
@@ -124,6 +140,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 
 func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	connID := s.connSerial.Add(1)
 	if tc, ok := conn.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
 	}
@@ -154,7 +171,7 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 		go func(rec []byte) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			reply := s.dispatch(ctx, rec)
+			reply := s.dispatch(ctx, connID, rec)
 			if reply == nil {
 				return
 			}
@@ -169,8 +186,13 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 }
 
 // dispatch decodes one call and produces the complete reply record, or nil if
-// the message is not a call we should answer at all.
-func (s *Server) dispatch(ctx context.Context, rec []byte) []byte {
+// the message is not a call we should answer at all. connID is the serial of
+// the connection rec arrived on, and scopes the duplicate request cache to it.
+//
+// The result is named so that the deferred cache resolution below sees
+// whatever each return statement hands back, without every exit path having
+// to remember to record it.
+func (s *Server) dispatch(ctx context.Context, connID uint64, rec []byte) (reply []byte) {
 	r := xdr.NewReader(rec)
 	xid := r.Uint32()
 	mtype := r.Uint32()
@@ -224,6 +246,32 @@ func (s *Server) dispatch(ctx context.Context, rec []byte) []byte {
 	}
 	if !h.HasProc(proc) {
 		return acceptedErr(xid, procUnavail, nil)
+	}
+
+	// Everything above is a pure function of the call header and is never
+	// cached. From here on a non-idempotent call's reply is cached whatever
+	// its status, so a retransmission gets the original's bytes.
+	if !h.Idempotent(proc) {
+		k := replyKey{conn: connID, xid: xid, prog: prog, vers: vers, proc: proc}
+		prior, state := s.cache.begin(k)
+		switch state {
+		case cacheHit:
+			return prior
+		case cacheInFlight:
+			// The original is still executing; its reply will answer the
+			// client, and the client's own retransmission covers a loss.
+			return nil
+		}
+		// Runs on every way out, including a panic in the encoding below that
+		// nothing recovers, so a key is never left in flight by a call that
+		// has stopped executing.
+		defer func() {
+			if len(reply) == 0 {
+				s.cache.abandon(k)
+			} else {
+				s.cache.finish(k, reply)
+			}
+		}()
 	}
 
 	body := xdr.NewWriter()
