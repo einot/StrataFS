@@ -22,9 +22,10 @@ import (
 // that writes are stalled (ADR 0003 §7).
 const stallWarnAfter = 5 * time.Second
 
-// errDrainPanicked is what a call returns when it was parked on a drain that
-// panicked (ADR 0003 §4, G2). It is a sentinel made with errors.New and
-// compared with errors.Is; its text is not pinned.
+// errDrainPanicked is what a call returns when the drain it was parked on is
+// settled as Panicked (ADR 0003 §4, G2). It is a sentinel, compared with
+// errors.Is. The declaration's form is pinned; the text given to errors.New
+// is not.
 var errDrainPanicked = errors.New("blobfs: backpressure drain panicked")
 
 // budget bounds the memory held by buffered writes. The wait is
@@ -38,8 +39,9 @@ var errDrainPanicked = errors.New("blobfs: backpressure drain panicked")
 // locks of its own, or call back into the budget and deadlock on mu.
 type budget struct {
 	// warnAfter is how long an await call may stay blocked before it logs
-	// the Warn record (§7). newBudget sets it to stallWarnAfter. A test may
-	// lower it before the budget is first used; nothing writes it after that.
+	// the Warn record (ADR 0003 §7). newBudget sets it to stallWarnAfter. A
+	// test may set it to any value before the budget is first used; nothing
+	// writes it after that.
 	warnAfter time.Duration
 
 	log      *slog.Logger
@@ -121,9 +123,11 @@ func (b *budget) waiters() int {
 //
 // It returns nil once admitted; the error drain returned, unchanged, when
 // this call's own drain failed (G3); the latest failure of a budget drain
-// that ended after this call began, errDrainPanicked for a panic (G1, G2); or
-// ctx.Err(). A panic out of this call's own drain is settled and then
-// continues out of await unchanged.
+// that ended after this call began, errDrainPanicked for one settled as
+// Panicked (G1, G2); or ctx.Err(). If this call is the drainer and a panic or
+// runtime.Goexit ends its window before drain returns, in drain or in the
+// Info record's log call, the drain is settled as Panicked and the panic or
+// Goexit continues unchanged, so await does not return.
 func (b *budget) await(ctx context.Context, drain func(context.Context) error) error {
 	b.mu.Lock()
 	// ctx counts only for a call that would otherwise block (Assumption 8),
