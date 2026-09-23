@@ -591,3 +591,120 @@ func TestUnknownProgramRejected(t *testing.T) {
 }
 
 var _ = fmt.Sprintf
+
+// testProcRemove is NFSv3 REMOVE (RFC 1813 §3.3.12). It is spelled out here
+// rather than taken from the implementation so that this test pins the wire
+// procedure number ADR 0002 §4 classifies as non-idempotent.
+const testProcRemove uint32 = 12
+
+// callRaw sends one RPC with an explicit xid and returns the complete reply
+// record, asserting nothing about it. call increments the xid on every send
+// and fails the test on a non-SUCCESS accept_stat, so it cannot express a
+// retransmission: ADR 0002 §2 makes the xid part of the duplicate request
+// cache key, and §5 is a claim about the whole reply record's bytes.
+func (c *rpcClient) callRaw(xid, prog, vers, proc uint32, args func(*xdr.Writer)) []byte {
+	c.t.Helper()
+
+	w := xdr.NewWriter()
+	w.Uint32(xid)
+	w.Uint32(0) // CALL
+	w.Uint32(2) // RPC version
+	w.Uint32(prog)
+	w.Uint32(vers)
+	w.Uint32(proc)
+
+	// AUTH_SYS credentials, identical to call's, so a retransmission really is
+	// byte-for-byte indistinguishable from its original.
+	cred := xdr.NewWriter()
+	cred.Uint32(0) // stamp
+	cred.String("test-client")
+	cred.Uint32(c.uid)
+	cred.Uint32(c.gid)
+	cred.Uint32(1)
+	cred.Uint32(c.gid)
+	w.Uint32(1) // AUTH_SYS
+	w.Opaque(cred.Bytes())
+
+	w.Uint32(0) // verifier flavor AUTH_NONE
+	w.Uint32(0) // verifier length
+
+	if args != nil {
+		args(w)
+	}
+
+	body := w.Bytes()
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(body))|0x80000000)
+	c.conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := c.conn.Write(append(hdr[:], body...)); err != nil {
+		c.t.Fatalf("write call: %v", err)
+	}
+	return c.readRecord()
+}
+
+// testReplyStatus checks the RPC envelope of a reply record and returns the
+// NFS status word that follows it.
+func testReplyStatus(t *testing.T, rec []byte, wantXID uint32) uint32 {
+	t.Helper()
+	r := xdr.NewReader(rec)
+	if got := r.Uint32(); got != wantXID {
+		t.Fatalf("reply xid = %d, want %d: RFC 5531 §9 requires the xid of a REPLY to match its CALL", got, wantXID)
+	}
+	if got := r.Uint32(); got != 1 {
+		t.Fatalf("reply mtype = %d, want REPLY", got)
+	}
+	if got := r.Uint32(); got != 0 {
+		t.Fatalf("reply rejected, reply_stat = %d, want MSG_ACCEPTED", got)
+	}
+	r.Uint32() // verifier flavor
+	r.Opaque() // verifier body
+	if got := r.Uint32(); got != 0 {
+		t.Fatalf("accept_stat = %d, want SUCCESS", got)
+	}
+	return r.Uint32()
+}
+
+// TestRetransmittedRemoveIsAnsweredFromCache is the symptom issue #2 names and
+// the one test that proves the duplicate request cache is wired into the NFS
+// program rather than only existing in internal/sunrpc: a REMOVE that is
+// retransmitted with the same xid on the same connection must be answered with
+// the original reply's bytes, not re-executed into NFS3ERR_NOENT.
+//
+// ADR 0002: §2 (the key), §4 (REMOVE is not idempotent), §5 (the cached
+// artefact is the complete encoded reply record), §6 row 3.
+func TestRetransmittedRemoveIsAnsweredFromCache(t *testing.T) {
+	addr, _, _ := startServer(t)
+	c := dial(t, addr)
+	root := mountRoot(t, c)
+
+	nfsCreate(t, c, root, "doomed.txt")
+
+	xid := c.xid + 1000
+	args := func(w *xdr.Writer) {
+		w.Opaque(root)
+		w.String("doomed.txt")
+	}
+
+	first := c.callRaw(xid, ProgramNFS, VersionNFS, testProcRemove, args)
+	if st := testReplyStatus(t, first, xid); st != uint32(vfs.OK) {
+		t.Fatalf("REMOVE status = %d, want NFS3_OK(%d)", st, uint32(vfs.OK))
+	}
+
+	// The same call again, byte for byte, on the same connection: a
+	// retransmission is indistinguishable from a first transmission.
+	second := c.callRaw(xid, ProgramNFS, VersionNFS, testProcRemove, args)
+	if st := testReplyStatus(t, second, xid); st != uint32(vfs.OK) {
+		t.Errorf("the retransmitted REMOVE returned status %d, want NFS3_OK(%d): ADR 0002 §4 classifies REMOVE as non-idempotent precisely so that a retransmission is answered from the cache instead of being re-executed into NFS3ERR_NOENT for a delete that succeeded", st, uint32(vfs.OK))
+	}
+	if !bytes.Equal(first, second) {
+		t.Errorf("the reply to the retransmitted REMOVE is not the original's bytes:\n first = %x\nsecond = %x\nADR 0002 §5 caches the complete encoded reply record, so the replay is byte-identical with no rewriting", first, second)
+	}
+
+	// Control: the file really was removed, so a REMOVE that is not a
+	// duplicate must now fail. Without this, two identical replies could just
+	// mean REMOVE never removed anything.
+	fresh := c.callRaw(xid+1, ProgramNFS, VersionNFS, testProcRemove, args)
+	if st := testReplyStatus(t, fresh, xid+1); st != uint32(vfs.ErrNoEnt) {
+		t.Errorf("REMOVE of the same name under a fresh xid returned status %d, want NFS3ERR_NOENT(%d): only a retransmitted xid may be answered from the cache, and the file was already gone", st, uint32(vfs.ErrNoEnt))
+	}
+}
