@@ -33,7 +33,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SCOPE_AGENT_TYPES='test-author' EXEMPT_GLOBS='*_test.go internal/vfs/* docs/* README.md go.mod' DENY_GLOBS='*.go internal internal/* cmd cmd/*' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
+            "command": "SCOPE_AGENT_TYPES='test-author' ALLOW_GLOBS='*_test.go internal/vfs internal/vfs/* docs docs/* README.md CLAUDE.md go.mod' ${CLAUDE_PROJECT_DIR}/.claude/hooks/path-guard.sh"
           }
         ]
       },
