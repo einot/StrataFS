@@ -15,22 +15,38 @@ import (
 
 // Tests for the stability contract of Write, and for Write racing a flush.
 //
-// The stability rule, RFC 1813 §3.3.7 (WRITE), as recalled by the dispatching
-// session, not verified against the RFC text:
+// The stability rule, RFC 1813 §3.3.7 (WRITE):
 //
 //	If stable was FILE_SYNC, then committed must also be FILE_SYNC: anything
 //	else constitutes a protocol violation. If stable was DATA_SYNC, then
 //	committed may be FILE_SYNC or DATA_SYNC: anything else constitutes a
 //	protocol violation.
 //
-// FILE_SYNC also means the data and the file's metadata are on stable storage
-// by the time the reply is sent, with no COMMIT to follow. docs/DESIGN.md §9
-// and docs/adr/0003-write-backpressure.md describe the UNSTABLE/COMMIT half of
-// the same contract. ADR 0003's Context also lists a FILE_SYNC write among the
+// Provenance: an architect checked this against the RFC Editor's text,
+// https://www.rfc-editor.org/rfc/rfc1813.txt, on 2026-09-23, and reported the
+// DATA_SYNC sentence above as matching it. The page was fetched through a tool
+// that summarises what it fetches, so treat the wording as close to verbatim,
+// not guaranteed exact. The check, as relayed to this file's author, quoted
+// the DATA_SYNC sentence. The FILE_SYNC sentence is its companion in the same
+// description of committed and was not separately quoted back.
+//
+// In paraphrase, not quotation: FILE_SYNC also means the data and the file's
+// metadata are on stable storage by the time the reply is sent, with no COMMIT
+// to follow. DATA_SYNC means the data, and enough metadata to retrieve it, are
+// on stable storage by then. docs/DESIGN.md §9 and
+// docs/adr/0003-write-backpressure.md describe the UNSTABLE/COMMIT half of the
+// same contract. ADR 0003's Context also lists a FILE_SYNC write among the
 // things that drain buffered data.
 //
 // Every call that a hang could block runs under wsWithin, so a hang fails its
-// test instead of blocking the suite.
+// test instead of blocking the suite. A call made from a helper goroutine is
+// bounded by waiting for that goroutine under wsWithin.
+//
+// Not covered here: truncation racing a buffered write, and an unlink landing
+// in the middle of a write. Neither interleaving can be forced through the
+// public interface without a hook into the implementation. A test that relied
+// on luck to reach them would pass on buggy code almost every run, so they are
+// left uncovered rather than covered in name only.
 
 // wsHangBound is how long a call gets before it counts as hung. The vfs
 // contract lets Write delay a reply as backpressure, so a caller must not put a
@@ -117,8 +133,37 @@ func wsFileSyncWrite(t *testing.T, fs *FS, h vfs.Handle, off uint64, data []byte
 	if got != vfs.FileSync {
 		t.Errorf("%s answered committed=%s; RFC 1813 §3.3.7 requires committed "+
 			"to be FILE_SYNC when stable was FILE_SYNC, and anything else is a "+
-			"protocol violation (rule as recalled by the dispatching session, "+
-			"not verified against the RFC text)", what, wsStability(got))
+			"protocol violation", what, wsStability(got))
+	}
+}
+
+// wsDataSyncWrite issues a DATA_SYNC Write under the hang bound. It checks
+// that the write returns, that it accepts every byte, and that it answers
+// committed=DATA_SYNC or committed=FILE_SYNC.
+func wsDataSyncWrite(t *testing.T, fs *FS, h vfs.Handle, off uint64, data []byte) {
+	t.Helper()
+	var (
+		n   uint32
+		got vfs.Stability
+	)
+	what := fmt.Sprintf("Write(DATA_SYNC) of %d bytes at offset %d", len(data), off)
+	err := wsWithin(t, what, func(ctx context.Context) error {
+		var err error
+		n, got, err = fs.Write(ctx, testCaller, h, off, data, vfs.DataSync)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("%s = %v; a DATA_SYNC write to a regular file on a healthy "+
+			"writable store must succeed", what, err)
+	}
+	if int(n) != len(data) {
+		t.Fatalf("%s wrote %d bytes; a write that succeeds against a healthy "+
+			"store must accept all %d", what, n, len(data))
+	}
+	if got != vfs.DataSync && got != vfs.FileSync {
+		t.Errorf("%s answered committed=%s; RFC 1813 §3.3.7 allows only "+
+			"DATA_SYNC or FILE_SYNC when stable was DATA_SYNC, and anything "+
+			"else is a protocol violation", what, wsStability(got))
 	}
 }
 
@@ -208,9 +253,8 @@ func wsDiff(got, want []byte, rangeSize int) string {
 
 // TestWriteFileSyncReturns checks that a FILE_SYNC write with data returns,
 // accepts every byte, and answers committed=FILE_SYNC (RFC 1813 §3.3.7, rule
-// quoted at the top of this file, as recalled by the dispatching session and
-// not verified against the RFC text). Targets Bug 1: such a write never
-// returns. Covers both a fresh file and an overwrite of committed data.
+// and its provenance at the top of this file). Targets Bug 1: such a write
+// never returns. Covers both a fresh file and an overwrite of committed data.
 func TestWriteFileSyncReturns(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -336,11 +380,14 @@ func TestWriteFileSyncDoesNotWedgeFile(t *testing.T) {
 
 // TestWriteDataSyncAnsweredStably checks that a DATA_SYNC write answers
 // committed=DATA_SYNC or committed=FILE_SYNC, never UNSTABLE. That is RFC 1813
-// §3.3.7, as recalled by the dispatching session and not verified against the
-// RFC text: "If stable was DATA_SYNC, then committed may be FILE_SYNC or
-// DATA_SYNC: anything else constitutes a protocol violation." Targets
-// suspected Bug 3: DATA_SYNC answered as UNSTABLE. The call is bounded as
-// well, in case DATA_SYNC shares FILE_SYNC's path and therefore Bug 1.
+// §3.3.7 (provenance at the top of this file): "If stable was DATA_SYNC, then
+// committed may be FILE_SYNC or DATA_SYNC: anything else constitutes a
+// protocol violation." Targets suspected Bug 3: DATA_SYNC answered as
+// UNSTABLE. The call is bounded as well, in case DATA_SYNC shares FILE_SYNC's
+// path and therefore Bug 1.
+//
+// This checks only the label. TestWriteDataSyncDurableWithoutCommit checks
+// that the label is true.
 func TestWriteDataSyncAnsweredStably(t *testing.T) {
 	fs, _, _ := newTestFS(t)
 	h := mustCreate(t, fs, fs.Root(), "datasync.bin")
@@ -366,8 +413,251 @@ func TestWriteDataSyncAnsweredStably(t *testing.T) {
 	if got != vfs.DataSync && got != vfs.FileSync {
 		t.Errorf("Write(DATA_SYNC) answered committed=%s; RFC 1813 §3.3.7 allows "+
 			"only DATA_SYNC or FILE_SYNC when stable was DATA_SYNC, and anything "+
-			"else is a protocol violation (rule as recalled by the dispatching "+
-			"session, not verified against the RFC text)", wsStability(got))
+			"else is a protocol violation", wsStability(got))
+	}
+}
+
+// TestWriteDataSyncDurableWithoutCommit checks what DATA_SYNC promises: once
+// the write has returned, its data is on stable storage, with no Sync or
+// Commit to follow. A second mount on the same bucket must read the data
+// back. It mirrors TestWriteFileSyncDurableWithoutCommit. The create, and any
+// prefill, are committed before the DATA_SYNC write, so the test depends only
+// on what DATA_SYNC promises about the write, not on whether CREATE is
+// durable.
+//
+// TestWriteDataSyncAnsweredStably checks only the label. A fix that answers
+// DATA_SYNC, or relabels it FILE_SYNC, without reaching stable storage passes
+// that test. It is a worse violation than answering UNSTABLE, because the
+// server claims stable storage it never reached. This test fails such a fix.
+//
+// The size on the second mount is checked as well. DATA_SYNC need not commit
+// all of the file's metadata; mtime, for one, may lag. But the promise covers
+// the data, and the file's size is part of what makes the data readable. If
+// the durable size stops short of the written range, the bytes past it read
+// as beyond end of file and are not retrievable, whatever the chunks hold. So
+// the size must cover every written byte. The "extension" case is the one
+// where that bites on an existing file: it grows a committed file, so a
+// stale durable size would cut the new tail off.
+func TestWriteDataSyncDurableWithoutCommit(t *testing.T) {
+	cases := []struct {
+		name    string
+		prefill bool
+		off     uint64
+		size    int
+	}{
+		{"new file", false, 0, 10000},
+		{"overwrite of committed data", true, 3000, 3000},
+		{"extension of committed data", true, 8000, 6000},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs, st, _ := newTestFS(t)
+			const name = "datasync-durable.bin"
+			h := mustCreate(t, fs, fs.Root(), name)
+			var want []byte
+			if tc.prefill {
+				prefill := bytes.Repeat([]byte{'.'}, 10000)
+				mustWrite(t, fs, h, 0, prefill)
+				want = append([]byte(nil), prefill...)
+			}
+			wsSync(t, fs, "Sync of the create and prefill")
+
+			data := wsPattern(tc.size, 'Y')
+			wsDataSyncWrite(t, fs, h, tc.off, data)
+			if end := int(tc.off) + len(data); end > len(want) {
+				want = append(want, make([]byte, end-len(want))...)
+			}
+			copy(want[tc.off:], data)
+
+			// No Sync, no Commit: the DATA_SYNC reply alone must have made
+			// this durable.
+			fs2, h2, attr := wsRemountLookup(t, st, name)
+			if attr.Size != uint64(len(want)) {
+				t.Errorf("size on a second mount = %d, want %d; a DATA_SYNC write "+
+					"must commit its data and enough of the file's metadata to "+
+					"retrieve it before replying, and a durable size short of "+
+					"the written range leaves written bytes past end of file",
+					attr.Size, len(want))
+			}
+			if d := wsDiff(readAll(t, fs2, h2, len(want)), want, 512); d != "" {
+				t.Errorf("a second mount does not see the DATA_SYNC data; a "+
+					"DATA_SYNC write must be on stable storage when it replies, "+
+					"with no COMMIT to follow: %s", d)
+			}
+		})
+	}
+}
+
+// Parameters for TestWriteConcurrentFileSyncWriters. The file spans
+// wsStableChunks chunks of 4096 bytes, cut into wsStableRange-byte ranges.
+// The two writers take alternate ranges, so both write into every chunk.
+const (
+	wsStableChunks = 3
+	wsStableRange  = 512
+	wsStableSize   = wsStableChunks * wsRaceChunkSize
+	wsStableRanges = wsStableSize / wsStableRange
+)
+
+// TestWriteConcurrentFileSyncWriters checks two stable writers racing each
+// other and a flush. One goroutine makes FILE_SYNC writes of the even ranges
+// of an empty file, a second makes FILE_SYNC writes of the odd ranges, and a
+// third runs Sync in a loop until both writers finish. Both writers go in
+// ascending order, so they are usually in the same chunk at the same time.
+//
+// Every write must return (the code before the fix deadlocked a FILE_SYNC
+// write, and a FILE_SYNC write now drops the per-file lock before its flush,
+// which opens a window for the other writer and the Sync loop). Every write
+// must answer committed=FILE_SYNC (RFC 1813 §3.3.7, rule at the top of this
+// file). Every byte must then read back on the same mount, and on a second
+// mount with no final Sync. Each range was acknowledged FILE_SYNC, so each
+// was on stable storage when its write replied. A later commit that dropped
+// it would break that write's promise, so no final Sync is needed or taken.
+// The create is committed first, so the second mount's lookup does not depend
+// on CREATE being durable.
+//
+// A correct implementation cannot fail this, however the goroutines
+// interleave. The ranges are disjoint and each is written exactly once, so
+// every byte has exactly one right value and no assertion depends on which
+// writer went first. Flushes only change where a byte is stored, never what
+// it is. The Sync loop is stopped, and waited for, before anything is
+// checked. The goroutines never touch t; they report through a slice guarded
+// by a mutex, which is read only after they have all stopped.
+//
+// The two writers are bounded as a pair, not call by call, because a helper
+// goroutine cannot call t.Fatalf. The pair's bound is at least as strict: if
+// every call finishes within wsHangBound in total, each one did.
+func TestWriteConcurrentFileSyncWriters(t *testing.T) {
+	ctx := context.Background()
+	fs, st, _ := newTestFS(t)
+	const name = "stable-race.bin"
+	h := mustCreate(t, fs, fs.Root(), name)
+	wsSync(t, fs, "Sync of the create")
+
+	want := make([]byte, wsStableSize)
+	for k := range wsStableRanges {
+		for i := k * wsStableRange; i < (k+1)*wsStableRange; i++ {
+			want[i] = wsRangeByte(k)
+		}
+	}
+
+	// failures are errors that make the read-back meaningless. mislabels are
+	// wrong committed values, reported without stopping the data checks.
+	var (
+		mu        sync.Mutex
+		failures  []string
+		mislabels []string
+	)
+	fail := func(format string, args ...any) {
+		mu.Lock()
+		failures = append(failures, fmt.Sprintf(format, args...))
+		mu.Unlock()
+	}
+	mislabel := func(format string, args ...any) {
+		mu.Lock()
+		mislabels = append(mislabels, fmt.Sprintf(format, args...))
+		mu.Unlock()
+	}
+
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	halt := func() { stopOnce.Do(func() { close(stop) }) }
+	defer halt()
+
+	syncRunning := make(chan struct{})
+	syncDone := make(chan struct{})
+	go func() {
+		defer close(syncDone)
+		close(syncRunning)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err := fs.Sync(ctx); err != nil {
+				fail("Sync concurrent with FILE_SYNC writes = %v; a Sync against "+
+					"a healthy writable store must succeed", err)
+				return
+			}
+		}
+	}()
+	<-syncRunning
+
+	begin := make(chan struct{})
+	var writers sync.WaitGroup
+	writer := func(first int) {
+		defer writers.Done()
+		<-begin
+		for k := first; k < wsStableRanges; k += 2 {
+			lo := k * wsStableRange
+			data := bytes.Repeat([]byte{wsRangeByte(k)}, wsStableRange)
+			n, got, err := fs.Write(ctx, testCaller, h, uint64(lo), data, vfs.FileSync)
+			if err != nil {
+				fail("FILE_SYNC Write of range %d [%d,%d) = %v; a FILE_SYNC write "+
+					"to a regular file on a healthy writable store must succeed, "+
+					"whatever other writes and flushes are running",
+					k, lo, lo+wsStableRange, err)
+				return
+			}
+			if int(n) != len(data) {
+				fail("FILE_SYNC Write of range %d [%d,%d) wrote %d bytes; a write "+
+					"that succeeds must accept all %d", k, lo, lo+wsStableRange, n, len(data))
+				return
+			}
+			if got != vfs.FileSync {
+				mislabel("FILE_SYNC Write of range %d [%d,%d) answered "+
+					"committed=%s; RFC 1813 §3.3.7 requires committed to be "+
+					"FILE_SYNC when stable was FILE_SYNC, and anything else is a "+
+					"protocol violation", k, lo, lo+wsStableRange, wsStability(got))
+			}
+		}
+	}
+	writers.Add(2)
+	go writer(0)
+	go writer(1)
+	close(begin)
+
+	wsWithin(t, "two goroutines' concurrent FILE_SYNC writes, with Sync looping",
+		func(context.Context) error {
+			writers.Wait()
+			return nil
+		})
+	halt()
+	wsWithin(t, "the concurrent Sync loop, after being told to stop",
+		func(context.Context) error {
+			<-syncDone
+			return nil
+		})
+
+	mu.Lock()
+	errs := append([]string(nil), failures...)
+	labels := append([]string(nil), mislabels...)
+	mu.Unlock()
+	if len(labels) > 0 {
+		t.Errorf("%s", strings.Join(labels, "; "))
+	}
+	if len(errs) > 0 {
+		t.Fatalf("%s", strings.Join(errs, "; "))
+	}
+
+	if d := wsDiff(wsReadAll(t, fs, h), want, wsStableRange); d != "" {
+		t.Errorf("same mount: every byte an acknowledged FILE_SYNC Write put in "+
+			"the file must read back as written, whatever other writes and "+
+			"flushes ran concurrently (0x00 = range lost): %s", d)
+	}
+
+	// No final Sync: each range's FILE_SYNC reply must have made it durable.
+	fs2, h2, attr := wsRemountLookup(t, st, name)
+	if attr.Size != wsStableSize {
+		t.Errorf("size on a second mount = %d, want %d; a FILE_SYNC write must "+
+			"commit the file's metadata before replying, and the last range "+
+			"ends at %d", attr.Size, wsStableSize, wsStableSize)
+	}
+	if d := wsDiff(readAll(t, fs2, h2, wsStableSize), want, wsStableRange); d != "" {
+		t.Errorf("second mount, with no Sync or Commit after the writes: every "+
+			"byte an acknowledged FILE_SYNC Write put in the file must be on "+
+			"stable storage when the write replies, whatever other writes and "+
+			"flushes ran concurrently (0x00 = range lost): %s", d)
 	}
 }
 
@@ -380,12 +670,18 @@ func TestWriteDataSyncAnsweredStably(t *testing.T) {
 // and Write modifying the chunk. Small pieces give many chances per iteration
 // for the same fixed cost of mounting, remounting and reading back.
 //
-// Each shape runs up to wsRaceMaxIters iterations, about 40,000 windows. It
-// also stops once wsRaceBudget of wall-clock time has passed. At least one
-// iteration always runs. Under -race an iteration should take tens of
-// milliseconds. The cap keeps each shape near 1.5 s, and the whole test near
-// 3 s, even on a slow CI machine. A faster machine runs more iterations in the
-// same time.
+// Each shape runs at least one iteration, then keeps starting new ones until
+// wsRaceBudget of wall-clock time has passed or wsRaceMaxIters is reached. The
+// budget is checked only between iterations, so a shape can overrun it by up
+// to one iteration. Measured under -race, an iteration takes about 0.4-1 s, so
+// each shape gets 2-5 iterations, roughly 2,000-5,000 writes. wsRaceMaxIters
+// is a ceiling for much faster machines; under -race the budget stops the
+// loop long before it.
+//
+// A single iteration is the design point. The code this targets failed on its
+// first iteration, with about half of the ranges lost. The extra iterations
+// are a bonus that faster machines get within the same budget, not something
+// the test relies on.
 //
 // Each range k is filled with wsRangeByte(k), which is never 0x00 (what a
 // rebuild from a missing chunk yields) and never wsRaceBase (the overwrite
