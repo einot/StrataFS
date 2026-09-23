@@ -1,2 +1,5 @@
+Acknowledged data is no longer silently lost; a write that arrived while the periodic commit or a client COMMIT was flushing the file could discard earlier writes to the same chunk, even ones a COMMIT had confirmed.
+A FILE_SYNC write returns instead of hanging; the hung write blocked every later COMMIT, periodic commit and shutdown, so nothing further was committed to the bucket.
+A DATA_SYNC write is committed to the bucket before the reply and answered FILE_SYNC, instead of being answered UNSTABLE, which RFC 1813 forbids.
 A non-idempotent NFS request retransmitted on the same connection gets the original reply instead of being executed a second time; a duplicate request cache remembers recent replies.
 Chunks are verified against the hash that names them when fetched from the bucket; a mismatch fails the operation with NFS3ERR_IO. New -verify-chunks flag, default on.
