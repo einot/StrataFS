@@ -129,16 +129,17 @@ func btWait(t *testing.T, what string, c *btCall) {
 
 // btResult waits for c and returns what await returned. A panic out of await
 // fails the test. ADR 0003 §4 lets a panic continue out of await only when the
-// drainer's window ends in one: its drain panics, or the Info record's log
-// call does. The tests that set that up read c.pval themselves.
-// TestBudgetErrorHandlerPanicAfterSettle, where a panic out of the drainer is
-// allowed but not required, does not call btResult on the drainer.
+// drainer's window ends in one, when its drain panics or the Info record's log
+// call does, and when the Error record's log call panics after the settle
+// (G3). The tests that set those up wait for the drainer with btWait and read
+// c.pval themselves.
 func btResult(t *testing.T, what string, c *btCall) error {
 	t.Helper()
 	btWait(t, what, c)
 	if c.panicked {
-		t.Fatalf("%s panicked with %v; await lets a panic out only when the "+
-			"drainer's own window panics (ADR 0003 §4)", what, c.pval)
+		t.Fatalf("%s panicked with %v; await lets a panic out only for the "+
+			"drainer, whose window or Error record's log call panicked (ADR "+
+			"0003 §4, G3)", what, c.pval)
 	}
 	return c.err
 }
@@ -2149,15 +2150,41 @@ func TestBudgetInfoHandlerGoexit(t *testing.T) {
 // been settled as Failed, so the parked call returns the drain's error, not
 // errDrainPanicked, and a later call can drain.
 //
-// How the drainer's own call ends, returning E or panicking, is not pinned,
-// and nothing is asserted about it. btAwait recovers a panic either way, and
-// the drainer is waited for with btWait, not btResult, only so that it cannot
-// outlive the test.
+// The drainer's own call is pinned by G3: "This holds when the Error record's
+// log call returns. If that call panics or calls runtime.Goexit, the panic or
+// Goexit continues out of await unchanged in place of the return, and the
+// calls still parked get the drain's error all the same, because the settle
+// recorded it before the call (Assumption 11)." So the drainer's await panics
+// with the handler's own value and does not return.
 func TestBudgetErrorHandlerPanicAfterSettle(t *testing.T) {
+	btErrorHandlerFaults(t, false)
+}
+
+// TestBudgetErrorHandlerGoexitAfterSettle is TestBudgetErrorHandlerPanicAfterSettle
+// with a handler that calls runtime.Goexit on the Error record. It pins the
+// same sentences, and G3's "If that call panics or calls runtime.Goexit, the
+// panic or Goexit continues out of await unchanged in place of the return":
+// the drainer's goroutine ends without returning or panicking. The parked call
+// still gets the drain's error, not errDrainPanicked, "because the settle
+// recorded it before the call".
+func TestBudgetErrorHandlerGoexitAfterSettle(t *testing.T) {
+	btErrorHandlerFaults(t, true)
+}
+
+// btErrorHandlerFaults runs TestBudgetErrorHandlerPanicAfterSettle and, with
+// goexit set, TestBudgetErrorHandlerGoexitAfterSettle. A drains and fails with
+// E while B is parked, and the Error record's log call panics or calls
+// runtime.Goexit.
+func btErrorHandlerFaults(t *testing.T, goexit bool) {
+	t.Helper()
 	errE := errors.New("budget test: drain failed (E)")
 	c := newBTCapture(false)
 	p := &btPanicValue{why: "budget test: the Error record's handler panics"}
-	f := newBTFault(btMsgError, func() { panic(p) }, nil)
+	fault := func() { panic(p) }
+	if goexit {
+		fault = runtime.Goexit
+	}
+	f := newBTFault(btMsgError, fault, nil)
 	b := newBudget(1000, f.logger(c))
 	b.add(2000)
 	gate := newBTGate(t)
@@ -2189,6 +2216,22 @@ func TestBudgetErrorHandlerPanicAfterSettle(t *testing.T) {
 		t.Errorf("no %q record reached the log handler, so the scenario this "+
 			"test is about did not happen; a failed drain logs the Error "+
 			"record (§4, Failed)", btMsgError)
+	}
+	switch {
+	case goexit && a.returned:
+		t.Errorf("the drainer's await returned %v, but its Error record's log "+
+			"call called runtime.Goexit, which continues out of await "+
+			"unchanged in place of the return (G3)", a.err)
+	case goexit && a.panicked:
+		t.Errorf("the drainer's await panicked with %v, but its Error record's "+
+			"log call called runtime.Goexit, which is not a panic (G3)", a.pval)
+	case !goexit && !a.panicked:
+		t.Errorf("the drainer's await did not panic (returned: %v, err: %v); a "+
+			"panic in the Error record's log call continues out of await "+
+			"unchanged in place of the return (G3)", a.returned, a.err)
+	case !goexit && a.pval != p:
+		t.Errorf("the drainer's await panicked with %v (%T), want the log "+
+			"handler's own panic value %v, unchanged (G3)", a.pval, a.pval, p)
 	}
 
 	later := btAwait(context.Background(), b, drain)
