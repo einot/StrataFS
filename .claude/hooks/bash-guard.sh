@@ -156,10 +156,12 @@
 # defines only zsh's two defaults, `run-help` and `which-command`, neither
 # of them an allowed name, and no global or suffix aliases and no
 # `zsh_directory_name` function for `~[name]` to call (verified). That
-# rests on the user's shell configuration, not on this guard: a global
-# alias added to it could rewrite an allowed command, and this guard
-# cannot see it. The agent cannot define one, because nothing it may run
-# sets an alias. When adding a rule, ask what zsh does to the command
+# rests on the user's shell configuration, not on this guard. An ordinary
+# alias or a shell function named after an allowed command (ls, grep, git
+# and the rest) would rewrite that command, and a global alias could
+# rewrite any word in it; this guard can see none of them. The agent
+# cannot define any of these, because nothing it may run sets an alias or
+# defines a function. When adding a rule, ask what zsh does to the command
 # too, not only bash.
 #
 # Bash's word expansions, in the order bash applies them, with where each
@@ -604,6 +606,22 @@ relative_to_project() {
 # command is rejected outright rather than sanitized. These run on the raw
 # command string, deliberately: a `>` inside quotes is rejected too.
 
+# Length first, before anything that scales with it. The checks below use
+# bash pattern substitution and per-character loops over the command and
+# its tokens, and under bash 3.2 their cost grows much faster than the
+# length: 8,192 characters of quotes or backslashes took about 30 s to
+# check, 50,000 characters of `&& ls` took 228 s, and 2,048 characters took
+# at most 2 s whatever the content (all measured). A hook that runs past
+# its timeout (60 s by default) may let the command through unchecked, so
+# a slow check is a bypass, and the one bound that holds for every check,
+# present and future, is on the input. No read-only inspection command
+# needs to be long; the longest an auditor has sent here was about 200
+# characters. Measured in characters, as bash counts them.
+max_command_chars=2048
+if (( ${#command_str} > max_command_chars )); then
+  deny "bash guard: the command is ${#command_str} characters long, over this guard's limit of ${max_command_chars}. A check this guard runs grows faster than the command's length, and a check that runs out of time could let a command through, so long commands are refused outright. Split the work into several shorter commands."
+fi
+
 if [[ "$command_str" == *$'\n'* ]]; then
   deny "bash guard: the command contains a newline, and multi-line shell input can hide a second command from this guard. Send one single-line command per Bash call."
 fi
@@ -713,9 +731,11 @@ fi
 # bash 3.2 copies the string on every `${s:i:1}`, and a 100,000-character
 # command took 108 s to check (measured). A hook that runs past its timeout
 # may let the command through unchecked, so a slow check is a bypass. jq's
-# reduce over the code points is linear (1,000,000 characters in about 2 s,
-# measured), and the whole scan is skipped when there is no parenthesis at
-# all. It fails closed: if jq errors, or prints anything but "false", the
+# reduce over the code points is linear (measured: 1,000,000 characters in
+# 2.3 s for the jq filter alone, and 3.0 s for this whole guard before the
+# length limit above was added), and the whole scan is skipped when there
+# is no parenthesis at all. With the length limit it is never the slow
+# part. It fails closed: if jq errors, or prints anything but "false", the
 # command is refused.
 unquoted_paren() {
   if [[ "$command_str" != *'('* && "$command_str" != *')'* ]]; then
