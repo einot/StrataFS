@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -49,6 +50,7 @@ func run() error {
 		cacheMiB  = flag.Int("cache", 256, "chunk cache size in MiB")
 		interval  = flag.Duration("commit-interval", 5*time.Second, "how often to commit the namespace")
 		retention = flag.Int("snapshot-retention", 10, "superseded namespace snapshots to keep (-1 keeps all)")
+		maxDirty  = flag.Int("max-dirty", 256, "maximum buffered write data in MiB before writes are held for a commit (0 or less: no limit)")
 
 		verifyChunks = flag.Bool("verify-chunks", true, "verify each chunk fetched from the bucket against the hash that names it")
 
@@ -106,6 +108,7 @@ func run() error {
 		OwnerGID:          gid,
 		ReadOnly:          *readOnly,
 		SnapshotRetention: *retention,
+		MaxDirtyBytes:     maxDirtyBytes(*maxDirty),
 
 		SkipChunkVerification: !*verifyChunks,
 		Log:                   log,
@@ -150,6 +153,20 @@ func run() error {
 	epoch, inodes, hits, misses, _ := fs.Stats()
 	log.Info("clean shutdown", "epoch", epoch, "inodes", inodes, "cache_hits", hits, "cache_misses", misses)
 	return nil
+}
+
+// maxDirtyBytes converts -max-dirty, in MiB, to Config.MaxDirtyBytes.
+//
+// Zero or less means no limit, which Config spells as a negative value, since
+// its zero selects the default. A count too large to express in bytes is a
+// limit no workload could reach, so it maps to no limit too rather than
+// wrapping into a small one. Converting before comparing keeps the constant
+// representable where int is 32 bits (ADR 0003 §1, Assumptions 16 and 17).
+func maxDirtyBytes(mib int) int64 {
+	if mib <= 0 || int64(mib) > math.MaxInt64>>20 {
+		return -1
+	}
+	return int64(mib) << 20
 }
 
 // openStore turns a bucket spec into a Store. A spec starting with s3:// is an

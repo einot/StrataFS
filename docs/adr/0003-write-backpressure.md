@@ -116,6 +116,50 @@
   says a test may raise `warnAfter` as well as lower it.
   ***What this does not decide*** — the chunk-cache bullet cites #47 and #46.
   ***References*** — `runtime.Goexit` and the built-in `recover`.
+- **Revised:** 2026-09-24 — a second pass the same day, documentation only,
+  made before the wiring, recording what the review before the wiring found
+  stated wrongly or not at all. The decision, §4's algorithm, G1–G3, the five
+  sites' rules, every pinned name, signature and comment, and all numbering
+  are unchanged; three assumptions are appended. The citations this pass adds
+  were checked against `98bfad9`. What changed:
+  **§5** — `NFS3ERR_ROFS` depends on the drain having a chunk to upload; when
+  every chunk it flushes is already in the bucket, the commit's snapshot `Put`
+  fails instead, and the client gets `NFS3ERR_IO`.
+  **§6** — the term above the limit, which the text called a small constant,
+  is quantified: admission reserves nothing and a release wakes every parked
+  call, so `k` reaches 64 per connection, connections are uncapped, and `W` is
+  up to `2 × cs` at the default chunk size. That is up to 128 MiB per
+  connection at the defaults, with no bound in total. The design is kept, by
+  the repository owner's decision (Assumption 19).
+  **§9** — its closing paragraph said nothing of the budget was implemented;
+  the budget type has been on `main` since #52, and the wiring lands in the
+  same change as this revision.
+  **Assumptions** — 19, the overshoot, with the two alternatives weighed; 20, a
+  panic part-way through an accounting site, accepted; 21, site 2 leaving
+  `pendingTrim` alone, which costs I/O and no charge.
+- **Revised:** 2026-09-24 — a third pass the same day, documentation only,
+  after the security audit of the budget and the wiring together. The audit's
+  findings are all in pre-existing code and are tracked as issues rather than
+  fixed here; this pass stops the ADR overstating what the budget bounds. The
+  decision, §4's algorithm, G1–G3, the five sites' rules, every pinned name,
+  signature and comment, and all numbering are unchanged, and no assumption is
+  added. The citations this pass adds were checked against `8baf977`. What
+  changed:
+  **§6** — the bound's closing sentence says `truncate`'s partial chunks come
+  per `SETATTR` and without limit between flushes; *Why at every instant* says
+  a flush charges a file's whole `pendingTrim` queue at once, without regard to
+  the limit (#56); the files' chunk lists join what the budget does not cover
+  (#55); the payload figures note that the RPC record may double them (#58);
+  and the payload and overshoot figures both note that a connection's parked
+  calls outlive it, because they wait on the server's context (#57).
+  **§9** — the NFS server's context is cancelled only at shutdown, so a
+  disconnect does not end a parked `WRITE` (#57).
+  **Assumption 6** — the `pendingTrim` queue is uncharged until a flush,
+  neither pruned nor deduplicated, and charged whole by the next flush, with an
+  example at the defaults; the same queue can bring truncated bytes back
+  (#56). The earlier text covered only the cached case.
+  ***What this does not decide*** — enforcing the advertised maximum file size
+  (#55).
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
 - **Affects:** `internal/blobfs`, `cmd/strata`, doc comment on `vfs.FS.Write`
 
@@ -758,10 +802,18 @@ it — and the one that ran it — abandons the wait and returns that error from
 anywhere in the chain and passes it through unchanged, and turns anything else
 into `NFS3ERR_IO`. Concretely, for the two failures worth naming:
 
-- **A read-only store reports `NFS3ERR_ROFS`.** `putChunk` returns
-  `vfs.ErrROFS` (`internal/blobfs/fs.go:960`); it propagates through
-  `flushOpen` → `flushAll` → `Sync`'s wrapping `fmt.Errorf`
-  (`internal/blobfs/commit.go:126`) and survives the unwrap.
+- **A read-only store reports `NFS3ERR_ROFS`, when the drain has a chunk to
+  upload.** `putChunk` returns `vfs.ErrROFS` (`internal/blobfs/fs.go:960`); it
+  propagates through `flushOpen` → `flushAll` → `Sync`'s wrapping `fmt.Errorf`
+  (`internal/blobfs/commit.go:126`) and survives the unwrap. But `putChunk`
+  uploads only content that is new: it skips a chunk whose hash this `FS` has
+  already stored or fetched, or that the `HEAD` before the upload finds in the
+  bucket (`fs.go:944-946`, `:951-953`). When every chunk the drain flushes is
+  skipped that way, `flushAll` succeeds and the commit's snapshot `Put` fails
+  instead, with `store.ErrUnsupported` wrapped by `fmt.Errorf`
+  (`commit.go:163-165`) rather than mapped to `vfs.ErrROFS` as `putChunk` maps
+  it. With no `vfs.Status` in the chain, the client gets `NFS3ERR_IO`. The
+  earlier text stated `NFS3ERR_ROFS` without the condition.
 - **A diverged filesystem reports `NFS3ERR_IO`, not `NFS3ERR_STALE`.** Both
   divergence paths return a bare error rather than a `vfs.Status` —
   `commit.go:139` (`filesystem diverged: …`) and `commit.go:189` (`commit
@@ -812,7 +864,8 @@ reading would. Saying so rather than quietly moving either one:
 > size `cs`, the number of chunk indices `[off/cs, (off+n-1)/cs]` it spans,
 > times `cs`. A single writer issuing calls of at most `cs` bytes spans at most
 > two indices and therefore sees at most `MaxDirtyBytes + 2×cs`. `truncate` may
-> add one further partial chunk per call.
+> add one further partial chunk per `SETATTR`, outside this bound and without
+> limit between flushes (Assumption 6).
 
 `W` is `cs` per spanned index because `cs` is what the write path allocates for
 an index it has to create, whether the call puts one byte in it or a full chunk
@@ -828,7 +881,12 @@ limit, and once admitted it charges at most `W`. While the charge is at or above
 the limit nobody is admitted, so everything charged since it last stood below
 the limit came from calls admitted before then, and at most `k` of those can be
 admitted and not yet charged. `truncate` and `pendingTrim` charges fall outside
-that argument, which is why the bound names them separately.
+that argument, which is why the bound names them separately, and nothing else
+bounds them. Between flushes, every size-setting `SETATTR` can stage a cached
+chunk, charged at once, or queue a `pendingTrim` entry, not charged at all; the
+next flush then materialises a file's whole queue in one pass, charging it at
+site 4 without waiting and without regard to the limit (Assumption 6). #56
+tracks the fix.
 
 For a single writer, with one `Write` in flight at a time and so `k = 1`, that
 means `DirtyBytes() <= MaxDirtyBytes + W` after each call returns, `W` being
@@ -838,8 +896,10 @@ partial length by `truncate` or `pendingTrim`.
 
 What the bound is a bound *on*: bytes of buffer capacity resident in the
 `openFile.dirty` maps. It does not cover the chunk cache (a separate pool — see
-*Consequences*), the snapshot body a commit encodes, or per-entry map and
-slice-header overhead. Nor does it cover the `WRITE` payloads that backpressure
+*Consequences*), the snapshot body a commit encodes, per-entry map and
+slice-header overhead, or the files' chunk lists, which one `SETATTR`, or one
+`WRITE` at a huge offset, can lengthen without bound (#55; *What this does not
+decide*). Nor does it cover the `WRITE` payloads that backpressure
 itself holds. A stalled call keeps its decoded data across the wait: `Opaque`
 copies it out of the RPC record (`internal/xdr/xdr.go:139-140`, called at
 `internal/nfs/nfs3.go:269`), and the handler reslices it to the count without
@@ -848,14 +908,34 @@ connection can hold 64 such calls (`internal/sunrpc/rpc.go:111`), and one more
 record read past the bound (*Context*): about 64 MiB when the client keeps to
 the advertised `wtmax` of 1 MiB (`nfs3.go:16`, `:560`), and up to about 512 MiB
 when it sends records at the 8 MiB maximum (`rpc.go:48`). Those figures count
-the payload copies only. Connections are not capped (`rpc.go:129-138`), so
-neither is the total.
+the payload copies only; whether the RPC record each call was decoded from also
+stays reachable across the wait, which would double them, is yet to be
+measured (#58). Connections are not capped (`rpc.go:129-138`), so neither is
+the total. Nor are the figures bounded by the connections that are open. A
+parked call waits on the context `Serve` was given, which only shutdown
+cancels (`rpc.go:137`, `:174`, `:287`), so a call parked when its client
+disconnects stays parked, holding its payload, until a drain lets it through or
+fails, or the server shuts down (#57).
 
 An exact ceiling would require reserving worst-case bytes before buffering and
 reconciling afterwards, plus restructuring `truncate`, which holds both locks and
-must not block. That is more machinery for a distinction with no operational
-meaning: what matters is that memory is bounded by a configured number plus a
-small constant, not that the constant is zero.
+must not block. This ADR does not take that on, so what it guarantees is a
+configured number plus `k × W`, and the first version was wrong to call that
+term a small constant. Nothing bounds `k` but the server's concurrency.
+Admission reserves nothing: a call is admitted when it finds the charge below
+the limit, and it charges only later, at site 1. And `release` wakes every
+parked call (§4), so a release that takes the charge below the limit can admit
+every call parked at that moment, one after another, before any of them has
+charged. Over NFS a connection runs at most 64 calls at once
+(`internal/sunrpc/rpc.go:111`, `:162-166`), so `k` can reach 64 per
+connection; connections are not capped (`rpc.go:129-138`), and, as for the
+payloads, a connection's parked calls outlive it (#57). The server
+truncates a `WRITE` to 1 MiB (`internal/nfs/nfs3.go:16`, `:277-280`), so `W`
+is at most `2 × cs` when `cs` is at least 1 MiB, the default included, and less
+than 1 MiB plus `2 × cs` for a smaller chunk size. At the defaults that is up
+to 64 × 2 MiB, 128 MiB, per connection above the limit. It grows with the chunk
+size, and, like the payloads above, it has no bound in total. It is documented
+here and kept (Assumption 19).
 
 ### 7. Logging the stall
 
@@ -935,12 +1015,21 @@ method or a changed signature; it records an expectation that the NFS layer and
 any future backend both depend on. Without it, someone could reasonably wrap
 `Write` in a short per-call timeout and silently break backpressure.
 
+`blobfs` honours `ctx` while a write waits (§4), but the NFS server passes every
+call the context `Serve` was given (`internal/sunrpc/rpc.go:137`, `:174`,
+`:287`), which only shutdown cancels. So today `ctx` ends a parked `WRITE` at
+shutdown and not when its client disconnects: such a call stays parked until a
+drain lets it through or fails (#57).
+
 As of the 2026-09-22 revision that comment is in the tree, on `vfs.FS.Write` in
 `internal/vfs/vfs.go`, so §9 is already satisfied. Since `5479fe2` so are two
 rules this ADR states about the write path's locking — §3's rule that nothing
 reaches `flushOpen` holding the `openFile.mu` it takes, and §4's rule that the
 chunk list is read under `openFile.mu` — because the code already keeps them.
-Nothing of the budget itself is implemented. The comment is cited by symbol
+The budget type of §4 has been on `main` since #52, as
+`internal/blobfs/budget.go`, and it is wired into `FS` — §1's configuration,
+§2's five sites, §4's wait in `Write` and §8's `DirtyBytes()` — by the change
+that carries the second 2026-09-24 revision. The comment is cited by symbol
 rather than by line number, because line numbers are not stable.
 
 ## Assumptions
@@ -979,17 +1068,25 @@ Recorded because the issue did not specify them.
    would need a policy for which files to flush.
 6. **`truncate` and the `pendingTrim` path charge without waiting** and may
    therefore push the charge above the limit. They hold both locks, so they
-   cannot wait; and a truncate is bounded by client SETATTR traffic rather than
-   by write throughput. Note also that shrinking a file does not necessarily
-   lower the charge: a tail chunk shortened in place is a reslice, and the
-   backing array stays resident (§2, site 3).
+   cannot wait. Note also that shrinking a file does not necessarily lower the
+   charge: a tail chunk shortened in place is a reslice, and the backing array
+   stays resident (§2, site 3).
 
-   That bound is in time, not bytes. Each size-setting `SETATTR` can stage one
-   cached tail chunk (`internal/blobfs/fs.go:1255-1256`) without waiting, and a
-   workload that only truncates never triggers a drain, because only `Write`
-   waits. Its staged chunks are flushed only when something else commits: the
-   ticker, a `COMMIT`, a stable write, or a writer's drain. Between flushes the
-   excess grows with the number of `SETATTR`s. The alternative is to wait in
+   Nothing bounds what they add between flushes. Each size-setting `SETATTR`
+   can stage one cached tail chunk (`internal/blobfs/fs.go:1255-1256`), charged
+   at once, or queue one `pendingTrim` entry, charged not at all until a flush.
+   A workload that only truncates never triggers a drain, because only `Write`
+   waits, so both are flushed only when something else commits: the ticker, a
+   `COMMIT`, a stable write, or a writer's drain. Between flushes the staged
+   excess grows with the number of `SETATTR`s. The queue is neither pruned nor
+   deduplicated, and the next flush materialises its whole backlog in one pass,
+   charging each entry at site 4 without waiting and without regard to the
+   limit. An entry that truncates into a hole costs that flush no fetch, so at
+   the defaults 1,000 `SETATTR`s in one commit interval, each truncating into a
+   different hole, can hold about 1 GiB at that flush with nothing written. The
+   same queue can also bring truncated bytes back without a `WRITE`. Both are
+   pre-existing, and #56 tracks the fix; this ADR does not decide it. The
+   earlier text covered only the cached case. The alternative is to wait in
    `truncate` before it takes its locks, as `Write` does, and ADR 0002 would
    tolerate that: `SETATTR` is non-idempotent, so a stalled one holds its
    duplicate-cache marker only for the length of the stall, which ADR 0002 §7
@@ -1176,6 +1273,60 @@ calls it made while pinning what the first version left open.
     while holding `openFile.mu`, which can wait behind a commit that holds
     `FS.mu` (#43), as the namespace update already can.
 
+Assumptions 19–21 come from the second 2026-09-24 revision, which documents
+what the review before the wiring found. Assumption 19 records a decision of
+the repository owner's, not a judgement call of mine.
+
+19. **The overshoot above the limit is documented, not bounded.** §6. `k` is
+    limited only by how many calls the server runs at once, 64 per connection
+    with connections uncapped, so the dirty pool can exceed `-max-dirty` by up
+    to 128 MiB per connection at the defaults, and by no fixed amount in total.
+    Keeping that is the repository owner's decision, made on 2026-09-24 when
+    the review before the wiring raised it. The reason given is that the
+    server is loopback-only: `-listen` defaults to `127.0.0.1:20490`
+    (`cmd/strata/main.go:46`), the README documents it as binding to loopback,
+    and so every client is a process on the same host, inside the trust
+    boundary `sunrpc` already assumes when it believes `AUTH_SYS`
+    (`internal/sunrpc/rpc.go:50-53`). An operator who points `-listen`
+    elsewhere leaves that boundary for authentication as much as for this.
+    Two alternatives were weighed and not taken. **Reservation at
+    admission**: charge a call's `W` when `await` admits it and settle the
+    difference once it has buffered, so that calls admitted but not yet
+    charged count against the limit. It would change `await`, whose signature
+    §4 pins, and every way out of `Write` would have to settle a reservation.
+    **A connection cap** in `sunrpc`: it bounds `k` directly, but it refuses
+    clients at the RPC layer, whatever they are doing, to protect one memory
+    pool.
+20. **A panic part-way through an accounting site is not accounted for.** §2.
+    The five sites' rules assume each site runs to completion. Two can be cut
+    short by a panic in a store or cache call that `dispatch` recovers
+    (ADR 0002 §6). Site 1 charges once, after `bufferWrite`'s loop, so a panic
+    in a fetch after an earlier index was stored leaves that buffer uncharged:
+    `of.bytes` falls below the sum of `cap` over `of.dirty`, and `DirtyBytes()`
+    under-counts, until the file's next successful flush replaces the map or
+    its removal discards the `openFile`. Site 4 checks for a gone inode only on
+    `flushOpen`'s two failed returns, so a panic in a fetch or an upload after
+    a `pendingTrim` entry was materialised skips the check, and if the inode
+    had already gone, that entry's charge stays on an `openFile` nothing will
+    flush again. Each occurrence is small: at most one call's `W`,
+    under-counted for a while, or about a chunk per pending trim, stranded.
+    Each also needs a store or cache call that panics, which already fails the
+    call it runs in. I accepted both rather than extend the rules with a
+    deferred charge at site 1 and a deferred check at site 4. The budget
+    settles a drain that panics (§4); the sites make no such promise, and if
+    store calls are ever expected to panic, those are the two places to
+    change.
+21. **Site 2 leaves `pendingTrim` alone.** §2. Site 4 resets `pendingTrim`
+    along with `dirty` when it finds the inode gone (Assumption 18); site 2,
+    written before that refinement, resets `dirty` only. The difference costs
+    no charge. A flush that listed the `openFile` before the removal and has
+    yet to run materialises the trims, reading each original chunk and
+    charging the copy, uploads the shortened chunks, which nothing references,
+    and releases the charge when it replaces the map, or through site 4's
+    check if it fails. So the cost is that I/O, for a removed file with a
+    pending trim, and only while such a flush is still to run. I kept site 2's
+    rule as it is.
+
 ## Consequences
 
 - A client copying a large file onto a slow bucket now goes as fast as the
@@ -1274,6 +1425,13 @@ to answer speculatively now.
   from the untrimmed chunk that `n.Chunks` still names (`fs.go:1144`), so
   truncated bytes can come back (#40). Backpressure neither causes nor fixes
   either one, though its drains are flushes and so add to #41's windows.
+- **Enforcing the advertised maximum file size** (#55). `FSINFO` advertises a
+  `maxfilesize` of 2^62 (`internal/nfs/nfs3.go:564`), and nothing enforces it.
+  One `SETATTR` to a huge size, or one `WRITE` at a huge offset, makes
+  `truncate`, or the next flush's namespace update, append a hole to the file's
+  chunk list for every chunk index up to it, while holding `FS.mu`. That list is
+  namespace memory, which the budget neither counts nor bounds: it bounds buffer
+  capacity in the dirty maps (§6). #55 tracks the fix.
 
 ## References
 
