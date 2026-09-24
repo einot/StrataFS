@@ -80,9 +80,10 @@ so a compound command runs only if each part would be allowed alone.
 Parentheses are refused unless quoted: your commands run under zsh, where
 an unquoted parenthesised glob suffix such as `*(e:...:)` runs shell code.
 Quoted ones are fine (`jq -c 'del(.b)'`, `rg -n 'foo(bar)?'`). A command
-longer than 2,048 characters is refused outright, because the guard's
-checks slow down sharply on long input; split long work into shorter
-commands.
+longer than 2,048 bytes is refused outright, because the guard's checks
+slow down sharply on long input; split long work into shorter commands.
+In your shell, `find` runs bfs, `grep` runs ugrep and `rg` a bundled
+ripgrep; bfs's `-rm` (an alias for `-delete`) is refused like `-delete`.
 Refusing those metacharacters costs some syntax, so use these instead:
 
 - literal braces: `rg -n '\x7b\x7d' src` (with `grep` add `-P`; plain

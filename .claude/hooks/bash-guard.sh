@@ -164,6 +164,19 @@
 # defines a function. When adding a rule, ask what zsh does to the command
 # too, not only bash.
 #
+# Three allowed names ARE shell functions in the tool's zsh, defined by
+# Claude Code's shell setup rather than by the user (verified with
+# `whence -w`): `find` runs bfs, `grep` runs ugrep, and `rg` runs a bundled
+# ripgrep, all through the Claude Code binary. The option rules in this
+# file were written against the system tools, so check them against these
+# too. bfs adds `-rm` (handled in check_find). ugrep has options that run
+# commands (--filter, --pager, --view, --config and --save-config among
+# them); the grep function itself hands any of those to the system grep
+# instead of to ugrep, ugrep refuses abbreviated long options (verified),
+# and it loads a `.ugrep` config file on its own only when invoked as
+# `ug`, not as ugrep (per its --help). The other allowed names are the
+# system commands (verified).
+#
 # Bash's word expansions, in the order bash applies them, with where each
 # one stands here. Every "REJECTED" names the check that does it.
 #
@@ -609,17 +622,36 @@ relative_to_project() {
 # Length first, before anything that scales with it. The checks below use
 # bash pattern substitution and per-character loops over the command and
 # its tokens, and under bash 3.2 their cost grows much faster than the
-# length: 8,192 characters of quotes or backslashes took about 30 s to
-# check, 50,000 characters of `&& ls` took 228 s, and 2,048 characters took
-# at most 2 s whatever the content (all measured). A hook that runs past
-# its timeout (60 s by default) may let the command through unchecked, so
-# a slow check is a bypass, and the one bound that holds for every check,
-# present and future, is on the input. No read-only inspection command
-# needs to be long; the longest an auditor has sent here was about 200
-# characters. Measured in characters, as bash counts them.
-max_command_chars=2048
-if (( ${#command_str} > max_command_chars )); then
-  deny "bash guard: the command is ${#command_str} characters long, over this guard's limit of ${max_command_chars}. A check this guard runs grows faster than the command's length, and a check that runs out of time could let a command through, so long commands are refused outright. Split the work into several shorter commands."
+# length. Measured on the machine this was written on: 8,192 characters
+# of quotes or backslashes took about 30 s to check, and 50,000 characters
+# of `&& ls` took 228 s. A hook that runs past its timeout (60 s by
+# default) may let the command through unchecked, so a slow check is a
+# bypass, and the one bound that holds for every check, present and
+# future, is on the input.
+#
+# The limit is on UTF-8 BYTES of the RAW command, as jq reads it from the
+# payload, not on `${#command_str}`. Two reasons. `command_str` came
+# through `$(...)`, which drops trailing newlines, so it can be shorter
+# than the string the parenthesis scan re-reads from the payload; the raw
+# string is the longest form any check sees. And multibyte text costs more
+# per character in bash's UTF-8 handling, so a byte limit gives it
+# proportionally fewer characters. Measured at 2,048 characters, before
+# this was switched to bytes: ten ASCII and multibyte patterns (quotes,
+# backslashes, `&&` chains, repeated `git log -p`, and Latin, CJK and emoji
+# text) all checked in under 6 s, the slowest being repeated `git log -ä`.
+# A byte limit of the same size can only be faster. That is a sample, not
+# a proof about every possible content, which is why the margin to the
+# timeout is wide. No read-only inspection command needs to be long; the
+# longest an auditor has sent here was about 200 characters.
+#
+# Fails closed: if jq cannot produce a number, the command is refused.
+max_command_bytes=2048
+raw_command_bytes="$(printf '%s' "$input" | jq -r '(.tool_input.command // "") | utf8bytelength' 2>/dev/null)" || raw_command_bytes=""
+if ! [[ "$raw_command_bytes" =~ ^[0-9]+$ ]]; then
+  deny "bash guard: could not measure the command's length, so it is refused. Re-run it as a plain single-line command."
+fi
+if (( raw_command_bytes > max_command_bytes )); then
+  deny "bash guard: the command is ${raw_command_bytes} bytes long, over this guard's limit of ${max_command_bytes}. A check this guard runs grows faster than the command's length, and a check that runs out of time could let a command through, so long commands are refused outright. Split the work into several shorter commands."
 fi
 
 if [[ "$command_str" == *$'\n'* ]]; then
@@ -732,10 +764,9 @@ fi
 # command took 108 s to check (measured). A hook that runs past its timeout
 # may let the command through unchecked, so a slow check is a bypass. jq's
 # reduce over the code points is linear (measured: 1,000,000 characters in
-# 2.3 s for the jq filter alone, and 3.0 s for this whole guard before the
-# length limit above was added), and the whole scan is skipped when there
-# is no parenthesis at all. With the length limit it is never the slow
-# part. It fails closed: if jq errors, or prints anything but "false", the
+# 2.3 s for the jq filter alone), and the whole scan is skipped when there
+# is no parenthesis at all. The byte limit above now bounds its input too,
+# since it measures the same raw string this scan reads. It fails closed: if jq errors, or prints anything but "false", the
 # command is refused.
 unquoted_paren() {
   if [[ "$command_str" != *'('* && "$command_str" != *')'* ]]; then
@@ -954,11 +985,19 @@ check_sort() {
 # whole words matched exactly, there is no clustering, no `=value` form
 # and no abbreviation (`-dele` is an error, not `-delete`), so exact
 # matching is the right shape for these rules.
+#
+# In the Bash tool, `find` is not the system find: the tool's zsh defines
+# a `find` function that runs bfs through the Claude Code binary (see THE
+# SHELL IS NOT NECESSARILY BASH). bfs accepts every GNU find action this
+# rule lists, plus `-rm`, an alias for `-delete` (verified: bfs's --help
+# lists it, and bfs accepts it, exit 0, on a pattern matching nothing). Its other actions (-exit, -limit, -printx,
+# -quit) only print or stop. Keep this list in step with bfs's --help, not
+# only with find's manual.
 check_find() {
   local token
   for token in "$@"; do
     case "$token" in
-      -delete | -exec | -execdir | -ok | -okdir | -fprint | -fprint0 | -fprintf | -fls)
+      -delete | -rm | -exec | -execdir | -ok | -okdir | -fprint | -fprint0 | -fprintf | -fls)
         deny "bash guard: 'find ${token}' deletes files or runs another command for each match. Use find only to select paths (-name, -type, -path) and pipe the result into an allowed read-only command."
         ;;
     esac
