@@ -622,14 +622,20 @@ func bpWantErrorRecord(t *testing.T, c *btCapture, want error, what string) {
 // it is closed or the call's ctx ends. Once through the gate, the call panics
 // with panicVal if it is set, fails with err if that is set, and otherwise
 // passes through. panicVal and err are read when the gate opens, under the
-// store's mutex, so a test can change them while a call is held.
+// store's mutex, so a test can change them while a call is held. The first
+// passFirst calls the hook applies to pass through after the gate whatever
+// err and panicVal say, so a test can fail whichever call comes after them
+// without knowing which object it is for. calls counts the calls the hook has
+// applied to.
 type bpHook struct {
-	key      string
-	entered  chan struct{}
-	gate     <-chan struct{}
-	err      error
-	panicVal any
-	closed   bool
+	key       string
+	entered   chan struct{}
+	gate      <-chan struct{}
+	err       error
+	panicVal  any
+	passFirst int
+	closed    bool
+	calls     int
 }
 
 // bpStore is a store.Store that intercepts Get and Put of chunk keys. Its hook
@@ -662,6 +668,13 @@ func (s *bpStore) update(fn func()) {
 	fn()
 }
 
+// callsOf reads h.calls under the store's mutex.
+func (s *bpStore) callsOf(h *bpHook) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return h.calls
+}
+
 // run applies the hook pick returns to a call on key. handled is false when
 // the call should pass through to the wrapped store.
 func (s *bpStore) run(ctx context.Context, pick func() *bpHook, key string) (handled bool, err error) {
@@ -675,6 +688,8 @@ func (s *bpStore) run(ctx context.Context, pick func() *bpHook, key string) (han
 		h.closed = true
 		close(h.entered)
 	}
+	h.calls++
+	n := h.calls
 	gate := h.gate
 	s.mu.Unlock()
 
@@ -687,8 +702,11 @@ func (s *bpStore) run(ctx context.Context, pick func() *bpHook, key string) (han
 	}
 
 	s.mu.Lock()
-	injected, pv := h.err, h.panicVal
+	injected, pv, pass := h.err, h.panicVal, n <= h.passFirst
 	s.mu.Unlock()
+	if pass {
+		return false, nil
+	}
 	if pv != nil {
 		panic(pv)
 	}
@@ -1012,6 +1030,86 @@ func TestBackpressureAccountingTable(t *testing.T) {
 	t.Run("site 4, inode still there, upload fails", func(t *testing.T) {
 		bpSite4Kept(t, false)
 	})
+	t.Run("site 4, inode still there, second of two pending-trim fetches fails", func(t *testing.T) {
+		bpTwoTrimsKept(t)
+	})
+}
+
+// bpTwoTrims truncates h, a stored three-chunk file on a fresh mount that has
+// not read it, first into chunk 2 and then into chunk 1. Each truncate lands in
+// a stored chunk this FS's cache does not hold, so each defers to pendingTrim
+// (ADR 0003 §2, "Deferring to pendingTrim"), and the two are separate cache
+// misses when the next flush materialises them. It returns the file's
+// openFile, holding two pending trims and no charge.
+func bpTwoTrims(t *testing.T, fs *FS, h vfs.Handle, id uint64) *openFile {
+	t.Helper()
+	bpTruncate(t, fs, h, 10000, "SetAttr(size 10000), into stored chunk 2, on a fresh mount")
+	bpTruncate(t, fs, h, 5000, "SetAttr(size 5000), into stored chunk 1, on a fresh mount")
+	of := bpMustOpen(t, fs, id, "after the two deferred truncates")
+	if s := bpSnapshot(t, of, "after the two deferred truncates"); s.pending != 2 {
+		t.Fatalf("setup: len(of.pendingTrim) = %d after truncating an unread file on a fresh "+
+			"mount into chunk 2 and then into chunk 1, want 2. This is a precondition of the "+
+			"test, not a finding against ADR 0003: the ADR does not say whether a later "+
+			"truncate keeps a pending trim that it has left past the end of the file, and "+
+			"this case needs two pending trims in different chunks", s.pending)
+	}
+	bpWantDirty(t, fs, "after two truncates deferring to pendingTrim (0 now)", 0)
+	return of
+}
+
+// bpTwoTrimsKept pins ADR 0003 §2's row "flushOpen failing while it fetches a
+// pendingTrim chunk, its inode still there | what it had materialised stays
+// charged, until the file's next successful flush", and site 4: "If the inode
+// is still there, leave everything charged: those buffers really are held, and
+// the file's next flush retries them" (Assumption 18). The file has two pending
+// trims, and the flush's first fetch succeeds, so one trim is materialised and
+// charged before the second fetch fails. The ADR does not pin the order in
+// which flushOpen resolves pending trims, so the hook fails whichever fetch
+// comes second, and the materialised entry is read from the map. An
+// implementation that dropped what it had materialised on a failed fetch would
+// leave DirtyBytes() at 0.
+func bpTwoTrimsKept(t *testing.T) {
+	t.Helper()
+	st := bpLocal(t)
+	const name = "two-trims-kept.bin"
+	data := bpSeedFile(t, st, name, 3*bpCS)
+	bps := &bpStore{Store: st}
+	fs := bpNew(t, bps, -1, quietLog())
+	h, attr := bpLookup(t, fs, name)
+	of := bpTwoTrims(t, fs, h, attr.FileID)
+
+	injected := errors.New("backpressure test: injected failure of the second pending-trim fetch")
+	get := &bpHook{passFirst: 1, err: injected}
+	bps.setGet(get)
+	if err := bpSync(t, fs, "Sync whose second pending-trim fetch fails"); err == nil {
+		t.Fatalf("Sync whose second chunk fetch fails = nil, want an error (the flush made %d "+
+			"chunk fetches)", bps.callsOf(get))
+	}
+	s := bpSnapshot(t, of, "after the failed Sync")
+	if len(s.caps) != 1 {
+		t.Fatalf("after the first pending trim was materialised and the second one's fetch "+
+			"failed, of.dirty holds indices %v, want exactly the one materialised entry: "+
+			"with the inode still there, what flushOpen had materialised stays charged "+
+			"(ADR 0003 §2's table); the flush made %d chunk fetches", s.indices(), bps.callsOf(get))
+	}
+	var materialised int
+	for _, c := range s.caps {
+		materialised = c
+	}
+	if got := fs.DirtyBytes(); got != int64(materialised) {
+		t.Errorf("after a flush that materialised one pending trim and then failed fetching "+
+			"the next, with the inode still there, DirtyBytes() = %d, want the cap of the "+
+			"materialised entry, read from the map: %d (ADR 0003 §2's table: \"what it had "+
+			"materialised stays charged\")", got, materialised)
+	}
+	bpCheckAccounting(t, fs, "after the failed Sync with one trim materialised")
+
+	bps.setGet(nil)
+	bpMustSync(t, fs, "Sync after the store recovered")
+	bpWantDirty(t, fs, "after the retried flush succeeded", 0)
+	bpCheckAccounting(t, fs, "after the retried flush")
+	bpWantFile(t, fs, h, data[:5000], "the twice-truncated file after the retried flush")
+	bpWantRemount(t, st, name, data[:5000], "the twice-truncated file after the retried flush")
 }
 
 // bpSite4Kept is F2's two site-4 rows for a file whose inode is still there:
@@ -1644,7 +1742,8 @@ func bpReadOnlyStore(t *testing.T, how vfs.Stability) {
 	}
 	if !errors.Is(r.err, vfs.ErrROFS) {
 		t.Errorf("write 2's error = %v, want one that unwraps to vfs.ErrROFS: \"A read-only "+
-			"store reports NFS3ERR_ROFS\" (ADR 0003 §5)", r.err)
+			"store reports NFS3ERR_ROFS, when the drain has a chunk to upload\", and write 1's "+
+			"content was new to the bucket (ADR 0003 §5)", r.err)
 	}
 	if attr := bpGetAttr(t, fs, h, "GetAttr after write 2"); attr.Size != 100 {
 		t.Errorf("size after the failed write 2 = %d, want 100: it changes neither size nor "+
@@ -1658,14 +1757,64 @@ func bpReadOnlyStore(t *testing.T, how vfs.Stability) {
 }
 
 // TestBackpressureReadOnlyStoreFailsTheWait (F12) pins ADR 0003 §5, "A
-// read-only store reports NFS3ERR_ROFS. putChunk returns vfs.ErrROFS; it
-// propagates through flushOpen → flushAll → Sync's wrapping fmt.Errorf ...
-// and survives the unwrap", §4's "What Write returns when the wait fails",
-// including "A stable write whose wait fails returns the same way, without
-// syncing", and §7's Error record, "err is the error drain returned".
+// read-only store reports NFS3ERR_ROFS, when the drain has a chunk to upload.
+// putChunk returns vfs.ErrROFS; it propagates through flushOpen → flushAll →
+// Sync's wrapping fmt.Errorf ... and survives the unwrap", §4's "What Write
+// returns when the wait fails", including "A stable write whose wait fails
+// returns the same way, without syncing", and §7's Error record, "err is the
+// error drain returned". The buffered content is new to the bucket, so the
+// drain has a chunk to upload; TestBackpressureReadOnlyStoreSkippedUpload
+// covers the case where it has none.
 func TestBackpressureReadOnlyStoreFailsTheWait(t *testing.T) {
 	t.Run("UNSTABLE", func(t *testing.T) { bpReadOnlyStore(t, vfs.Unstable) })
 	t.Run("FILE_SYNC", func(t *testing.T) { bpReadOnlyStore(t, vfs.FileSync) })
+}
+
+// TestBackpressureReadOnlyStoreSkippedUpload pins ADR 0003 §5's condition on
+// the read-only case: "putChunk uploads only content that is new: it skips a
+// chunk whose hash this FS has already stored or fetched, or that the HEAD
+// before the upload finds in the bucket ... When every chunk the drain flushes
+// is skipped that way, flushAll succeeds and the commit's snapshot Put fails
+// instead, with store.ErrUnsupported wrapped by fmt.Errorf ... rather than
+// mapped to vfs.ErrROFS as putChunk maps it. With no vfs.Status in the chain,
+// the client gets NFS3ERR_IO." A writable mount commits a file; a read-only
+// mount of the same bucket then writes identical content into a new file, so
+// the drain's only chunk is found by its HEAD and not uploaded. Because
+// flushAll succeeds, the flushed file stays released (§2's row "Sync failing
+// after flushAll succeeded").
+func TestBackpressureReadOnlyStoreSkippedUpload(t *testing.T) {
+	st := bpLocal(t)
+	content := bpSeedFile(t, st, "seed.bin", 100)
+	c := newBTCapture(false)
+	fs := bpNew(t, store.ReadOnly{Store: st}, bpCS, c.logger())
+	h, _ := bpCreate(t, fs, "copy.bin", 0)
+	bpMustWrite(t, fs, "write 1, 100 bytes identical to a chunk already in the bucket", h, 0, content)
+	r := bpWrite(t, fs, "write 2, over the limit on a read-only store whose drain has no chunk "+
+		"to upload", h, 200, bpUnique(10), vfs.Unstable)
+	if r.n != 0 || r.how != vfs.Unstable || r.err == nil {
+		t.Fatalf("write 2 = %v, want (0, UNSTABLE, an error): Write returns (0, 0, err) when "+
+			"the wait fails (ADR 0003 §4)", r)
+	}
+	var s vfs.Status
+	if errors.As(r.err, &s) {
+		t.Errorf("write 2's error = %v, which unwraps to vfs.Status %d; ADR 0003 §5: when every "+
+			"chunk the drain flushes is already in the bucket, the snapshot Put fails with "+
+			"store.ErrUnsupported wrapped by fmt.Errorf, and with no vfs.Status in the chain "+
+			"the client gets NFS3ERR_IO (a vfs.ErrROFS here means the drain tried to upload a "+
+			"chunk the bucket already holds)", r.err, uint32(s))
+	}
+	if !errors.Is(r.err, store.ErrUnsupported) {
+		t.Errorf("write 2's error = %v, want one that unwraps to store.ErrUnsupported: the "+
+			"commit's snapshot Put fails \"with store.ErrUnsupported wrapped by fmt.Errorf\" "+
+			"(ADR 0003 §5)", r.err)
+	}
+	if attr := bpGetAttr(t, fs, h, "GetAttr after write 2"); attr.Size != 100 {
+		t.Errorf("size after the failed write 2 = %d, want 100: it changes neither size nor "+
+			"mtime (ADR 0003 §4)", attr.Size)
+	}
+	bpWantDirty(t, fs, "after a drain whose flushAll succeeded and whose commit failed (the "+
+		"flushed file stays released)", 0)
+	bpWantErrorRecord(t, c, r.err, "a drain whose snapshot Put failed on a read-only store")
 }
 
 // TestBackpressureDivergedDrain (F13) pins ADR 0003 §5, "A diverged filesystem
@@ -1902,10 +2051,67 @@ func bpSite4Gone(t *testing.T, failGet bool) {
 // release the file's whole remaining charge with of.bytes.Swap(0), reset
 // of.dirty to an empty map and of.pendingTrim to nil", "Why site 4 releases on
 // a failed flush", and Assumption 18. Without the check, the upload case would
-// leave the materialised chunk charged for good.
+// leave the materialised chunk charged for good. In the "fetch fails" case the
+// only pending trim is the one whose fetch fails, so nothing is charged when
+// the flush fails; bpTwoTrimsGone covers a fetch failure with a trim already
+// materialised and charged.
 func TestBackpressureFailedFlushOfRemovedFileReleases(t *testing.T) {
 	t.Run("upload fails", func(t *testing.T) { bpSite4Gone(t, false) })
 	t.Run("fetch fails", func(t *testing.T) { bpSite4Gone(t, true) })
+	t.Run("second of two pending-trim fetches fails", func(t *testing.T) { bpTwoTrimsGone(t) })
+}
+
+// bpTwoTrimsGone is F18 with something charged when the fetch fails. The file
+// has two pending trims in different chunks (bpTwoTrims). Its flush is held in
+// the first of the two fetches while the file is removed, so site 5's release
+// comes before anything is materialised. The first fetch then succeeds, and
+// that trim is materialised and charged to an openFile that FS.open no longer
+// holds. The second fetch fails. Site 4's check on that failed return must
+// find the inode gone and release the file's whole remaining charge (ADR 0003
+// §2, site 4 and "Why site 4 releases on a failed flush": "One that fails would
+// strand it for good without the check"; Assumption 18). An implementation
+// that reset of.dirty and of.pendingTrim on the fetch path without releasing
+// would leave the materialised entry's cap on the budget for good. The ADR
+// does not pin the order in which flushOpen resolves pending trims, so the
+// hook holds whichever fetch comes first and fails whichever comes second.
+//
+// The removal is made during the first fetch rather than the second: made
+// during the second, it would come after the first trim was charged, site 5's
+// Swap would release that charge itself, and of.bytes would be 0 at the failed
+// fetch whatever site 4 did.
+func bpTwoTrimsGone(t *testing.T) {
+	t.Helper()
+	st := bpLocal(t)
+	const name = "two-trims-gone.bin"
+	bpSeedFile(t, st, name, 3*bpCS)
+	bps := &bpStore{Store: st}
+	fs := bpNew(t, bps, 0, quietLog())
+	h, attr := bpLookup(t, fs, name)
+	of := bpTwoTrims(t, fs, h, attr.FileID)
+
+	gate := newBTGate(t)
+	injected := errors.New("backpressure test: injected failure of the second pending-trim fetch")
+	get := &bpHook{entered: make(chan struct{}), gate: gate.ch, passFirst: 1, err: injected}
+	bps.setGet(get)
+	syncCall := bpGo(func() error { return fs.Sync(context.Background()) })
+	bpWaitEntered(t, "the flush's first pending-trim fetch", get.entered, syncCall)
+	bpRemove(t, fs, name, "Remove of the file while its flush is held in the first of its "+
+		"two pending-trim fetches")
+	gate.open()
+	if err := syncCall.wait(t, "Sync, after the first fetch was released"); err == nil {
+		t.Errorf("Sync = nil, want an error: the flush's second pending-trim fetch failed "+
+			"(the flush made %d chunk fetches)", bps.callsOf(get))
+	}
+	bpWantDirty(t, fs, "after a flush of a removed file that materialised one pending trim "+
+		"and then failed fetching the next (site 4 releases the file's whole remaining charge)", 0)
+	s := bpSnapshot(t, of, "the removed file's openFile after the failed flush")
+	if s.bytes != 0 || len(s.caps) != 0 || s.pending != 0 {
+		t.Errorf("the removed file's openFile holds of.bytes = %d, dirty indices %v and %d "+
+			"pending trims, want 0, none and 0: on a failed return with the inode gone, site "+
+			"4 releases the file's whole remaining charge with of.bytes.Swap(0), resets "+
+			"of.dirty to an empty map and of.pendingTrim to nil (ADR 0003 §2)",
+			s.bytes, s.indices(), s.pending)
+	}
 }
 
 // bpPanic is what the drain's Put panics with in F19.

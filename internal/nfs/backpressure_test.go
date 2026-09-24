@@ -96,10 +96,13 @@ func nbpWrite(t *testing.T, c *rpcClient, fh []byte, off uint64, data []byte) ui
 }
 
 // TestNFSBackpressureReadOnlyStore (N1) pins ADR 0003 §5: "A read-only store
-// reports NFS3ERR_ROFS. putChunk returns vfs.ErrROFS; it propagates through
-// flushOpen → flushAll → Sync's wrapping fmt.Errorf and survives the unwrap"
-// that statusOf performs. WRITE 1 fills the budget; WRITE 2 drains, and the
-// drain fails on the read-only store.
+// reports NFS3ERR_ROFS, when the drain has a chunk to upload. putChunk returns
+// vfs.ErrROFS; it propagates through flushOpen → flushAll → Sync's wrapping
+// fmt.Errorf ... and survives the unwrap" that statusOf performs. WRITE 1
+// fills the budget with content new to the bucket; WRITE 2 drains, and the
+// drain's upload fails on the read-only store.
+// TestNFSBackpressureReadOnlyStoreSkippedUpload covers a drain with nothing
+// to upload.
 func TestNFSBackpressureReadOnlyStore(t *testing.T) {
 	st := nbpBucket(t)
 	if _, err := blobfs.New(context.Background(), blobfs.Config{
@@ -123,7 +126,61 @@ func TestNFSBackpressureReadOnlyStore(t *testing.T) {
 	}
 	if got := nbpWrite(t, c, fh, 200, []byte("over the limit")); got != uint32(vfs.ErrROFS) {
 		t.Errorf("WRITE 2, whose drain fails on a read-only store, status = %d, want "+
-			"NFS3ERR_ROFS(%d) (ADR 0003 §5)", got, uint32(vfs.ErrROFS))
+			"NFS3ERR_ROFS(%d): \"A read-only store reports NFS3ERR_ROFS, when the drain has "+
+			"a chunk to upload\" (ADR 0003 §5)", got, uint32(vfs.ErrROFS))
+	}
+}
+
+// TestNFSBackpressureReadOnlyStoreSkippedUpload pins the condition in ADR 0003
+// §5's read-only case: "When every chunk the drain flushes is skipped that
+// way, flushAll succeeds and the commit's snapshot Put fails instead, with
+// store.ErrUnsupported wrapped by fmt.Errorf ... rather than mapped to
+// vfs.ErrROFS as putChunk maps it. With no vfs.Status in the chain, the
+// client gets NFS3ERR_IO." A writable mount commits a file; the server, on a
+// read-only view of the same bucket, is then sent the same bytes into a new
+// file, so the drain's only chunk is found by the HEAD before the upload and
+// is not uploaded.
+func TestNFSBackpressureReadOnlyStoreSkippedUpload(t *testing.T) {
+	st := nbpBucket(t)
+	ctx := context.Background()
+	content := bytes.Repeat([]byte("content the bucket already holds. "), 3)
+	seed, err := blobfs.New(ctx, blobfs.Config{
+		Store:     st,
+		ChunkSize: nbpChunkSize,
+		OwnerUID:  501,
+		OwnerGID:  20,
+		Log:       nbpLog(),
+	})
+	if err != nil {
+		t.Fatalf("initialising the bucket: %v", err)
+	}
+	caller := vfs.Caller{UID: 501, GID: 20}
+	h, _, err := seed.Create(ctx, caller, seed.Root(), "seed.bin", vfs.SetAttr{}, true)
+	if err != nil {
+		t.Fatalf("seeding: Create: %v", err)
+	}
+	if n, _, err := seed.Write(ctx, caller, h, 0, content, vfs.Unstable); err != nil || int(n) != len(content) {
+		t.Fatalf("seeding: Write = (%d, %v), want (%d, nil)", n, err, len(content))
+	}
+	if err := seed.Sync(ctx); err != nil {
+		t.Fatalf("seeding: Sync: %v", err)
+	}
+
+	addr := nbpStartServer(t, store.ReadOnly{Store: st})
+	c := dial(t, addr)
+	root := mountRoot(t, c)
+	fh := nfsCreate(t, c, root, "copy.bin")
+
+	if got := nbpWrite(t, c, fh, 0, content); got != uint32(vfs.OK) {
+		t.Fatalf("WRITE 1, below the limit, status = %d, want NFS3_OK(0): it is admitted "+
+			"without draining", got)
+	}
+	if got := nbpWrite(t, c, fh, 200, []byte("over the limit")); got != uint32(vfs.ErrIO) {
+		t.Errorf("WRITE 2, whose drain has no chunk to upload on a read-only store, status = "+
+			"%d, want NFS3ERR_IO(%d): the snapshot Put fails with store.ErrUnsupported, and "+
+			"with no vfs.Status in the chain the client gets NFS3ERR_IO (ADR 0003 §5; "+
+			"NFS3ERR_ROFS here means the drain tried to upload a chunk the bucket already "+
+			"holds)", got, uint32(vfs.ErrIO))
 	}
 }
 
