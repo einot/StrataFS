@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"strata/internal/store"
@@ -47,6 +48,13 @@ type Config struct {
 	// Zero selects the default; a negative value disables pruning entirely.
 	SnapshotRetention int
 
+	// MaxDirtyBytes bounds the memory held by unflushed writes across all open
+	// files, measured as the capacity of their buffers rather than the count of
+	// logically dirty bytes (see the accounting rule below). Zero selects the
+	// default (256 MiB); a negative value disables backpressure and lets the
+	// buffer grow without limit.
+	MaxDirtyBytes int64
+
 	Log *slog.Logger
 }
 
@@ -68,6 +76,12 @@ type FS struct {
 	// Lock ordering is openFile.mu before mu. Nothing may acquire an
 	// openFile.mu while holding mu, which is why committing flushes file data
 	// before taking mu rather than underneath it.
+	//
+	// The budget's mutex is a leaf: it may be taken while holding either of
+	// the others, but no other lock may be acquired while it is held, and
+	// nothing may wait on its condition variable while holding either of the
+	// others (ADR 0003 §3). Write's wait for the budget therefore happens
+	// before it takes any of them.
 	mu         sync.RWMutex
 	inodes     map[uint64]*inode
 	nextIno    uint64
@@ -85,6 +99,12 @@ type FS struct {
 
 	// open holds buffered writes per inode.
 	open map[uint64]*openFile
+
+	// budget counts the buffer capacity held across open and holds writers
+	// back once it reaches Config.MaxDirtyBytes (ADR 0003). Every FS has one;
+	// with backpressure disabled it still counts, so DirtyBytes stays
+	// meaningful.
+	budget *budget
 
 	cache    *chunkCache
 	writerID string
@@ -107,6 +127,14 @@ type openFile struct {
 	// before it can be shortened; the fetch cannot happen under the namespace
 	// lock, so it is deferred to the flush.
 	pendingTrim []trimReq
+
+	// bytes is the sum of cap(v) over dirty, this file's share of FS.budget:
+	// capacity rather than length, because a buffer is resident at its
+	// capacity however little of it is written (ADR 0003 §2). It is atomic
+	// rather than guarded by mu because removing the file from FS.open
+	// releases it under FS.mu alone, where taking mu would invert the lock
+	// order.
+	bytes atomic.Int64
 }
 
 const defaultChunkSize = 1 << 20
@@ -114,6 +142,10 @@ const defaultChunkSize = 1 << 20
 // defaultSnapshotRetention keeps a short rollback window without letting the
 // bucket grow without bound.
 const defaultSnapshotRetention = 10
+
+// defaultMaxDirtyBytes is the budget for buffered writes when Config leaves
+// MaxDirtyBytes zero (ADR 0003 §1).
+const defaultMaxDirtyBytes = 256 << 20
 
 // FS implements the full mountable filesystem contract.
 var _ vfs.FS = (*FS)(nil)
@@ -135,6 +167,12 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
+	// Only zero is replaced: a negative limit, which disables waiting, reaches
+	// the budget as it is, so limit() reports what the embedder asked for
+	// (ADR 0003 §1).
+	if cfg.MaxDirtyBytes == 0 {
+		cfg.MaxDirtyBytes = defaultMaxDirtyBytes
+	}
 	switch {
 	case cfg.SnapshotRetention == 0:
 		cfg.SnapshotRetention = defaultSnapshotRetention
@@ -154,6 +192,7 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 		skipVerify:     cfg.SkipChunkVerification,
 		retention:      cfg.SnapshotRetention,
 		open:           make(map[uint64]*openFile),
+		budget:         newBudget(cfg.MaxDirtyBytes, cfg.Log),
 		cache:          newChunkCache(cfg.CacheBytes),
 		knownChunks:    make(map[string]struct{}),
 		writerID:       fmt.Sprintf("%s/%d", host, os.Getpid()),
@@ -186,6 +225,13 @@ func (f *FS) Stats() (epoch uint64, inodes int, cacheHits, cacheMisses, cacheByt
 	h, m, b := f.cache.stats()
 	return epoch, inodes, h, m, b
 }
+
+// DirtyBytes reports the memory currently held by unflushed writes across all
+// open files: the sum of cap(b) over every buffered chunk b, which is what is
+// resident, not the count of logically dirty bytes. A file with one byte
+// written into each of three chunk indices reports three chunk sizes. It is
+// safe for concurrent use.
+func (f *FS) DirtyBytes() int64 { return f.budget.used() }
 
 // ---- handles ----
 
@@ -636,10 +682,24 @@ func (f *FS) unlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name stri
 		// files or other people's trees, so reclaiming them is a garbage
 		// collection problem, handled separately and never inline.
 		delete(f.inodes, id)
-		delete(f.open, id)
+		f.dropOpen(id)
 	}
 	f.dirty = true
 	return nil
+}
+
+// dropOpen removes id's buffered writes from f.open, first releasing their
+// charge: nothing will flush them once the entry is gone, so a charge left
+// behind would hold the budget up for good (ADR 0003 §2, site 5). Every
+// removal from f.open goes through here. Caller must hold mu for writing. It
+// takes no openFile.mu, which would invert the lock order, so it zeroes
+// of.bytes without clearing of.dirty; Swap keeps the release exactly-once
+// against a flush releasing the same file concurrently.
+func (f *FS) dropOpen(id uint64) {
+	if of := f.open[id]; of != nil {
+		f.budget.release(of.bytes.Swap(0))
+	}
+	delete(f.open, id)
 }
 
 func (f *FS) Remove(ctx context.Context, c vfs.Caller, dir vfs.Handle, name string) error {
@@ -714,7 +774,7 @@ func (f *FS) Rename(ctx context.Context, c vfs.Caller, fromDir vfs.Handle, fromN
 			}
 			if victim.NLink == 0 {
 				delete(f.inodes, victimID)
-				delete(f.open, victimID)
+				f.dropOpen(victimID)
 			}
 		}
 	}
@@ -1071,6 +1131,15 @@ func (f *FS) Write(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, 
 	id := n.ID
 	f.mu.RUnlock()
 
+	// Hold the write back while buffered data is over budget (ADR 0003 §4).
+	// The wait comes here, after the checks that can refuse the write and
+	// before getOpen, holding no lock at all: the drain it may run is Sync,
+	// which takes FS.mu and every openFile.mu. A failed wait therefore leaves
+	// nothing behind, not even an openFile, and its error goes back as it is.
+	if err := f.budget.await(ctx, f.Sync); err != nil {
+		return 0, 0, err
+	}
+
 	// bufferWrite has released of.mu by the time it returns, which the sync
 	// below depends on: flushOpen takes of.mu itself, and sync.Mutex is not
 	// reentrant. Another write may slip in before the flush and be made
@@ -1109,7 +1178,8 @@ func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off ui
 	// repoints n.Chunks and empties of.dirty while holding of.mu, so a list
 	// copied before taking it can predate a flush that has already consumed
 	// the dirty chunk, and rebuilding from it would silently drop bytes an
-	// earlier write was acknowledged for.
+	// earlier write was acknowledged for. A write that waited for the budget
+	// has just run such a flush itself (ADR 0003 §4).
 	var refs []chunkRef
 	f.mu.RLock()
 	n, err := f.resolve(h)
@@ -1128,12 +1198,18 @@ func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off ui
 		// would only upload chunks nothing references.
 		written = len(data)
 	}
+	// charge is the capacity this call adds to of.dirty, as the difference of
+	// cap before and after each index: append may grow a buffer that truncate
+	// staged short, and an index already dirty at full capacity adds nothing
+	// (ADR 0003 §2, site 1). Indices only increase, so none counts twice.
+	var charge int64
 	for written < len(data) {
 		pos := off + uint64(written)
 		idx := pos / cs
 		within := int(pos % cs)
 
 		chunk, ok := of.dirty[idx]
+		oldCap := cap(chunk) // zero for an absent index
 		if !ok {
 			// Load the existing chunk only when this write does not cover it
 			// completely; a full-chunk overwrite needs no read.
@@ -1163,7 +1239,15 @@ func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off ui
 		}
 		copy(chunk[within:within+nw], data[written:written+nw])
 		of.dirty[idx] = chunk
+		charge += int64(cap(chunk) - oldCap)
 		written += nw
+	}
+	// Charged once, including after a partial write's break, and before the
+	// check below: charged after it, a write racing an unlink would land its
+	// charge on buffers that check had already discarded, and leak it.
+	if charge > 0 {
+		f.budget.add(charge)
+		of.bytes.Add(charge)
 	}
 
 	now := time.Now()
@@ -1174,6 +1258,13 @@ func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off ui
 		}
 		n2.touchM(now)
 		n2.touchA(now)
+	} else {
+		// Unlinked while this write buffered: nothing will flush these
+		// buffers, so drop them and return the file's whole charge, this
+		// write's included (ADR 0003 §2, site 2).
+		released := of.bytes.Swap(0)
+		of.dirty = make(map[uint64][]byte)
+		f.budget.release(released)
 	}
 	f.dirty = true
 	f.mu.Unlock()
@@ -1223,12 +1314,23 @@ func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint
 		return err
 	}
 
-	// Drop whole chunks past the new end.
-	for idx := range of.dirty {
+	// Drop whole chunks past the new end. Their capacity is freed, and is
+	// released rather than netted against the staging below, because only
+	// release wakes parked writers. Neither this nor the staging waits: both
+	// locks are held (ADR 0003 §2, site 3).
+	var freed int64
+	for idx, chunk := range of.dirty {
 		if idx > lastIdx || (idx == lastIdx && tail == 0) {
+			freed += int64(cap(chunk))
 			delete(of.dirty, idx)
 		}
 	}
+	if freed > 0 {
+		of.bytes.Add(-freed)
+		f.budget.release(freed)
+	}
+	// Shortening the tail in place is a reslice: the backing array stays
+	// resident at the same capacity, so the charge does not change.
 	if tail != 0 {
 		if chunk, ok := of.dirty[lastIdx]; ok && uint64(len(chunk)) > tail {
 			of.dirty[lastIdx] = chunk[:tail]
@@ -1253,7 +1355,10 @@ func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint
 				// Load outside the lock is not possible here; fetch from cache
 				// if we can, otherwise mark the chunk for the flush to shorten.
 				if data, ok := f.cache.get(ref.Hash); ok {
-					of.dirty[lastIdx] = append([]byte(nil), data[:tail]...)
+					buf := append([]byte(nil), data[:tail]...)
+					of.dirty[lastIdx] = buf
+					f.budget.add(int64(cap(buf)))
+					of.bytes.Add(int64(cap(buf)))
 				} else {
 					of.pendingTrim = append(of.pendingTrim, trimReq{idx: lastIdx, to: uint32(tail), ref: ref})
 				}
@@ -1297,19 +1402,25 @@ func (f *FS) flushOpen(ctx context.Context, id uint64, of *openFile) error {
 	of.mu.Lock()
 	defer of.mu.Unlock()
 
-	// Resolve any truncates that needed the original chunk contents.
+	// Resolve any truncates that needed the original chunk contents. Each
+	// materialised buffer is charged as it is stored, so a fetch failing on a
+	// later one leaves the earlier ones counted (ADR 0003 §2, site 4).
 	for _, t := range of.pendingTrim {
 		if _, staged := of.dirty[t.idx]; staged {
 			continue
 		}
 		data, err := f.loadChunk(ctx, t.ref)
 		if err != nil {
+			f.dropIfGone(id, of)
 			return err
 		}
 		if uint32(len(data)) > t.to {
 			data = data[:t.to]
 		}
-		of.dirty[t.idx] = append([]byte(nil), data...)
+		buf := append([]byte(nil), data...)
+		of.dirty[t.idx] = buf
+		f.budget.add(int64(cap(buf)))
+		of.bytes.Add(int64(cap(buf)))
 	}
 	of.pendingTrim = nil
 
@@ -1329,6 +1440,7 @@ func (f *FS) flushOpen(ctx context.Context, id uint64, of *openFile) error {
 	for _, idx := range idxs {
 		ref, err := f.putChunk(ctx, of.dirty[idx])
 		if err != nil {
+			f.dropIfGone(id, of)
 			return err
 		}
 		uploaded[idx] = ref
@@ -1349,7 +1461,28 @@ func (f *FS) flushOpen(ctx context.Context, id uint64, of *openFile) error {
 	f.mu.Unlock()
 
 	of.dirty = make(map[uint64][]byte)
+	f.budget.release(of.bytes.Swap(0))
 	return nil
+}
+
+// dropIfGone is flushOpen's cleanup on a failed return, called holding of.mu.
+// If the inode has gone, nothing will flush this file again, and whatever the
+// flush charged to it (materialised trims, most likely after dropOpen had
+// already released the rest) would otherwise stay charged for good. Checking
+// under mu orders this against dropOpen. Resetting pendingTrim keeps another
+// flush of the same openFile from charging the trims again. A file whose
+// inode is still there keeps its charge: those buffers are really held, and
+// its next flush retries them (ADR 0003 §2, site 4; Assumption 18).
+func (f *FS) dropIfGone(id uint64, of *openFile) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.inodes[id] != nil {
+		return
+	}
+	released := of.bytes.Swap(0)
+	of.dirty = make(map[uint64][]byte)
+	of.pendingTrim = nil
+	f.budget.release(released)
 }
 
 // flushAll uploads every inode's buffered data. It must be called without mu.
