@@ -166,16 +166,25 @@
 #
 # Three allowed names ARE shell functions in the tool's zsh, defined by
 # Claude Code's shell setup rather than by the user (verified with
-# `whence -w`): `find` runs bfs, `grep` runs ugrep, and `rg` runs a bundled
-# ripgrep, all through the Claude Code binary. The option rules in this
-# file were written against the system tools, so check them against these
-# too. bfs adds `-rm` (handled in check_find). ugrep has options that run
-# commands (--filter, --pager, --view, --config and --save-config among
-# them); the grep function itself hands any of those to the system grep
-# instead of to ugrep, ugrep refuses abbreviated long options (verified),
-# and it loads a `.ugrep` config file on its own only when invoked as
-# `ug`, not as ugrep (per its --help). The other allowed names are the
-# system commands (verified).
+# `whence -w`; the other allowed names resolve to system commands). Read
+# with `functions find grep rg` in the tool's shell (verified): `find` runs
+# bfs, `grep` runs ugrep, and `rg` runs ripgrep, each by invoking the
+# Claude Code binary under that name, and each falling back to the system
+# command when that binary is missing. The option rules in this file were
+# written against the system tools, so check them against these too:
+#   * bfs: its --help lists the same writing and executing actions as GNU
+#     find plus `-rm`, an alias for `-delete`; all are refused in
+#     check_find. It rejects abbreviated actions (verified: `-prin` is an
+#     error, "did you mean -print?"), so exact matching still holds.
+#   * ugrep: its --help lists options that run a command or write a file.
+#     The grep function hands an argument matching any of its patterns
+#     (-*-filter*, -*-pager*, -*-view*, -*-format-open*, -*-config*, ---*,
+#     -@*, -*-save-config*, and a few others) to the system grep instead of
+#     ugrep (verified by reading its source). That function belongs to
+#     Claude Code, not this repository, so check_grep refuses the same
+#     options itself. ugrep rejects abbreviated long options (verified), and
+#     loads a `.ugrep` config file on its own only when invoked as `ug`,
+#     not as ugrep (per its --help).
 #
 # Bash's word expansions, in the order bash applies them, with where each
 # one stands here. Every "REJECTED" names the check that does it.
@@ -1183,6 +1192,51 @@ check_rg() {
   done
 }
 
+# grep is ugrep in the Bash tool (see THE SHELL IS NOT NECESSARILY BASH),
+# and ugrep has options that run a command or write a file. Claude Code's
+# `grep` shell function already hands these to the system grep instead of
+# ugrep, but that function is outside this repository and can change with
+# any Claude Code release, so this rule refuses them here as well. The
+# system greps (BSD and GNU) have no such options, so on them it only
+# refuses spellings they would reject or never use.
+# (from ugrep's --help, read in the tool's shell):
+#   --filter=CMDS       runs CMDS on each file before searching it
+#   --pager[=CMD]       pipes output through CMD, when output is a terminal
+#   --view[=CMD]        runs CMD to view a file from the -Q interface
+#   --config[=FILE], ---FILE
+#                       loads options, including any of the above, from FILE
+#   --save-config[=FILE]
+#                       WRITES a configuration file (it runs nothing, but
+#                       writing is outside this agent's role)
+#   -Q, --query         the interactive query interface, which can run
+#                       the --view command
+#   --format-open       not in this ugrep's --help at all; refused because
+#                       Claude Code's grep function lists it among the
+#                       options it keeps away from ugrep, and refusing an
+#                       option that does not exist costs nothing
+# Long options go through matches_long, so every abbreviation is refused
+# too. ugrep itself rejects abbreviations (verified), so this over-refuses
+# a few harmless prefixes such as `--con`, and fails closed.
+# `--filter-magic-label` stays allowed: `--filter` is not its prefix in the
+# direction that matters (see long_opt_matches), and on its own it only
+# labels files. -Q is refused wherever it appears in a short cluster, even
+# where it would be an attached value; to search for a pattern containing
+# Q, pass it as a separate word or with `-e` as its own word.
+check_grep() {
+  local token
+  for token in "$@"; do
+    if [[ "$token" == ---* ]]; then
+      deny "bash guard: 'grep ${token}' loads ugrep options from a configuration file, which can name a command to run. Drop it and put the options you need on the command line."
+    fi
+    if matches_long "$token" --filter --pager --view --format-open --config --save-config --query; then
+      deny "bash guard: 'grep ${token}' runs a command, opens an interface that can run one, loads or writes a configuration file. In this shell grep is ugrep, which has such options. Drop it; search with plain grep options."
+    fi
+    if short_cluster_has "$token" "Q" ""; then
+      deny "bash guard: 'grep ${token}' includes -Q, ugrep's interactive query interface, which can run a viewer command. Drop it. To search for a pattern containing Q, give it as a separate word or after -e as its own word."
+    fi
+  done
+}
+
 check_file() {
   local token
   for token in "$@"; do
@@ -1236,6 +1290,7 @@ while IFS= read -r segment; do
     git) check_git ${args[@]+"${args[@]}"} ;;
     node) check_node ${args[@]+"${args[@]}"} ;;
     rg) check_rg ${args[@]+"${args[@]}"} ;;
+    grep) check_grep ${args[@]+"${args[@]}"} ;;
     file) check_file ${args[@]+"${args[@]}"} ;;
   esac
 done <<< "$segments"

@@ -83,7 +83,10 @@ Quoted ones are fine (`jq -c 'del(.b)'`, `rg -n 'foo(bar)?'`). A command
 longer than 2,048 bytes is refused outright, because the guard's checks
 slow down sharply on long input; split long work into shorter commands.
 In your shell, `find` runs bfs, `grep` runs ugrep and `rg` a bundled
-ripgrep; bfs's `-rm` (an alias for `-delete`) is refused like `-delete`.
+ripgrep; bfs's `-rm` (an alias for `-delete`) is refused like `-delete`,
+and ugrep's command-running and config options (`--filter`, `--pager`,
+`--view`, `--config`/`---`, `--save-config`, `-Q`/`--query`) are refused
+for `grep`. Plain searches are unaffected.
 Refusing those metacharacters costs some syntax, so use these instead:
 
 - literal braces: `rg -n '\x7b\x7d' src` (with `grep` add `-P`; plain
