@@ -106,6 +106,9 @@ type FS struct {
 	// meaningful.
 	budget *budget
 
+	// cache keeps its own copies of the chunks it holds (ADR 0004), so no
+	// dirty buffer is ever shared with it. New sets it once and nothing
+	// reassigns it.
 	cache    *chunkCache
 	writerID string
 
@@ -940,6 +943,11 @@ func (f *FS) getOpen(id uint64) *openFile {
 
 // loadChunk fetches one chunk's contents, consulting the cache first. It must
 // not be called while holding mu.
+//
+// Its result may be the cache's shared slice, and a caller cannot tell a hit
+// from a miss, so every result falls under the cache's rule: a caller must not
+// modify it or append to it, directly or through a reslice, and must copy it
+// before changing it (ADR 0004 §3).
 func (f *FS) loadChunk(ctx context.Context, ref chunkRef) ([]byte, error) {
 	if ref.isHole() {
 		return make([]byte, ref.Size), nil
@@ -996,6 +1004,10 @@ func (f *FS) isKnown(hash string) bool {
 
 // putChunk stores a chunk under its content hash, skipping the upload when the
 // bucket already holds that content.
+//
+// The cache stores its own copy of what is uploaded (ADR 0004 §1), so data
+// stays the caller's. That matters because a flush that fails later leaves
+// data in of.dirty, where the next write changes it in place.
 func (f *FS) putChunk(ctx context.Context, data []byte) (chunkRef, error) {
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
