@@ -180,9 +180,12 @@
 #     The grep function hands an argument matching any of its patterns
 #     (-*-filter*, -*-pager*, -*-view*, -*-format-open*, -*-config*, ---*,
 #     -@*, -*-save-config*, and a few others) to the system grep instead of
-#     ugrep (verified by reading its source). That function belongs to
-#     Claude Code, not this repository, so check_grep refuses the same
-#     options itself. ugrep rejects abbreviated long options (verified), and
+#     ugrep (verified by reading its source). Those patterns do not cover
+#     -Q/--query, ugrep's interactive interface, which can run a viewer
+#     command. That function belongs to Claude Code, not this repository,
+#     so check_grep refuses ugrep's command-running and config options
+#     itself, -Q/--query included; see the comment above check_grep for
+#     exactly which, and how its set differs from the function's. ugrep rejects abbreviated long options (verified), and
 #     loads a `.ugrep` config file on its own only when invoked as `ug`,
 #     not as ugrep (per its --help).
 #
@@ -1194,11 +1197,19 @@ check_rg() {
 
 # grep is ugrep in the Bash tool (see THE SHELL IS NOT NECESSARILY BASH),
 # and ugrep has options that run a command or write a file. Claude Code's
-# `grep` shell function already hands these to the system grep instead of
-# ugrep, but that function is outside this repository and can change with
-# any Claude Code release, so this rule refuses them here as well. The
-# system greps (BSD and GNU) have no such options, so on them it only
-# refuses spellings they would reject or never use.
+# `grep` shell function hands MOST of them to the system grep instead of
+# ugrep -- --filter, --pager, --view, --format-open, --config and ---,
+# --save-config -- but NOT -Q/--query, which its patterns do not match
+# (verified by reading the function), so until this rule existed -Q
+# reached ugrep with nothing in the way. This rule is therefore not a copy
+# of the function's list, and is deliberately a different set: it refuses
+# everything below, -Q/--query included, and leaves alone the options the
+# function redirects for other reasons (-Z/-z, --null, --null-data, -@),
+# which neither run a command nor write a file. It does not rely on the
+# function at all, which lives outside this repository and can change with
+# any Claude Code release. The system greps (BSD and GNU) have none of
+# these options, so on them it only refuses spellings they would reject or
+# never use.
 # (from ugrep's --help, read in the tool's shell):
 #   --filter=CMDS       runs CMDS on each file before searching it
 #   --pager[=CMD]       pipes output through CMD, when output is a terminal
