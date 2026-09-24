@@ -163,7 +163,8 @@
 - **Revised:** 2026-09-24 — a fourth pass the same day, cross-references only.
   Assumption 2 now ends by saying that ADR 0004 decides #47, and the
   chunk-cache bullet under *What this does not decide* by saying that ADR 0004
-  decides both #47 and #46. Nothing else changed.
+  decides both #47 and #46; Assumption 17's citation moves to `cache.go:44-46`,
+  where the fix moved the code. Nothing else changed.
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
 - **Affects:** `internal/blobfs`, `cmd/strata`, doc comment on `vfs.FS.Write`
 
@@ -1250,7 +1251,7 @@ calls it made while pinning what the first version left open.
 17. **`-max-dirty 0` means no limit, unlike `-cache 0` and
     `-snapshot-retention 0`.** §1. Both of those mean "the default": `-cache 0`
     reaches `newChunkCache` as zero, which selects 256 MiB
-    (`internal/blobfs/cache.go:29-31`), and `-snapshot-retention 0` reaches
+    (`internal/blobfs/cache.go:44-46`), and `-snapshot-retention 0` reaches
     `New` as zero, which selects 10 (`internal/blobfs/fs.go:139-140`).
     `-max-dirty` follows its own help text, "0 or less: no limit". I kept that
     rather than match its neighbours, because an operator who sets a memory
