@@ -259,7 +259,11 @@ This is a proof of concept. What that means concretely:
 - **No hard links**, and MKNOD is refused. FSINFO advertises both absences.
 - **Fixed-size chunking**, so inserting a byte at the front of a large file
   rewrites every chunk.
-- **Writes are buffered in memory** until commit.
+- **Writes are buffered in memory** until commit, bounded by `-max-dirty`
+  (MiB, default 256; 0 or less for no limit): past it, a write waits while the
+  server commits. The bound is not a hard ceiling; writes already admitted can
+  overshoot it, by an amount [ADR 0003](docs/adr/0003-write-backpressure.md)
+  §6 quantifies.
 - **No encryption.** Chunks are stored as-is.
 - **atime is not updated on read**, deliberately: doing so would dirty the
   namespace on every read.
