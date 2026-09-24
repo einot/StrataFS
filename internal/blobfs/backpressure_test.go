@@ -39,9 +39,9 @@ package blobfs
 //     checks the equality at rest.
 //
 // Avoided, because they are pre-existing and out of scope, and trip -race or
-// flake: a Read concurrent with a Write to the same file; divergence while
-// other goroutines write; and writing into a file again after its flush failed
-// partway through its uploads, then reading through the cache (#46).
+// flake: a Read concurrent with a Write to the same file; and divergence while
+// other goroutines write. cache_test.go now covers writing into a file again
+// after its flush failed partway through its uploads (#46).
 
 import (
 	"bytes"
