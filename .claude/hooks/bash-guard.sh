@@ -151,8 +151,16 @@
 # glob operators `^`, `#` and `~` need EXTENDED_GLOB, which is off
 # (verified in the tool's shell); and history expansion does not happen in
 # a non-interactive zsh even though BANG_HIST is set (verified: `!!` and
-# `!ls` pass through unchanged). When adding a rule, ask what zsh does to
-# the command too, not only bash.
+# `!ls` pass through unchanged). ALIAS expansion, unlike in bash, IS on in
+# zsh's non-interactive shell. What bounds it is that the tool's shell
+# defines only zsh's two defaults, `run-help` and `which-command`, neither
+# of them an allowed name, and no global or suffix aliases and no
+# `zsh_directory_name` function for `~[name]` to call (verified). That
+# rests on the user's shell configuration, not on this guard: a global
+# alias added to it could rewrite an allowed command, and this guard
+# cannot see it. The agent cannot define one, because nothing it may run
+# sets an alias. When adding a rule, ask what zsh does to the command
+# too, not only bash.
 #
 # Bash's word expansions, in the order bash applies them, with where each
 # one stands here. Every "REJECTED" names the check that does it.
@@ -234,10 +242,11 @@
 #      POSITIONAL RULES where the model and bash still differ.
 #
 # Not expansions, but the same class of after-the-fact rewriting, for
-# completeness: alias and history expansion are both off in the
-# non-interactive shell the Bash tool uses (verified: expand_aliases
-# off, histexpand off), and an alias needs an `=` the argv[0] rule denies
-# in any case. Redirection is rejected by the forbidden loop. `;`, `|`,
+# completeness: alias and history expansion are both off in a
+# non-interactive BASH (verified: expand_aliases off, histexpand off), and
+# defining an alias needs an `=` the argv[0] rule denies in any case. The
+# tool's shell here is zsh, where aliases are on; see THE SHELL IS NOT
+# NECESSARILY BASH above for why that is bounded. Redirection is rejected by the forbidden loop. `;`, `|`,
 # `&&` and `||` are handled by segment splitting, a bare `&` is
 # rejected, and a newline is rejected.
 #
@@ -672,7 +681,7 @@ fi
 # not to relax this check but to give that agent a tool whose arguments
 # do not pass through a shell.
 if [[ "$command_str" == *'{'* || "$command_str" == *'}'* ]]; then
-  deny "bash guard: the command contains a brace. bash expands a brace list such as {-p,--output=/tmp/x} into separate words AFTER this guard has inspected the command, so a brace can carry an option past every rule here -- it was a real bypass, not a hypothetical one. Braces are refused whether or not they are quoted, because quotes are stripped before any comparison and the guard therefore cannot tell an expanding brace from a literal one. You can still do almost everything, with three workarounds, all verified: to SEARCH for a literal brace use a hex escape, which puts no brace in the command -- rg -n '\\x7b\\x7d' services does match interface{} -- and with grep you must add -P, because grep's default syntax reads \\x7b as the three letters x7b and would silently match the wrong thing rather than failing. For a regex QUANTIFIER there is no escape route, because a hex escape is a literal: 'a\\x7b2,3\\x7d' matches the text a{2,3} rather than repeating an a. Write the repetition out longhand with '?' instead -- 'aaa?' for a{2,3}, 'aaaa?a?' for a{3,5}. Do not reach for an alternation: a '|' in the pattern is a segment separator to this guard, which is quote-blind, so 'aa|aaa' is refused as well. For jq, read with path expressions such as 'jq .name' or 'jq .a.b', enumerate fields with 'jq to_entries', and build a reduced object without any brace using the functions that return one: 'jq -c with_entries(select(.key==\"a\"))' and 'jq -c del(.b)' both emit objects and are both allowed here (verified). The 'to_entries | map(...) | from_entries' pipeline works in jq but this guard refuses it over the '|', not the braces. If some finding genuinely needs a construct none of that covers, report it as needs-validation with the exact command a human should run."
+  deny "bash guard: the command contains a brace. bash expands a brace list such as {-p,--output=/tmp/x} into separate words AFTER this guard has inspected the command, so a brace can carry an option past every rule here -- it was a real bypass, not a hypothetical one. Braces are refused whether or not they are quoted, because quotes are stripped before any comparison and the guard therefore cannot tell an expanding brace from a literal one. You can still do almost everything, with three workarounds, all verified: to SEARCH for a literal brace use a hex escape, which puts no brace in the command -- rg -n '\\x7b\\x7d' services does match interface{} -- and with grep you must add -P, because grep's default syntax reads \\x7b as the three letters x7b and would silently match the wrong thing rather than failing. For a regex QUANTIFIER there is no escape route, because a hex escape is a literal: 'a\\x7b2,3\\x7d' matches the text a{2,3} rather than repeating an a. Write the repetition out longhand with '?' instead -- 'aaa?' for a{2,3}, 'aaaa?a?' for a{3,5}. Do not reach for an alternation: a '|' in the pattern is a segment separator to this guard, which is quote-blind, so 'aa|aaa' is refused as well. For jq, read with path expressions such as 'jq .name' or 'jq .a.b', enumerate fields with 'jq to_entries', and build a reduced object without any brace using the functions that return one: jq -c 'with_entries(select(.key==\"a\"))' and jq -c 'del(.b)' both emit objects and are both allowed here (verified) -- keep the filter in quotes, because an unquoted parenthesis is refused. The 'to_entries | map(...) | from_entries' pipeline works in jq but this guard refuses it over the '|', not the braces. If some finding genuinely needs a construct none of that covers, report it as needs-validation with the exact command a human should run."
 fi
 
 # Unquoted parentheses, because the Bash tool's shell is zsh, not bash.
@@ -698,36 +707,45 @@ fi
 # the shell could act on. An unterminated quote leaves the scan inside the
 # quote and allows the command, which is safe: the shell rejects an
 # unterminated quote as a syntax error and runs nothing.
-# Written so that no statement returns a failure status by accident: the
-# script runs under `set -e`, and `(( i++ ))` fails when i is 0.
+#
+# The scan runs in jq, not in a bash loop, and that is a safety property,
+# not a style choice. A character-by-character bash loop is quadratic here:
+# bash 3.2 copies the string on every `${s:i:1}`, and a 100,000-character
+# command took 108 s to check (measured). A hook that runs past its timeout
+# may let the command through unchecked, so a slow check is a bypass. jq's
+# reduce over the code points is linear (1,000,000 characters in about 2 s,
+# measured), and the whole scan is skipped when there is no parenthesis at
+# all. It fails closed: if jq errors, or prints anything but "false", the
+# command is refused.
 unquoted_paren() {
-  local s="$1" i=0 c state=plain
-  while (( i < ${#s} )); do
-    c="${s:i:1}"
-    case "$state" in
-      plain)
-        case "$c" in
-          '\') i=$(( i + 1 )) ;;
-          "'") state=single ;;
-          '"') state=double ;;
-          '(' | ')') return 0 ;;
-        esac
-        ;;
-      single)
-        if [[ "$c" == "'" ]]; then state=plain; fi
-        ;;
-      double)
-        case "$c" in
-          '\') i=$(( i + 1 )) ;;
-          '"') state=plain ;;
-        esac
-        ;;
-    esac
-    i=$(( i + 1 ))
-  done
-  return 1
+  if [[ "$command_str" != *'('* && "$command_str" != *')'* ]]; then
+    return 1
+  fi
+  local hit
+  if ! hit="$(printf '%s' "$input" | jq -r '
+      .tool_input.command | explode
+      | reduce .[] as $c ({st: "plain", esc: false, hit: false};
+          if .hit then .
+          elif .esc then .esc = false
+          elif .st == "plain" then
+            (if $c == 92 then .esc = true
+             elif $c == 39 then .st = "single"
+             elif $c == 34 then .st = "double"
+             elif ($c == 40 or $c == 41) then .hit = true
+             else . end)
+          elif .st == "single" then
+            (if $c == 39 then .st = "plain" else . end)
+          else
+            (if $c == 92 then .esc = true
+             elif $c == 34 then .st = "plain"
+             else . end)
+          end)
+      | .hit')"; then
+    return 0
+  fi
+  [[ "$hit" != "false" ]]
 }
-if unquoted_paren "$command_str"; then
+if unquoted_paren; then
   deny "bash guard: the command contains an unquoted parenthesis. This agent's commands run under zsh, where a parenthesised glob suffix such as *(e:...:) or *(+name) runs shell code while the glob is expanded, after this guard has approved the command. Put any parenthesis you need inside quotes, where the shell gives it no meaning: jq -c 'del(.b)' and rg -n 'foo(bar)?' are both allowed. A zsh glob qualifier or a subshell is not available to this agent."
 fi
 
