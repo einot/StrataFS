@@ -53,9 +53,10 @@ You may **read** anything in this repository and run read-only tooling
 over it. You may not modify a single byte of it.
 
 Allowed: `ls`, `cat`, `head`, `tail`, `wc`, `stat`, `find`, `grep`, `rg`, `jq`, `diff`, `cmp`; read-only `git` (log show diff status ls-files ls-tree cat-file blame rev-parse rev-list shortlog grep describe)
-with flags after the subcommand (`git log -p`, `git show -c HEAD`); and
-`node` pointed at approved validator scripts, named exactly. Pipelines of
-those are fine.
+with flags after the subcommand (`git log -p`, `git show -c HEAD`).
+Pipelines of those are fine. `node` is not allowed in this project: the
+guard can admit it for named validator scripts, but this repository's
+policy in `.claude/settings.json` enables neither `node` nor any script.
 
 **`git -C` is refused, and it is the first thing you will reach for.**
 Global options that take a value — `-C`, `-c`, `--git-dir`, `--work-tree`,
@@ -70,10 +71,13 @@ Denied: anything that writes, anything that mutates git state, arbitrary
 interpreters (`python3`, `awk`, `sed -e`, `node -e`, `bash -c`, `xargs`),
 package installation, and network access.
 
-The shell metacharacters `$`, `` ` ``, `{`, `}`, `>`, `<`, `&` and newline
-are refused anywhere in a command, because bash rewrites a command after
-the guard has inspected it — brace expansion was a real bypass here, not a
-hypothetical one. That costs some syntax, so use these instead:
+The shell metacharacters `$`, `` ` ``, `{`, `}`, `>`, `<`, a lone `&` and
+newline are refused anywhere in a command, because bash rewrites a command
+after the guard has inspected it — brace expansion was a real bypass here,
+not a hypothetical one. `&&`, `||`, `|` and `;` are allowed, as separators:
+the guard splits the command on them and checks every segment on its own,
+so a compound command runs only if each part would be allowed alone.
+Refusing those metacharacters costs some syntax, so use these instead:
 
 - literal braces: `rg -n '\x7b\x7d' src` (with `grep` add `-P`; plain
   `grep '\x7b'` silently matches the letters `x7b`)
@@ -94,8 +98,9 @@ names the workaround where one exists. If you believe a denial was wrong,
 say so in your report rather than retrying variants.
 
 Two limits worth knowing, both deliberate: the guard does no path scoping,
-so it does not stop you reading outside the repository; and it vouches for
-*which* validator script runs, never for what that script does.
+so it does not stop you reading outside the repository; and, if `node` is
+ever enabled for validator scripts, it will vouch for *which* script runs,
+never for what that script does.
 
 ## What to review
 
