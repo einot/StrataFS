@@ -178,7 +178,11 @@ The cache is keyed by the full object key, so it preserves the prefix split
 rather than dissolving it: a block stored under `b/` cannot be served to a
 reader that asked for it under `m/`. Cached entries are never invalidated —
 section 7 explains why they cannot go stale — and callers must treat what they
-get back as read-only, because it is shared.
+get back as read-only, because it is shared. The cache stores its own copy of
+each block, sized to the block's length, and never a buffer a caller still
+holds, so no later change by a caller can reach a cached block, and its size
+limit counts the memory it actually holds
+([ADR 0004](adr/0004-chunk-cache-owns-its-bytes.md)).
 
 `fsinfo` is not a block. It is mutable and lives at a fixed key, so none of
 this applies to it.
@@ -680,3 +684,4 @@ it is not this one.
 | [0001](adr/0001-file-trees-carry-chunk-spans.md) | File trees carry chunk spans; the chunker is a policy | 3, 4, 7, 14 |
 | [0002](adr/0002-duplicate-request-cache.md) | A duplicate request cache, keyed per connection instance, replays the reply to a retransmitted non-idempotent call | none — it constrains `internal/sunrpc` and `internal/nfs`, which section 14 carries over unchanged |
 | [0003](adr/0003-write-backpressure.md) | Buffered writes are bounded by a byte budget; a writer that has to wait performs the drain itself | 5, 9 |
+| [0004](adr/0004-chunk-cache-owns-its-bytes.md) | The chunk cache stores its own exact-length copy of each chunk, charges what it holds, and does not re-verify hits | 3 |
