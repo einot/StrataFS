@@ -77,6 +77,9 @@ after the guard has inspected it — brace expansion was a real bypass here,
 not a hypothetical one. `&&`, `||`, `|` and `;` are allowed, as separators:
 the guard splits the command on them and checks every segment on its own,
 so a compound command runs only if each part would be allowed alone.
+Parentheses are refused unless quoted: your commands run under zsh, where
+an unquoted parenthesised glob suffix such as `*(e:...:)` runs shell code.
+Quoted ones are fine (`jq -c 'del(.b)'`, `rg -n 'foo(bar)?'`).
 Refusing those metacharacters costs some syntax, so use these instead:
 
 - literal braces: `rg -n '\x7b\x7d' src` (with `grep` add `-P`; plain

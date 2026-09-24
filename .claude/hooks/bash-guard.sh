@@ -139,6 +139,21 @@
 # think it does, and will this token still be this token when the tool
 # runs?
 #
+# THE SHELL IS NOT NECESSARILY BASH. The Bash tool runs commands under the
+# user's shell, and on the machine this repository is developed on that
+# is zsh (verified from inside a Bash tool call). Everything in this
+# section was modelled on bash, and zsh has expansions bash lacks. The
+# one found to matter is zsh's glob qualifiers, which can run code during
+# pathname expansion; they are rejected by the unquoted-parenthesis
+# check. Other zsh differences examined and found harmless here: `=cmd`
+# expands only to a command's path (and a leading `=` in argv[0] is
+# denied anyway); `**` recursive globbing only lists names; the extended
+# glob operators `^`, `#` and `~` need EXTENDED_GLOB, which is off
+# (verified in the tool's shell); and history expansion does not happen in
+# a non-interactive zsh even though BANG_HIST is set (verified: `!!` and
+# `!ls` pass through unchanged). When adding a rule, ask what zsh does to
+# the command too, not only bash.
+#
 # Bash's word expansions, in the order bash applies them, with where each
 # one stands here. Every "REJECTED" names the check that does it.
 #
@@ -658,6 +673,62 @@ fi
 # do not pass through a shell.
 if [[ "$command_str" == *'{'* || "$command_str" == *'}'* ]]; then
   deny "bash guard: the command contains a brace. bash expands a brace list such as {-p,--output=/tmp/x} into separate words AFTER this guard has inspected the command, so a brace can carry an option past every rule here -- it was a real bypass, not a hypothetical one. Braces are refused whether or not they are quoted, because quotes are stripped before any comparison and the guard therefore cannot tell an expanding brace from a literal one. You can still do almost everything, with three workarounds, all verified: to SEARCH for a literal brace use a hex escape, which puts no brace in the command -- rg -n '\\x7b\\x7d' services does match interface{} -- and with grep you must add -P, because grep's default syntax reads \\x7b as the three letters x7b and would silently match the wrong thing rather than failing. For a regex QUANTIFIER there is no escape route, because a hex escape is a literal: 'a\\x7b2,3\\x7d' matches the text a{2,3} rather than repeating an a. Write the repetition out longhand with '?' instead -- 'aaa?' for a{2,3}, 'aaaa?a?' for a{3,5}. Do not reach for an alternation: a '|' in the pattern is a segment separator to this guard, which is quote-blind, so 'aa|aaa' is refused as well. For jq, read with path expressions such as 'jq .name' or 'jq .a.b', enumerate fields with 'jq to_entries', and build a reduced object without any brace using the functions that return one: 'jq -c with_entries(select(.key==\"a\"))' and 'jq -c del(.b)' both emit objects and are both allowed here (verified). The 'to_entries | map(...) | from_entries' pipeline works in jq but this guard refuses it over the '|', not the braces. If some finding genuinely needs a construct none of that covers, report it as needs-validation with the exact command a human should run."
+fi
+
+# Unquoted parentheses, because the Bash tool's shell is zsh, not bash.
+# Everything above was modelled on bash, but the tool runs commands under
+# the user's shell, and on this machine that is /bin/zsh (verified:
+# ZSH_VERSION set, BASH_VERSION unset, inside a Bash tool call). zsh
+# pathname expansion accepts GLOB QUALIFIERS -- a parenthesised suffix on
+# a glob -- and two of them run arbitrary shell code while the glob is
+# expanded: `*(e:'cmd':)` and `*(+func)`. Both passed every check above
+# (verified: `ls *(e:'true':)` was allowed), because none of their
+# characters is `$`, a brace, a redirection or `&`, and `ls` checks no
+# arguments. zsh's `=(cmd)` process substitution and a `( ... )` subshell
+# need a parenthesis too.
+#
+# Unlike braces, this check is quote-AWARE, and it can be: zsh gives a
+# parenthesis glob meaning only when it is unquoted, and the quoting rules
+# that decide that are small and fixed -- inside '...' nothing is special;
+# inside "..." a backslash escapes the next character; outside quotes a
+# backslash escapes the next character. (`$'...'` and backticks, the other
+# quoting forms, are refused outright above and below.) Scanning with
+# those rules keeps the quoted forms the brace message recommends, such as
+# jq -c 'del(.b)' and rg -n 'foo(bar)?', while refusing every parenthesis
+# the shell could act on. An unterminated quote leaves the scan inside the
+# quote and allows the command, which is safe: the shell rejects an
+# unterminated quote as a syntax error and runs nothing.
+# Written so that no statement returns a failure status by accident: the
+# script runs under `set -e`, and `(( i++ ))` fails when i is 0.
+unquoted_paren() {
+  local s="$1" i=0 c state=plain
+  while (( i < ${#s} )); do
+    c="${s:i:1}"
+    case "$state" in
+      plain)
+        case "$c" in
+          '\') i=$(( i + 1 )) ;;
+          "'") state=single ;;
+          '"') state=double ;;
+          '(' | ')') return 0 ;;
+        esac
+        ;;
+      single)
+        if [[ "$c" == "'" ]]; then state=plain; fi
+        ;;
+      double)
+        case "$c" in
+          '\') i=$(( i + 1 )) ;;
+          '"') state=plain ;;
+        esac
+        ;;
+    esac
+    i=$(( i + 1 ))
+  done
+  return 1
+}
+if unquoted_paren "$command_str"; then
+  deny "bash guard: the command contains an unquoted parenthesis. This agent's commands run under zsh, where a parenthesised glob suffix such as *(e:...:) or *(+name) runs shell code while the glob is expanded, after this guard has approved the command. Put any parenthesis you need inside quotes, where the shell gives it no meaning: jq -c 'del(.b)' and rg -n 'foo(bar)?' are both allowed. A zsh glob qualifier or a subshell is not available to this agent."
 fi
 
 for forbidden in '<<<' '<<' '>>' '>(' '<(' '>' '<' '`'; do
