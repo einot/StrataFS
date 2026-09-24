@@ -139,6 +139,56 @@
 # think it does, and will this token still be this token when the tool
 # runs?
 #
+# THE SHELL IS NOT NECESSARILY BASH. The Bash tool runs commands under the
+# user's shell, and on the machine this repository is developed on that
+# is zsh (verified from inside a Bash tool call). Everything in this
+# section was modelled on bash, and zsh has expansions bash lacks. The
+# one found to matter is zsh's glob qualifiers, which can run code during
+# pathname expansion; they are rejected by the unquoted-parenthesis
+# check. Other zsh differences examined and found harmless here: `=cmd`
+# expands only to a command's path (and a leading `=` in argv[0] is
+# denied anyway); `**` recursive globbing only lists names; the extended
+# glob operators `^`, `#` and `~` need EXTENDED_GLOB, which is off
+# (verified in the tool's shell); and history expansion does not happen in
+# a non-interactive zsh even though BANG_HIST is set (verified: `!!` and
+# `!ls` pass through unchanged). ALIAS expansion, unlike in bash, IS on in
+# zsh's non-interactive shell. What bounds it is that the tool's shell
+# defines only zsh's two defaults, `run-help` and `which-command`, neither
+# of them an allowed name, and no global or suffix aliases and no
+# `zsh_directory_name` function for `~[name]` to call (verified). That
+# rests on the user's shell configuration, not on this guard. An ordinary
+# alias or a shell function named after an allowed command (ls, grep, git
+# and the rest) would rewrite that command, and a global alias could
+# rewrite any word in it; this guard can see none of them. The agent
+# cannot define any of these, because nothing it may run sets an alias or
+# defines a function. When adding a rule, ask what zsh does to the command
+# too, not only bash.
+#
+# Three allowed names ARE shell functions in the tool's zsh, defined by
+# Claude Code's shell setup rather than by the user (verified with
+# `whence -w`; the other allowed names resolve to system commands). Read
+# with `functions find grep rg` in the tool's shell (verified): `find` runs
+# bfs, `grep` runs ugrep, and `rg` runs ripgrep, each by invoking the
+# Claude Code binary under that name, and each falling back to the system
+# command when that binary is missing. The option rules in this file were
+# written against the system tools, so check them against these too:
+#   * bfs: its --help lists the same writing and executing actions as GNU
+#     find plus `-rm`, an alias for `-delete`; all are refused in
+#     check_find. It rejects abbreviated actions (verified: `-prin` is an
+#     error, "did you mean -print?"), so exact matching still holds.
+#   * ugrep: its --help lists options that run a command or write a file.
+#     The grep function hands an argument matching any of its patterns
+#     (-*-filter*, -*-pager*, -*-view*, -*-format-open*, -*-config*, ---*,
+#     -@*, -*-save-config*, and a few others) to the system grep instead of
+#     ugrep (verified by reading its source). Those patterns do not cover
+#     -Q/--query, ugrep's interactive interface, which can run a viewer
+#     command. That function belongs to Claude Code, not this repository,
+#     so check_grep refuses ugrep's command-running and config options
+#     itself, -Q/--query included; see the comment above check_grep for
+#     exactly which, and how its set differs from the function's. ugrep rejects abbreviated long options (verified), and
+#     loads a `.ugrep` config file on its own only when invoked as `ug`,
+#     not as ugrep (per its --help).
+#
 # Bash's word expansions, in the order bash applies them, with where each
 # one stands here. Every "REJECTED" names the check that does it.
 #
@@ -219,10 +269,11 @@
 #      POSITIONAL RULES where the model and bash still differ.
 #
 # Not expansions, but the same class of after-the-fact rewriting, for
-# completeness: alias and history expansion are both off in the
-# non-interactive shell the Bash tool uses (verified: expand_aliases
-# off, histexpand off), and an alias needs an `=` the argv[0] rule denies
-# in any case. Redirection is rejected by the forbidden loop. `;`, `|`,
+# completeness: alias and history expansion are both off in a
+# non-interactive BASH (verified: expand_aliases off, histexpand off), and
+# defining an alias needs an `=` the argv[0] rule denies in any case. The
+# tool's shell here is zsh, where aliases are on; see THE SHELL IS NOT
+# NECESSARILY BASH above for why that is bounded. Redirection is rejected by the forbidden loop. `;`, `|`,
 # `&&` and `||` are handled by segment splitting, a bare `&` is
 # rejected, and a newline is rejected.
 #
@@ -580,6 +631,41 @@ relative_to_project() {
 # command is rejected outright rather than sanitized. These run on the raw
 # command string, deliberately: a `>` inside quotes is rejected too.
 
+# Length first, before anything that scales with it. The checks below use
+# bash pattern substitution and per-character loops over the command and
+# its tokens, and under bash 3.2 their cost grows much faster than the
+# length. Measured on the machine this was written on: 8,192 characters
+# of quotes or backslashes took about 30 s to check, and 50,000 characters
+# of `&& ls` took 228 s. A hook that runs past its timeout (60 s by
+# default) may let the command through unchecked, so a slow check is a
+# bypass, and the one bound that holds for every check, present and
+# future, is on the input.
+#
+# The limit is on UTF-8 BYTES of the RAW command, as jq reads it from the
+# payload, not on `${#command_str}`. Two reasons. `command_str` came
+# through `$(...)`, which drops trailing newlines, so it can be shorter
+# than the string the parenthesis scan re-reads from the payload; the raw
+# string is the longest form any check sees. And multibyte text costs more
+# per character in bash's UTF-8 handling, so a byte limit gives it
+# proportionally fewer characters. Measured at 2,048 characters, before
+# this was switched to bytes: ten ASCII and multibyte patterns (quotes,
+# backslashes, `&&` chains, repeated `git log -p`, and Latin, CJK and emoji
+# text) all checked in under 6 s, the slowest being repeated `git log -ä`.
+# A byte limit of the same size can only be faster. That is a sample, not
+# a proof about every possible content, which is why the margin to the
+# timeout is wide. No read-only inspection command needs to be long; the
+# longest an auditor has sent here was about 200 characters.
+#
+# Fails closed: if jq cannot produce a number, the command is refused.
+max_command_bytes=2048
+raw_command_bytes="$(printf '%s' "$input" | jq -r '(.tool_input.command // "") | utf8bytelength' 2>/dev/null)" || raw_command_bytes=""
+if ! [[ "$raw_command_bytes" =~ ^[0-9]+$ ]]; then
+  deny "bash guard: could not measure the command's length, so it is refused. Re-run it as a plain single-line command."
+fi
+if (( raw_command_bytes > max_command_bytes )); then
+  deny "bash guard: the command is ${raw_command_bytes} bytes long, over this guard's limit of ${max_command_bytes}. A check this guard runs grows faster than the command's length, and a check that runs out of time could let a command through, so long commands are refused outright. Split the work into several shorter commands."
+fi
+
 if [[ "$command_str" == *$'\n'* ]]; then
   deny "bash guard: the command contains a newline, and multi-line shell input can hide a second command from this guard. Send one single-line command per Bash call."
 fi
@@ -657,7 +743,73 @@ fi
 # not to relax this check but to give that agent a tool whose arguments
 # do not pass through a shell.
 if [[ "$command_str" == *'{'* || "$command_str" == *'}'* ]]; then
-  deny "bash guard: the command contains a brace. bash expands a brace list such as {-p,--output=/tmp/x} into separate words AFTER this guard has inspected the command, so a brace can carry an option past every rule here -- it was a real bypass, not a hypothetical one. Braces are refused whether or not they are quoted, because quotes are stripped before any comparison and the guard therefore cannot tell an expanding brace from a literal one. You can still do almost everything, with three workarounds, all verified: to SEARCH for a literal brace use a hex escape, which puts no brace in the command -- rg -n '\\x7b\\x7d' services does match interface{} -- and with grep you must add -P, because grep's default syntax reads \\x7b as the three letters x7b and would silently match the wrong thing rather than failing. For a regex QUANTIFIER there is no escape route, because a hex escape is a literal: 'a\\x7b2,3\\x7d' matches the text a{2,3} rather than repeating an a. Write the repetition out longhand with '?' instead -- 'aaa?' for a{2,3}, 'aaaa?a?' for a{3,5}. Do not reach for an alternation: a '|' in the pattern is a segment separator to this guard, which is quote-blind, so 'aa|aaa' is refused as well. For jq, read with path expressions such as 'jq .name' or 'jq .a.b', enumerate fields with 'jq to_entries', and build a reduced object without any brace using the functions that return one: 'jq -c with_entries(select(.key==\"a\"))' and 'jq -c del(.b)' both emit objects and are both allowed here (verified). The 'to_entries | map(...) | from_entries' pipeline works in jq but this guard refuses it over the '|', not the braces. If some finding genuinely needs a construct none of that covers, report it as needs-validation with the exact command a human should run."
+  deny "bash guard: the command contains a brace. bash expands a brace list such as {-p,--output=/tmp/x} into separate words AFTER this guard has inspected the command, so a brace can carry an option past every rule here -- it was a real bypass, not a hypothetical one. Braces are refused whether or not they are quoted, because quotes are stripped before any comparison and the guard therefore cannot tell an expanding brace from a literal one. You can still do almost everything, with three workarounds, all verified: to SEARCH for a literal brace use a hex escape, which puts no brace in the command -- rg -n '\\x7b\\x7d' services does match interface{} -- and with grep you must add -P, because grep's default syntax reads \\x7b as the three letters x7b and would silently match the wrong thing rather than failing. For a regex QUANTIFIER there is no escape route, because a hex escape is a literal: 'a\\x7b2,3\\x7d' matches the text a{2,3} rather than repeating an a. Write the repetition out longhand with '?' instead -- 'aaa?' for a{2,3}, 'aaaa?a?' for a{3,5}. Do not reach for an alternation: a '|' in the pattern is a segment separator to this guard, which is quote-blind, so 'aa|aaa' is refused as well. For jq, read with path expressions such as 'jq .name' or 'jq .a.b', enumerate fields with 'jq to_entries', and build a reduced object without any brace using the functions that return one: jq -c 'with_entries(select(.key==\"a\"))' and jq -c 'del(.b)' both emit objects and are both allowed here (verified) -- keep the filter in quotes, because an unquoted parenthesis is refused. The 'to_entries | map(...) | from_entries' pipeline works in jq but this guard refuses it over the '|', not the braces. If some finding genuinely needs a construct none of that covers, report it as needs-validation with the exact command a human should run."
+fi
+
+# Unquoted parentheses, because the Bash tool's shell is zsh, not bash.
+# Everything above was modelled on bash, but the tool runs commands under
+# the user's shell, and on this machine that is /bin/zsh (verified:
+# ZSH_VERSION set, BASH_VERSION unset, inside a Bash tool call). zsh
+# pathname expansion accepts GLOB QUALIFIERS -- a parenthesised suffix on
+# a glob -- and two of them run arbitrary shell code while the glob is
+# expanded: `*(e:'cmd':)` and `*(+func)`. Both passed every check above
+# (verified: `ls *(e:'true':)` was allowed), because none of their
+# characters is `$`, a brace, a redirection or `&`, and `ls` checks no
+# arguments. zsh's `=(cmd)` process substitution and a `( ... )` subshell
+# need a parenthesis too.
+#
+# Unlike braces, this check is quote-AWARE, and it can be: zsh gives a
+# parenthesis glob meaning only when it is unquoted, and the quoting rules
+# that decide that are small and fixed -- inside '...' nothing is special;
+# inside "..." a backslash escapes the next character; outside quotes a
+# backslash escapes the next character. (`$'...'` and backticks, the other
+# quoting forms, are refused outright above and below.) Scanning with
+# those rules keeps the quoted forms the brace message recommends, such as
+# jq -c 'del(.b)' and rg -n 'foo(bar)?', while refusing every parenthesis
+# the shell could act on. An unterminated quote leaves the scan inside the
+# quote and allows the command, which is safe: the shell rejects an
+# unterminated quote as a syntax error and runs nothing.
+#
+# The scan runs in jq, not in a bash loop, and that is a safety property,
+# not a style choice. A character-by-character bash loop is quadratic here:
+# bash 3.2 copies the string on every `${s:i:1}`, and a 100,000-character
+# command took 108 s to check (measured). A hook that runs past its timeout
+# may let the command through unchecked, so a slow check is a bypass. jq's
+# reduce over the code points is linear (measured: 1,000,000 characters in
+# 2.3 s for the jq filter alone), and the whole scan is skipped when there
+# is no parenthesis at all. The byte limit above now bounds its input too,
+# since it measures the same raw string this scan reads. It fails closed: if jq errors, or prints anything but "false", the
+# command is refused.
+unquoted_paren() {
+  if [[ "$command_str" != *'('* && "$command_str" != *')'* ]]; then
+    return 1
+  fi
+  local hit
+  if ! hit="$(printf '%s' "$input" | jq -r '
+      .tool_input.command | explode
+      | reduce .[] as $c ({st: "plain", esc: false, hit: false};
+          if .hit then .
+          elif .esc then .esc = false
+          elif .st == "plain" then
+            (if $c == 92 then .esc = true
+             elif $c == 39 then .st = "single"
+             elif $c == 34 then .st = "double"
+             elif ($c == 40 or $c == 41) then .hit = true
+             else . end)
+          elif .st == "single" then
+            (if $c == 39 then .st = "plain" else . end)
+          else
+            (if $c == 92 then .esc = true
+             elif $c == 34 then .st = "plain"
+             else . end)
+          end)
+      | .hit')"; then
+    return 0
+  fi
+  [[ "$hit" != "false" ]]
+}
+if unquoted_paren; then
+  deny "bash guard: the command contains an unquoted parenthesis. This agent's commands run under zsh, where a parenthesised glob suffix such as *(e:...:) or *(+name) runs shell code while the glob is expanded, after this guard has approved the command. Put any parenthesis you need inside quotes, where the shell gives it no meaning: jq -c 'del(.b)' and rg -n 'foo(bar)?' are both allowed. A zsh glob qualifier or a subshell is not available to this agent."
 fi
 
 for forbidden in '<<<' '<<' '>>' '>(' '<(' '>' '<' '`'; do
@@ -845,11 +997,19 @@ check_sort() {
 # whole words matched exactly, there is no clustering, no `=value` form
 # and no abbreviation (`-dele` is an error, not `-delete`), so exact
 # matching is the right shape for these rules.
+#
+# In the Bash tool, `find` is not the system find: the tool's zsh defines
+# a `find` function that runs bfs through the Claude Code binary (see THE
+# SHELL IS NOT NECESSARILY BASH). bfs accepts every GNU find action this
+# rule lists, plus `-rm`, an alias for `-delete` (verified: bfs's --help
+# lists it, and bfs accepts it, exit 0, on a pattern matching nothing). Its other actions (-exit, -limit, -printx,
+# -quit) only print or stop. Keep this list in step with bfs's --help, not
+# only with find's manual.
 check_find() {
   local token
   for token in "$@"; do
     case "$token" in
-      -delete | -exec | -execdir | -ok | -okdir | -fprint | -fprint0 | -fprintf | -fls)
+      -delete | -rm | -exec | -execdir | -ok | -okdir | -fprint | -fprint0 | -fprintf | -fls)
         deny "bash guard: 'find ${token}' deletes files or runs another command for each match. Use find only to select paths (-name, -type, -path) and pipe the result into an allowed read-only command."
         ;;
     esac
@@ -1035,6 +1195,59 @@ check_rg() {
   done
 }
 
+# grep is ugrep in the Bash tool (see THE SHELL IS NOT NECESSARILY BASH),
+# and ugrep has options that run a command or write a file. Claude Code's
+# `grep` shell function hands MOST of them to the system grep instead of
+# ugrep -- --filter, --pager, --view, --format-open, --config and ---,
+# --save-config -- but NOT -Q/--query, which its patterns do not match
+# (verified by reading the function), so until this rule existed -Q
+# reached ugrep with nothing in the way. This rule is therefore not a copy
+# of the function's list, and is deliberately a different set: it refuses
+# everything below, -Q/--query included, and leaves alone the options the
+# function redirects for other reasons (-Z/-z, --null, --null-data, -@),
+# which neither run a command nor write a file. It does not rely on the
+# function at all, which lives outside this repository and can change with
+# any Claude Code release. The system greps (BSD and GNU) have none of
+# these options, so on them it only refuses spellings they would reject or
+# never use.
+# (from ugrep's --help, read in the tool's shell):
+#   --filter=CMDS       runs CMDS on each file before searching it
+#   --pager[=CMD]       pipes output through CMD, when output is a terminal
+#   --view[=CMD]        runs CMD to view a file from the -Q interface
+#   --config[=FILE], ---FILE
+#                       loads options, including any of the above, from FILE
+#   --save-config[=FILE]
+#                       WRITES a configuration file (it runs nothing, but
+#                       writing is outside this agent's role)
+#   -Q, --query         the interactive query interface, which can run
+#                       the --view command
+#   --format-open       not in this ugrep's --help at all; refused because
+#                       Claude Code's grep function lists it among the
+#                       options it keeps away from ugrep, and refusing an
+#                       option that does not exist costs nothing
+# Long options go through matches_long, so every abbreviation is refused
+# too. ugrep itself rejects abbreviations (verified), so this over-refuses
+# a few harmless prefixes such as `--con`, and fails closed.
+# `--filter-magic-label` stays allowed: `--filter` is not its prefix in the
+# direction that matters (see long_opt_matches), and on its own it only
+# labels files. -Q is refused wherever it appears in a short cluster, even
+# where it would be an attached value; to search for a pattern containing
+# Q, pass it as a separate word or with `-e` as its own word.
+check_grep() {
+  local token
+  for token in "$@"; do
+    if [[ "$token" == ---* ]]; then
+      deny "bash guard: 'grep ${token}' loads ugrep options from a configuration file, which can name a command to run. Drop it and put the options you need on the command line."
+    fi
+    if matches_long "$token" --filter --pager --view --format-open --config --save-config --query; then
+      deny "bash guard: 'grep ${token}' runs a command, opens an interface that can run one, loads or writes a configuration file. In this shell grep is ugrep, which has such options. Drop it; search with plain grep options."
+    fi
+    if short_cluster_has "$token" "Q" ""; then
+      deny "bash guard: 'grep ${token}' includes -Q, ugrep's interactive query interface, which can run a viewer command. Drop it. To search for a pattern containing Q, give it as a separate word or after -e as its own word."
+    fi
+  done
+}
+
 check_file() {
   local token
   for token in "$@"; do
@@ -1088,6 +1301,7 @@ while IFS= read -r segment; do
     git) check_git ${args[@]+"${args[@]}"} ;;
     node) check_node ${args[@]+"${args[@]}"} ;;
     rg) check_rg ${args[@]+"${args[@]}"} ;;
+    grep) check_grep ${args[@]+"${args[@]}"} ;;
     file) check_file ${args[@]+"${args[@]}"} ;;
   esac
 done <<< "$segments"
