@@ -76,3 +76,4 @@ URL, and what was taken from it.
 | [0001](0001-file-trees-carry-chunk-spans.md) | File trees carry chunk spans | Accepted |
 | [0002](0002-duplicate-request-cache.md) | Duplicate request cache for non-idempotent NFS procedures | Accepted |
 | [0003](0003-write-backpressure.md) | Bounding buffered writes, and the blocking discipline that makes it safe | Accepted |
+| [0004](0004-chunk-cache-owns-its-bytes.md) | The chunk cache owns its bytes and charges what it holds | Accepted |

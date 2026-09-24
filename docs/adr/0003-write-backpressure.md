@@ -160,6 +160,11 @@
   (#56). The earlier text covered only the cached case.
   ***What this does not decide*** — enforcing the advertised maximum file size
   (#55).
+- **Revised:** 2026-09-24 — a fourth pass the same day, cross-references only.
+  Assumption 2 now ends by saying that ADR 0004 decides #47, and the
+  chunk-cache bullet under *What this does not decide* by saying that ADR 0004
+  decides both #47 and #46; Assumption 17's citation moves to `cache.go:44-46`,
+  where the fix moved the code. Nothing else changed.
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
 - **Affects:** `internal/blobfs`, `cmd/strata`, doc comment on `vfs.FS.Write`
 
@@ -1055,6 +1060,9 @@ Recorded because the issue did not specify them.
    holding 4 KiB of data in 1 MiB of capacity is charged 4 KiB and holds 1 MiB —
    §2's argument, applied to the other pool — so the cache can hold many times
    its configured size. That is left to #47 (*What this does not decide*).
+   ADR 0004 decides it: the cache keeps its own exact-length copy of each chunk
+   and charges what it holds, so the cache half is a real bound too, up to
+   per-entry overhead.
 3. **No timeout.** §5. The issue asked only that the commit path make progress.
 4. **Fairness is not guaranteed.** `sync.Cond.Broadcast` wakes everyone and the
    winner is whoever is scheduled first, so a writer can in principle be starved
@@ -1243,7 +1251,7 @@ calls it made while pinning what the first version left open.
 17. **`-max-dirty 0` means no limit, unlike `-cache 0` and
     `-snapshot-retention 0`.** §1. Both of those mean "the default": `-cache 0`
     reaches `newChunkCache` as zero, which selects 256 MiB
-    (`internal/blobfs/cache.go:29-31`), and `-snapshot-retention 0` reaches
+    (`internal/blobfs/cache.go:44-46`), and `-snapshot-retention 0` reaches
     `New` as zero, which selects 10 (`internal/blobfs/fs.go:139-140`).
     `-max-dirty` follows its own help text, "0 or less: no limit". I kept that
     rather than match its neighbours, because an operator who sets a memory
@@ -1417,7 +1425,7 @@ to answer speculatively now.
   `len` while holding a flushed buffer at its full capacity. Caching a copy
   would fix it, and would also stop the cache holding buffers that a write can
   still mutate in place after a flush fails partway, changing a cached chunk's
-  bytes (#46).
+  bytes (#46). ADR 0004 decides both.
 - **Stale reads and resurrected truncated bytes** (#41, #40). `Read` copies the
   chunk list before the dirty buffers (`internal/blobfs/fs.go:988`,
   `:1004-1011`), so a flush in between can make it return older contents than
