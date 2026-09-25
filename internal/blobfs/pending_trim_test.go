@@ -484,6 +484,142 @@ func TestPendingTrimWholeChunkOverwrite(t *testing.T) {
 		"index 1 (ADR 0006 §4)")
 }
 
+// TestPendingTrimFailedWriteFetchKeepsTrim pins ADR 0006 §4: "A fetch that
+// fails stores nothing for the index and leaves the entry", with ADR 0003 §2's
+// table, "Write that stores nothing because it failed first: ... a failed
+// first fetch | 0", and ADR 0006 §1 and §6: the trim the entry records is
+// still honoured afterwards. A cold two-chunk file is truncated to cs+1000,
+// which queues a trim at index 1 (§3(b)), and a Write of 10 bytes at cs+100,
+// which has to fetch chunk 1 because it fills only part of the index (§4;
+// ADR 0005 §7), has that fetch fail. The entry must still be there, and index
+// 1 must not be dirty. With the store healthy again, the file is grown to 2cs,
+// and [cs+1000, 2cs) must read as zeros in one Read, after a Sync and on a
+// fresh mount.
+//
+// A regression that removed the entry before the fetch, or on the fetch's
+// error path, fails the len(of.pendingTrim) check; the chunk list still names
+// the whole chunk then, so the Read after growth returns the removed bytes and
+// the flush keeps the long chunk, which the content checks catch. One that
+// stored a buffer for the index despite the failure fails the of.dirty and
+// DirtyBytes() checks.
+func TestPendingTrimFailedWriteFetchKeepsTrim(t *testing.T) {
+	c := ptSeedCold(t, "failed-write-fetch.bin", 2*bpCS)
+	key1 := bpChunkKey(t, c.st, c.data[bpCS:])
+	c.setSize(t, bpCS+1000)
+	c.wantPending(t, 1, "after truncating a cold two-chunk file to cs+1000", ptWhyEntry)
+
+	injected := errors.New("pending trim test: injected failure of the Write's fetch of chunk 1")
+	get := &bpHook{key: key1, err: injected}
+	c.bps.setGet(get)
+	what := "a Write of 10 bytes at cs+100, into index 1, whose fetch of the trimmed chunk fails"
+	r := bpWrite(t, c.fs, what, c.h, bpCS+100, bpUnique(10), vfs.Unstable)
+	calls := c.bps.callsOf(get)
+	c.bps.setGet(nil)
+	if calls == 0 {
+		t.Fatalf("setup: %s made no store Get of chunk 1's key, so the failure was never "+
+			"injected: a Write that fills part of an index absent from of.dirty fetches the chunk "+
+			"the list names (ADR 0006 §4; ADR 0003 §4), and a fresh mount's cache does not hold it "+
+			"(ADR 0004 §5)", what)
+	}
+	if r.n != 0 || !errors.Is(r.err, injected) {
+		t.Errorf("%s = %v, want (0, UNSTABLE, the injected error): a failed first fetch stores "+
+			"nothing (ADR 0006 §4; ADR 0003 §2's table)", what, r)
+	}
+	after := "after the Write whose fetch of the trimmed chunk failed"
+	s := c.wantPending(t, 1, after, "ADR 0006 §4: a fetch that fails stores nothing for the "+
+		"index and leaves the entry")
+	ptWantNotDirty(t, s, 1, after, "ADR 0006 §4: a fetch that fails stores nothing for the index")
+	bpWantDirty(t, c.fs, after+" (ADR 0003 §2's table: a failed first fetch charges nothing)", 0)
+	bpCheckAccounting(t, c.fs, after)
+
+	c.setSize(t, 2*bpCS)
+	rwhat := "one Read of [cs, 2cs) after the failed Write and the growth to 2cs"
+	rr := rcStartRead(c.fs, c.h, bpCS, bpCS).wait(t, rwhat)
+	ptWantRead(t, rwhat, rr, rcCat(c.data[bpCS:bpCS+1000], ptZeros(bpCS-1000)), true,
+		"ADR 0006 §4: a failed fetch leaves the entry; §6: a Read copies only the bytes below "+
+			"the trim's length")
+	c.wantEverywhere(t, rcCat(c.data[:bpCS+1000], ptZeros(bpCS-1000)), "truncated to cs+1000, "+
+		"a Write into index 1 failed in its fetch, then grown to 2cs (ADR 0006 §4)")
+}
+
+// TestPendingTrimTruncateIntoDirtyIndexMakesNoEntry pins ADR 0006 §3(b): a
+// truncate makes an entry only "If tail != 0, lastIdx is not in of.dirty, and
+// the chunk list ... reaches lastIdx with a stored chunk ref there"; §2 I1,
+// "An index is never in both of.dirty and of.pendingTrim"; and §8, "After any
+// truncate a file has ... none for an index in of.dirty". This is the one case
+// where the dirty guard matters: index 1 of a cold two-chunk file has a stored
+// chunk in the chunk list AND a dirty buffer, made by a Write, when the file
+// is truncated to cs+1000. The truncate shortens the dirty tail in place
+// (§3(d)) and must make no entry. The flush then applies no trim (§5), so it
+// uploads the dirty chunk and nothing else: one chunk Put, since that content
+// is new to the bucket (ADR 0005 §7), and no store Get of chunk 1's key.
+//
+// "after a partial write" makes index 1 dirty the way the reviewer's case
+// does: the Write fetches chunk 1, which caches it (ADR 0004 §5), so a
+// wrongly made entry would be applied from the cache with no Get, and only
+// the extra chunk Put of the shortened copy shows it. "after a whole-chunk
+// write" fetches nothing (§4; ADR 0005 §7), so chunk 1 is not cached, and a
+// wrongly made entry costs a Get of its key as well. In both, a wrongly made
+// entry fails the len(of.pendingTrim) check first. Content, which such an
+// entry would not change, is checked before the Sync, after it and on a fresh
+// mount. Nothing depends on the order of the flush's uploads.
+func TestPendingTrimTruncateIntoDirtyIndexMakesNoEntry(t *testing.T) {
+	cases := []struct {
+		name string
+		off  uint64
+		n    int
+	}{
+		{"after a partial write", bpCS + 100, 10},
+		{"after a whole-chunk write", bpCS, bpCS},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := ptSeedCold(t, "dirty-tail.bin", 2*bpCS)
+			key1 := bpChunkKey(t, c.st, c.data[bpCS:])
+			w := bpUnique(tc.n)
+			bpMustWrite(t, c.fs, fmt.Sprintf("a Write of %d bytes at %s, into stored chunk 1", tc.n,
+				ptAt(tc.off)), c.h, tc.off, w)
+			want := append([]byte(nil), c.data...)
+			copy(want[tc.off:], w)
+			want = want[:bpCS+1000]
+
+			c.setSize(t, bpCS+1000)
+			what := "after truncating to cs+1000, into dirty index 1, whose chunk is also stored"
+			s := c.wantPending(t, 0, what, "ADR 0006 §3(b): a truncate makes an entry only when "+
+				"lastIdx is not in of.dirty; §2 I1 and §8: none for an index in of.dirty")
+			if _, ok := s.caps[1]; !ok {
+				t.Errorf("%s: of.dirty holds indices %v, want index 1 among them: truncate shortens a "+
+					"dirty tail in place (ADR 0006 §3(d))", what, s.indices())
+			}
+			bpWantDirty(t, c.fs, what+" (the Write's +cs; ADR 0006 §3(d): a truncate adds nothing)", bpCS)
+
+			bpWantFile(t, c.fs, c.h, want, "the written and truncated file, before the Sync")
+			get := &bpHook{key: key1}
+			put := &bpHook{}
+			c.bps.setGet(get)
+			c.bps.setPut(put)
+			bpMustSync(t, c.fs, "Sync of the truncated dirty index 1")
+			gets, puts := c.bps.callsOf(get), c.bps.callsOf(put)
+			c.bps.setGet(nil)
+			c.bps.setPut(nil)
+			if gets != 0 {
+				t.Errorf("the Sync made %d store Gets of chunk 1's key, want 0: the file has no "+
+					"pending trim, so the flush applies none (ADR 0006 §3(b), §5), and its dirty index "+
+					"1 needs no fetch", gets)
+			}
+			if puts != 1 {
+				t.Errorf("the Sync made %d chunk Puts, want 1: the flush uploads the one dirty index, "+
+					"whose content is new to the bucket (ADR 0005 §7), and applies no trim, which "+
+					"would upload a shortened copy of the stored chunk 1 as well (ADR 0006 §3(b), §5)",
+					puts)
+			}
+			bpWantDirty(t, c.fs, "after the Sync", 0)
+			bpWantFile(t, c.fs, c.h, want, "the written and truncated file, after the Sync")
+			bpWantRemount(t, c.st, c.name, want, "the written and truncated file")
+		})
+	}
+}
+
 // TestPendingTrimFailedFlushKeepsTrim pins ADR 0006 §5: "A fetch or an upload
 // that fails repoints nothing, and leaves of.dirty and of.pendingTrim as they
 // were, so the file's next flush applies the trims again", "The buffer never

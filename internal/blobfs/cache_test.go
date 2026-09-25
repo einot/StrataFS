@@ -727,14 +727,16 @@ func TestChunkCacheFreshMountAndHoles(t *testing.T) {
 // holds C0||C1, both of content new to the bucket; its flush uploaded one of
 // the two chunks and failed on the other; and that one, chunk i, is the only
 // one of the two in the cache. Which chunk it is is found with get, because
-// the order in which flushOpen uploads a file's chunks is not pinned (§7).
+// the order in which flushOpen uploads a file's chunks is not pinned (§7). bps
+// is the store fake the FS runs over, with no hook armed once setup returns.
 type cc46 struct {
-	st *store.Local
-	fs *FS
-	f  vfs.Handle
-	c  [2][]byte
-	h  [2]string
-	i  int
+	st  *store.Local
+	bps *bpStore
+	fs  *FS
+	f   vfs.Handle
+	c   [2][]byte
+	h   [2]string
+	i   int
 }
 
 // cc46Setup reaches the cc46 state on a fresh bucket, with the default
@@ -744,7 +746,7 @@ func cc46Setup(t *testing.T) *cc46 {
 	t.Helper()
 	st := bpLocal(t)
 	bps := &bpStore{Store: st}
-	s := &cc46{st: st, fs: bpNew(t, bps, 0, quietLog())}
+	s := &cc46{st: st, bps: bps, fs: bpNew(t, bps, 0, quietLog())}
 	s.f, _ = bpCreate(t, s.fs, ccF, 0)
 	s.c[0], s.c[1] = bpUnique(bpCS), bpUnique(bpCS)
 	s.h[0], s.h[1] = ccHash(s.c[0]), ccHash(s.c[1])
@@ -903,6 +905,17 @@ func TestChunkCacheFailedFlushWriteFromCachedChunk(t *testing.T) {
 // failed flush's successful upload put there (ADR 0004 §5), so the flush that
 // applies the trim finds it there (ADR 0006 §7: "none if this FS's cache holds
 // it") and copies its first bytes (ADR 0004 §3; ADR 0006 §5).
+//
+// g.bin's bytes are right whether or not the flush damaged the cache's slice,
+// so after the Sync the test also checks the cache entry itself: it must still
+// hold C_i whole, with cap == len (ADR 0004 §1, §2), because what loadChunk
+// returns is the cache's own slice and a caller "must not write through it,
+// and must not append to it or to any reslice of it" (§3); ADR 0006 §5: the
+// flush "copies the first min(to, len) bytes of the result into a buffer of
+// its own". And the flush's fetch must have been a cache hit, with no store
+// Get of chunk i's key (ADR 0006 §7, §8: at most one Get of the chunk's key,
+// "none if this FS's cache holds the chunk"), which also shows that the entry
+// checked is the one the trim was applied from.
 func TestChunkCacheFailedFlushTruncateAppliesFromCachedChunk(t *testing.T) {
 	s := cc46Setup(t)
 	s.patchF(t)
@@ -922,7 +935,22 @@ func TestChunkCacheFailedFlushTruncateAppliesFromCachedChunk(t *testing.T) {
 	want := s.whole()[:size]
 	bpWantFile(t, s.fs, g, want, ccG+" after a truncate into its cached chunk, before the Sync "+
 		"(ADR 0006 §6)")
+	s.wantCached(t, "before the Sync that applies "+ccG+"'s trim")
+
+	get := &bpHook{key: bpChunkKey(t, s.st, s.c[s.i])}
+	s.bps.setGet(get)
 	bpMustSync(t, s.fs, "Sync of the truncated "+ccG)
+	gets := s.bps.callsOf(get)
+	s.bps.setGet(nil)
+	if gets != 0 {
+		t.Errorf("the Sync that applied %s's trim made %d store Gets of chunk %d's key, want 0: "+
+			"this FS's cache holds the chunk, and a flush applies an entry with no Get of its "+
+			"chunk's key when the cache holds it (ADR 0006 §7, §8)", ccG, gets, s.i)
+	}
+	s.wantCached(t, "after the Sync that applied "+ccG+"'s trim from the cached chunk")
+	ccWantEntry(t, s.fs.cache, s.h[s.i], s.c[s.i], "after the Sync that applied "+ccG+"'s trim",
+		"ADR 0004 §3: a caller of loadChunk must not write through, or append to, the cache's "+
+			"slice; ADR 0006 §5: the flush copies into a buffer of its own")
 	bpWantFile(t, s.fs, g, want, ccG+" after a truncate into its cached chunk and the flush that "+
 		"applied the trim (ADR 0004 §1, §3)")
 	bpWantRemount(t, s.st, ccG, want, ccG+" after a truncate into its cached chunk and the flush "+
