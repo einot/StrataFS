@@ -2,6 +2,16 @@
 
 **Status:** Accepted
 **Date:** 2026-09-25
+**Revised:** 2026-09-25 — the same day, after review of the tests and before
+the change merged. §6 gains a bullet, *An attribute change*, §7's list of
+behaviours a test may rely on gains one entry, and Assumption 15 is added: a
+`SetAttr` that sets no size takes `FS.mu` for writing and never an
+`openFile.mu`, so a flush of the file held in a chunk upload does not hold it
+up. The code already works that way, and ADR 0002 Assumption 7 implies it by
+naming only a size-setting `SETATTR` among the calls that can wait on
+`openFile.mu`, but nothing stated it, and the test of §2 step 2's permission
+check depends on it. The decision, the three steps, the invariants and
+everything else are unchanged.
 **Issue:** #41, #49
 
 ## Context
@@ -215,6 +225,16 @@ fetched. Nothing deletes chunk objects today; the sweeper of `docs/DESIGN.md`
   leaves `of.dirty` in place. A `Read` whose step 2 resolved the handle before
   the removal copies bytes that were the file's at its view; one whose step 2
   comes after the removal returns `vfs.ErrStale`.
+- **An attribute change.** A `SetAttr` that sets no size, whether of the mode,
+  the owner, the group or the times, changes only state that `FS.mu` guards:
+  those fields of the inode, its change time, and the flag that marks the
+  namespace dirty. It takes `FS.mu` for writing and never an `openFile.mu`. So a
+  flush of the file that is uploading, which holds the file's `openFile.mu`
+  and not `FS.mu`, does not hold it up, though a commit holding `FS.mu` can
+  (#43; ADR 0002 Assumption 7). It is ordered against step 1 and against step
+  2's hold of `FS.mu`, and can fall between the two while a `Read` waits for
+  the file's lock; step 2's checks then see it (§2). A `SetAttr` that sets a
+  size is a truncate (above).
 - **ADR 0004 §3.** `Read` copies out of `loadChunk`'s result into the reply and
   never writes to it or appends to it.
 - **A commit holding `FS.mu` (#43).** Step 2 can wait for `FS.mu` behind a
@@ -238,6 +258,9 @@ holding `FS.mu` for reading. A test may rely on these behaviours:
 - A flush uploads each chunk of content new to the bucket and to this `FS` with
   the store's `Put`, holding the file's `openFile.mu` (§6; ADR 0004 §5).
 - `Read` never adds an entry to `FS.open`.
+- A `SetAttr` that sets no size takes `FS.mu` for writing and never an
+  `openFile.mu`, so a flush of the file held in a chunk upload does not hold
+  it up (§6, *An attribute change*).
 
 How a test reaches each case:
 
@@ -307,6 +330,15 @@ required.
     ADR 0004. The repository owner may prefer Proposed until the change merges.
 14. **Scope is #41 and #49 only.** Everything under *What this does not decide*
     is left alone on purpose.
+15. **A `SetAttr` that sets no size stays off `openFile.mu`** (§6, §7). Added
+    by the 2026-09-25 revision. The code and ADR 0002 Assumption 7 already had
+    it; pinning it is the judgement. It keeps attribute changes, which touch no
+    buffered state, off the lock that guards buffered state (§3, invariant 1),
+    and it is the only way a test can change a file's permissions while a
+    `Read` of the file waits for that lock. The cost is that ordering attribute
+    changes against a flush through `openFile.mu` now needs a revision of this
+    ADR. Such a change should come with one anyway: it would add a holder of
+    the lock §6 describes, and a wait to ADR 0002 Assumption 7's list.
 
 ## Alternatives considered
 
