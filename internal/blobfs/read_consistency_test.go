@@ -55,9 +55,11 @@ package blobfs
 // Not covered, on purpose:
 //   - Truncate interleavings: a Read meeting a size change (§1's atomicity
 //     against a size change, §6's truncate bullet, eof decided by the size at
-//     the view). Nothing here truncates or sets a size, so that no test
-//     depends on what a pending trim means, which §1 puts outside this ADR
-//     (#40, #56) and §7 tells a test to avoid.
+//     the view). Nothing here truncates or sets a size. What a Read returns
+//     for a pending trim, which §1 and §2 now make part of the view (ADR 0006
+//     §1, §6), is covered by pending_trim_test.go, including a Read held in its
+//     fetch across the flush that applies the trim (§5, §6); a Read running
+//     concurrently with the truncate itself is not.
 //   - Symlinks: §1 defines what a Read of a regular file returns, and nothing
 //     else.
 //   - A Read whose file goes by a Rename over it, the other way ADR 0003 §2

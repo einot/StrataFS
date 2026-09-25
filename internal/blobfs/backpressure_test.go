@@ -2,19 +2,30 @@ package blobfs
 
 // Clean-room tests for the wiring of ADR 0003's write-backpressure budget into
 // blobfs, written from docs/adr/0003-write-backpressure.md as revised through
-// 2026-09-24 and from internal/vfs/vfs.go, without reading the implementation.
-// They cover §1 (New's mapping of Config.MaxDirtyBytes onto the budget); §2
-// (the five accounting sites; ordering, preconditions and the invariant; "Why
-// site 4 releases on a failed flush"; and the table "What each operation does
-// to DirtyBytes()", with each truncate row reached as its closing list says);
-// §3 (every call that a lock held across the wait could deadlock is bounded);
-// §4 (where Write waits, the paths that never wait, the chunk list read after
-// the wait and its trace, if the inode goes away, stable writes, what Write
-// returns when the wait fails, and the test surface); §5 (a read-only store,
-// and divergence); §6 (the bound, for one writer and at every instant); §7
-// (the three records, seen through Write); §8 (DirtyBytes); Assumptions 6 and
-// 15-18; and the Pinner bullet of "What this does not decide". The budget type
-// on its own is covered by budget_test.go, whose helpers this file reuses.
+// 2026-09-25, for ADR 0006, from docs/adr/0006-a-pending-trim-is-part-of-the-file.md
+// §3, §5, §7 and §8, and from internal/vfs/vfs.go, without reading the
+// implementation. They cover §1 (New's mapping of Config.MaxDirtyBytes onto
+// the budget); §2 (the five accounting sites; ordering, preconditions and the
+// invariant; "Why site 4 releases on a failed flush"; and the table "What each
+// operation does to DirtyBytes()", with each truncate row reached as its
+// closing list says); §3 (every call that a lock held across the wait could
+// deadlock is bounded); §4 (where Write waits, the paths that never wait, the
+// chunk list read after the wait and its trace, if the inode goes away, stable
+// writes, what Write returns when the wait fails, and the test surface); §5 (a
+// read-only store, and divergence); §6 (the bound, for one writer and at every
+// instant); §7 (the three records, seen through Write); §8 (DirtyBytes);
+// Assumptions 6 and 15-18; and the Pinner bullet of "What this does not
+// decide". The budget type on its own is covered by budget_test.go, whose
+// helpers this file reuses.
+//
+// Since ADR 0006, truncate never stages a chunk from the cache and never
+// charges, and a flush applies a pending trim through a copy of its own that
+// never enters of.dirty and is never charged, so sites 3 and 4 only release
+// and site 1 alone adds (ADR 0003 §2; ADR 0006 §7). The truncate rows of F2,
+// the site-4 rows for a file whose inode is still there, and F11 pin that.
+// openFile.pendingTrim is read only through its length (bpSnapshot). What a
+// pending trim means to Read, Write and a flush is covered by
+// pending_trim_test.go.
 //
 // Every call that could hang runs in its own goroutine (bpGo) and is waited
 // for under btHangBound, and the failure names the call. States are reached by
@@ -930,43 +941,49 @@ func TestBackpressureAccountingTable(t *testing.T) {
 		})
 	})
 
-	t.Run("truncate staging a cached chunk, then a write growing it", func(t *testing.T) {
-		fs := bpNew(t, bpLocal(t), -1, quietLog())
-		h, attr := bpCreate(t, fs, "staged.bin", 0)
-		bpMustWrite(t, fs, "6000 bytes of content new to the bucket", h, 0, bpUnique(6000))
-		bpMustSync(t, fs, "Sync uploading both chunks for the first time, which caches them")
+	t.Run("truncate into a cached chunk, then a write into it", func(t *testing.T) {
+		st := bpLocal(t)
+		fs := bpNew(t, st, -1, quietLog())
+		const name = "cached.bin"
+		h, attr := bpCreate(t, fs, name, 0)
+		data := bpUnique(6000)
+		bpMustWrite(t, fs, "6000 bytes of content new to the bucket", h, 0, data)
+		bpMustSync(t, fs, "Sync uploading both chunks for the first time, which caches them "+
+			"(ADR 0004 §5)")
 		bpWantDirty(t, fs, "after that Sync", 0)
 
-		before := fs.DirtyBytes()
-		bpTruncate(t, fs, h, 5000, "SetAttr(size 5000), into chunk 1, which this FS's cache holds")
+		truncWhat := "truncate to 5000, into chunk 1, which this FS's cache holds (0: a truncate " +
+			"into a stored chunk that is not dirty, cached or not, adds nothing; ADR 0006 §3(d))"
+		bpStep(t, fs, truncWhat, 0, func() {
+			bpTruncate(t, fs, h, 5000, "SetAttr(size 5000), into cached chunk 1")
+		})
 		of := bpMustOpen(t, fs, attr.FileID, "after the truncate")
 		s := bpSnapshot(t, of, "after the truncate")
-		staged, ok := s.caps[1]
-		if !ok {
-			t.Fatalf("after truncating into chunk 1, of.dirty holds indices %v and %d pending "+
-				"trims, want a staged entry at index 1: a flush on the same FS that uploads "+
-				"the content for the first time puts it in the cache (ADR 0003 §2, "+
-				"\"Staging from the cache\")", s.indices(), s.pending)
+		if _, dirty := s.caps[1]; dirty || s.pending != 1 {
+			t.Errorf("after truncating into chunk 1, which this FS's cache holds, of.dirty holds "+
+				"indices %v and len(of.pendingTrim) = %d, want index 1 absent and one pending "+
+				"trim: truncate never reads the chunk cache and never stages a buffer in "+
+				"of.dirty (ADR 0006 §3(b), (d); ADR 0003 §2's table)", s.indices(), s.pending)
 		}
-		if got := fs.DirtyBytes() - before; got != int64(staged) {
-			t.Errorf("truncate staging a cached chunk changed DirtyBytes() by %d, want +cap "+
-				"of the staged copy, read from the map: %d (ADR 0003 §2's table)", got, staged)
-		}
-		bpCheckAccounting(t, fs, "truncate staging a cached chunk")
 
-		before = fs.DirtyBytes()
-		bpMustWrite(t, fs, "2000 bytes at 5000, growing the staged buffer", h, 5000, bpUnique(2000))
-		s2 := bpSnapshot(t, of, "after the growing write")
-		grown, ok := s2.caps[1]
-		if !ok {
-			t.Fatalf("after a write into index 1, of.dirty holds indices %v, want index 1", s2.indices())
+		w := bpUnique(2000)
+		writeWhat := "2000 bytes at 5000, into index 1, absent from of.dirty with a pending trim " +
+			"(+cs exactly, ADR 0003 §2's table)"
+		bpStep(t, fs, writeWhat, bpCS, func() {
+			bpMustWrite(t, fs, "Write of 2000 bytes at 5000", h, 5000, w)
+		})
+		if s := bpSnapshot(t, of, "after the write"); s.pending != 0 {
+			t.Errorf("after a write into index 1, len(of.pendingTrim) = %d, want 0: a Write into "+
+				"an index that has an entry removes the entry (ADR 0006 §4, §8)", s.pending)
 		}
-		if got := fs.DirtyBytes() - before; got != int64(grown-staged) {
-			t.Errorf("a write growing a buffer truncate staged changed DirtyBytes() by %d, "+
-				"want +(new cap − old cap) = %d − %d = %d, read from the map (ADR 0003 "+
-				"§2's table)", got, grown, staged, grown-staged)
-		}
-		bpCheckAccounting(t, fs, "a write growing a staged buffer")
+
+		want := append(append([]byte(nil), data[:5000]...), w...)
+		bpWantFile(t, fs, h, want, "the file truncated into its cached chunk 1 and written at 5000")
+		bpMustSync(t, fs, "Sync of the truncate and the write")
+		bpWantDirty(t, fs, "after that Sync", 0)
+		bpWantFile(t, fs, h, want, "the file truncated into its cached chunk 1 and written at 5000, "+
+			"after a Sync")
+		bpWantRemount(t, st, name, want, "the file truncated into its cached chunk 1 and written at 5000")
 	})
 
 	t.Run("truncate deferring to pendingTrim", func(t *testing.T) {
@@ -985,7 +1002,8 @@ func TestBackpressureAccountingTable(t *testing.T) {
 				"0003 §2)", s.pending)
 		}
 		bpMustSync(t, fs, "Sync resolving the pending trim")
-		bpWantDirty(t, fs, "after that Sync (charged, then released, inside the flush)", 0)
+		bpWantDirty(t, fs, "after that Sync (0 at the next flush too: a flush applies the trim "+
+			"through a copy it never charges, ADR 0006 §5)", 0)
 		bpCheckAccounting(t, fs, "after the Sync that resolved the pending trim")
 		bpWantFile(t, fs, h, data[:5000], "the truncated file on the FS that truncated it")
 		bpWantRemount(t, st, name, data[:5000], "the truncated file")
@@ -1025,101 +1043,139 @@ func TestBackpressureAccountingTable(t *testing.T) {
 		})
 	})
 
+	t.Run("two truncates leave one pending trim", func(t *testing.T) {
+		bpTwoTruncates(t)
+	})
 	t.Run("site 4, inode still there, pending-trim fetch fails", func(t *testing.T) {
 		bpSite4Kept(t, true)
 	})
 	t.Run("site 4, inode still there, upload fails", func(t *testing.T) {
 		bpSite4Kept(t, false)
 	})
-	t.Run("site 4, inode still there, second of two pending-trim fetches fails", func(t *testing.T) {
-		bpTwoTrimsKept(t)
+	t.Run("pending-trim fetch fails after a dirty index", func(t *testing.T) {
+		bpTrimFetchFailsAfterDirty(t)
 	})
 }
 
-// bpTwoTrims truncates h, a stored three-chunk file on a fresh mount that has
-// not read it, first into chunk 2 and then into chunk 1. Each truncate lands in
-// a stored chunk this FS's cache does not hold, so each defers to pendingTrim
-// (ADR 0003 §2, "Deferring to pendingTrim"), and the two are separate cache
-// misses when the next flush materialises them. It returns the file's
-// openFile, holding two pending trims and no charge.
-func bpTwoTrims(t *testing.T, fs *FS, h vfs.Handle, id uint64) *openFile {
-	t.Helper()
-	bpTruncate(t, fs, h, 10000, "SetAttr(size 10000), into stored chunk 2, on a fresh mount")
-	bpTruncate(t, fs, h, 5000, "SetAttr(size 5000), into stored chunk 1, on a fresh mount")
-	of := bpMustOpen(t, fs, id, "after the two deferred truncates")
-	if s := bpSnapshot(t, of, "after the two deferred truncates"); s.pending != 2 {
-		t.Fatalf("setup: len(of.pendingTrim) = %d after truncating an unread file on a fresh "+
-			"mount into chunk 2 and then into chunk 1, want 2. This is a precondition of the "+
-			"test, not a finding against ADR 0003: the ADR does not say whether a later "+
-			"truncate keeps a pending trim that it has left past the end of the file, and "+
-			"this case needs two pending trims in different chunks", s.pending)
-	}
-	bpWantDirty(t, fs, "after two truncates deferring to pendingTrim (0 now)", 0)
-	return of
-}
-
-// bpTwoTrimsKept pins ADR 0003 §2's row "flushOpen failing while it fetches a
-// pendingTrim chunk, its inode still there | what it had materialised stays
-// charged, until the file's next successful flush", and site 4: "If the inode
-// is still there, leave everything charged: those buffers really are held, and
-// the file's next flush retries them" (Assumption 18). The file has two pending
-// trims, and the flush's first fetch succeeds, so one trim is materialised and
-// charged before the second fetch fails. The ADR does not pin the order in
-// which flushOpen resolves pending trims, so the hook fails whichever fetch
-// comes second, and the materialised entry is read from the map. An
-// implementation that dropped what it had materialised on a failed fetch would
-// leave DirtyBytes() at 0.
-func bpTwoTrimsKept(t *testing.T) {
+// bpTwoTruncates pins ADR 0003 §2's row "truncate into a stored chunk that is
+// not dirty, cached or not | 0, now and at the next flush", for two truncates
+// of a stored three-chunk file on a fresh mount that has not read it: first
+// into chunk 2, then into chunk 1. ADR 0006 §3(a) drops the entry at index 2,
+// past the new end, and (b) makes one at index 1, so the file holds one
+// pending trim (§2 I4; §8: "After any truncate a file has at most one
+// entry"). Before ADR 0006 each truncate appended an entry and the file held
+// two.
+func bpTwoTruncates(t *testing.T) {
 	t.Helper()
 	st := bpLocal(t)
-	const name = "two-trims-kept.bin"
+	const name = "two-truncates.bin"
 	data := bpSeedFile(t, st, name, 3*bpCS)
+	fs := bpNew(t, st, -1, quietLog())
+	h, attr := bpLookup(t, fs, name)
+	bpStep(t, fs, "truncate to 10000, into stored chunk 2, on a fresh mount (0)", 0, func() {
+		bpTruncate(t, fs, h, 10000, "SetAttr(size 10000) on a fresh mount")
+	})
+	bpStep(t, fs, "truncate to 5000, into stored chunk 1 (0)", 0, func() {
+		bpTruncate(t, fs, h, 5000, "SetAttr(size 5000) on a fresh mount")
+	})
+	of := bpMustOpen(t, fs, attr.FileID, "after the two truncates")
+	if s := bpSnapshot(t, of, "after the two truncates"); s.pending != 1 || len(s.caps) != 0 {
+		t.Errorf("after truncating an unread file on a fresh mount into chunk 2 and then into "+
+			"chunk 1, len(of.pendingTrim) = %d and of.dirty holds indices %v, want 1 and none: "+
+			"the second truncate drops the entry past its end and makes one at index 1 (ADR "+
+			"0006 §3(a), (b); §2 I4), and truncate never stages (§3(d))", s.pending, s.indices())
+	}
+	bpWantDirty(t, fs, "after the two truncates", 0)
+
+	bpWantFile(t, fs, h, data[:5000], "the twice-truncated file, before the Sync")
+	bpMustSync(t, fs, "Sync applying the pending trim")
+	bpWantDirty(t, fs, "after the Sync (a flush applies the trim through a copy it never "+
+		"charges, ADR 0006 §5)", 0)
+	bpCheckAccounting(t, fs, "after the Sync")
+	bpWantFile(t, fs, h, data[:5000], "the twice-truncated file after the Sync")
+	bpWantRemount(t, st, name, data[:5000], "the twice-truncated file after the Sync")
+}
+
+// bpTrimFetchFailsAfterDirty pins ADR 0003 §2's rows "Write to an index absent
+// from of.dirty | +cs exactly" and "flushOpen failing while it fetches a
+// pending trim's chunk, its inode still there | 0: a trim is never charged,
+// and it stays pending", and site 4: "If the inode is still there, leave
+// everything charged: those buffers really are held, and the file's next
+// flush retries them" (Assumption 18); with ADR 0006 §5: "A fetch or an
+// upload that fails repoints nothing, and leaves of.dirty and of.pendingTrim
+// as they were". The file is truncated into chunk 1, which queues a trim, and
+// then written at index 0, which makes that index dirty; only then is every
+// chunk Get made to fail, so the flush's fetch of the trimmed chunk fails. The
+// dirty index stays charged, and the trim stays pending. The order in which
+// the flush uploads and fetches is not pinned (ADR 0006 §5), so the index-0
+// upload may or may not have happened; either way nothing is repointed.
+//
+// It replaces a case with two pending trims, the first materialised and
+// charged before the second fetch failed, which ADR 0006 made unreachable: a
+// file has at most one entry (§2 I4), and a flush never charges one (§5).
+func bpTrimFetchFailsAfterDirty(t *testing.T) {
+	t.Helper()
+	st := bpLocal(t)
+	const name = "dirty-then-trim.bin"
+	data := bpSeedFile(t, st, name, 2*bpCS)
 	bps := &bpStore{Store: st}
 	fs := bpNew(t, bps, -1, quietLog())
 	h, attr := bpLookup(t, fs, name)
-	of := bpTwoTrims(t, fs, h, attr.FileID)
+	bpStep(t, fs, "truncate to 5000 on a fresh mount, deferring to pendingTrim (0)", 0, func() {
+		bpTruncate(t, fs, h, 5000, "SetAttr(size 5000) on a fresh mount")
+	})
+	w := bpUnique(10)
+	bpStep(t, fs, "10 bytes at 100, into index 0, absent from of.dirty (+cs)", bpCS, func() {
+		bpMustWrite(t, fs, "Write of 10 bytes at 100", h, 100, w)
+	})
+	of := bpMustOpen(t, fs, attr.FileID, "after the truncate and the write")
 
-	injected := errors.New("backpressure test: injected failure of the second pending-trim fetch")
-	get := &bpHook{passFirst: 1, err: injected}
+	injected := errors.New("backpressure test: injected failure of every chunk Get")
+	get := &bpHook{err: injected}
 	bps.setGet(get)
-	if err := bpSync(t, fs, "Sync whose second pending-trim fetch fails"); err == nil {
-		t.Fatalf("Sync whose second chunk fetch fails = nil, want an error (the flush made %d "+
-			"chunk fetches)", bps.callsOf(get))
+	if err := bpSync(t, fs, "Sync whose pending-trim fetch fails"); err == nil {
+		t.Fatalf("Sync with every chunk Get failing = nil, want an error: the flush has a pending "+
+			"trim of a chunk this FS has not read (it made %d chunk fetches)", bps.callsOf(get))
 	}
 	s := bpSnapshot(t, of, "after the failed Sync")
-	if len(s.caps) != 1 {
-		t.Fatalf("after the first pending trim was materialised and the second one's fetch "+
-			"failed, of.dirty holds indices %v, want exactly the one materialised entry: "+
-			"with the inode still there, what flushOpen had materialised stays charged "+
-			"(ADR 0003 §2's table); the flush made %d chunk fetches", s.indices(), bps.callsOf(get))
+	if idx := s.indices(); len(idx) != 1 || idx[0] != 0 {
+		t.Errorf("after a flush that failed fetching the pending trim's chunk, of.dirty holds "+
+			"indices %v, want [0]: a failed fetch leaves of.dirty as it was (ADR 0006 §5)", idx)
 	}
-	var materialised int
-	for _, c := range s.caps {
-		materialised = c
+	if s.pending != 1 {
+		t.Errorf("after a flush that failed fetching the pending trim's chunk, "+
+			"len(of.pendingTrim) = %d, want 1: with the inode still there, a failed fetch leaves "+
+			"of.pendingTrim as it was, and the file's next flush applies it (ADR 0006 §5)", s.pending)
 	}
-	if got := fs.DirtyBytes(); got != int64(materialised) {
-		t.Errorf("after a flush that materialised one pending trim and then failed fetching "+
-			"the next, with the inode still there, DirtyBytes() = %d, want the cap of the "+
-			"materialised entry, read from the map: %d (ADR 0003 §2's table: \"what it had "+
-			"materialised stays charged\")", got, materialised)
-	}
-	bpCheckAccounting(t, fs, "after the failed Sync with one trim materialised")
+	bpWantDirty(t, fs, "after the failed Sync (index 0 stays charged, the trim is never charged)", bpCS)
+	bpCheckAccounting(t, fs, "after the failed Sync")
 
 	bps.setGet(nil)
+	want := append([]byte(nil), data[:5000]...)
+	copy(want[100:], w)
+	bpWantFile(t, fs, h, want, "the truncated and written file, before the retried Sync")
 	bpMustSync(t, fs, "Sync after the store recovered")
 	bpWantDirty(t, fs, "after the retried flush succeeded", 0)
 	bpCheckAccounting(t, fs, "after the retried flush")
-	bpWantFile(t, fs, h, data[:5000], "the twice-truncated file after the retried flush")
-	bpWantRemount(t, st, name, data[:5000], "the twice-truncated file after the retried flush")
+	bpWantFile(t, fs, h, want, "the truncated and written file after the retried flush")
+	bpWantRemount(t, st, name, want, "the truncated and written file after the retried flush")
 }
 
-// bpSite4Kept is F2's two site-4 rows for a file whose inode is still there:
-// "flushOpen failing while it fetches a pendingTrim chunk, its inode still
-// there | what it had materialised stays charged", "flushOpen failing during
-// upload, its inode still there | unchanged, plus anything it materialised
-// from pendingTrim", and §2 site 4: "If the inode is still there, leave
-// everything charged: those buffers really are held, and the file's next
-// flush retries them" (Assumption 18).
+// bpSite4Kept is F2's two site-4 rows for a file whose inode is still there,
+// as ADR 0006 restated them: "flushOpen failing while it fetches a pending
+// trim's chunk, its inode still there | 0: a trim is never charged, and it
+// stays pending", and "flushOpen failing during upload, its inode still there
+// | unchanged; trims stay pending"; with ADR 0006 §5: the flush's copy of the
+// trimmed chunk "never enters of.dirty and is never charged", and "A fetch or
+// an upload that fails repoints nothing, and leaves of.dirty and
+// of.pendingTrim as they were, so the file's next flush applies the trims
+// again". The file's only state is one pending trim, so either failure leaves
+// DirtyBytes() unchanged at 0, of.dirty empty and the trim pending. Before
+// ADR 0006 the upload case had materialised the trim into of.dirty and
+// charged it.
+//
+// Nothing reads the file before the failing Sync, so that the flush has to
+// fetch the trimmed chunk from the store rather than find it in the cache.
 func bpSite4Kept(t *testing.T, failGet bool) {
 	t.Helper()
 	st := bpLocal(t)
@@ -1137,45 +1193,37 @@ func bpSite4Kept(t *testing.T, failGet bool) {
 	}
 
 	injected := errors.New("backpressure test: injected store failure")
+	failing, failed := "Put", "upload"
 	if failGet {
+		failing, failed = "Get", "fetch"
 		bps.setGet(&bpHook{err: injected})
 	} else {
 		bps.setPut(&bpHook{err: injected})
 	}
 	before := fs.DirtyBytes()
 	if err := bpSync(t, fs, "Sync with the store failing"); err == nil {
-		t.Fatalf("Sync with every chunk %s failing = nil, want an error",
-			map[bool]string{true: "Get", false: "Put"}[failGet])
+		t.Fatalf("Sync with every chunk %s failing = nil, want an error", failing)
 	}
 	s := bpSnapshot(t, of, "after the failed Sync")
-	if failGet {
-		if got := fs.DirtyBytes() - before; got != 0 {
-			t.Errorf("a flush failing while it fetches its only pendingTrim chunk changed "+
-				"DirtyBytes() by %d, want 0: it had materialised nothing", got)
-		}
-		if s.pending != 1 {
-			t.Errorf("after the failed fetch, len(of.pendingTrim) = %d, want 1: with the "+
-				"inode still there, the file's next flush retries it", s.pending)
-		}
-	} else {
-		if s.pending != 0 {
-			t.Errorf("after the trim was materialised, len(of.pendingTrim) = %d, want 0", s.pending)
-		}
-		idx := s.indices()
-		if len(idx) != 1 || idx[0] != 1 {
-			t.Fatalf("after the failed upload, of.dirty holds indices %v, want the one "+
-				"materialised entry at [1]", idx)
-		}
-		if got := fs.DirtyBytes(); got != int64(s.caps[1]) {
-			t.Errorf("after a failed upload of the materialised trim, DirtyBytes() = %d, want "+
-				"the cap of the one materialised entry, read from the map: %d (\"unchanged, "+
-				"plus anything it materialised from pendingTrim\")", got, s.caps[1])
-		}
+	if got := fs.DirtyBytes() - before; got != 0 {
+		t.Errorf("a flush whose %s of its only pending trim failed changed DirtyBytes() by %d, "+
+			"want 0: a trim is never charged (ADR 0006 §5; ADR 0003 §2's table)", failed, got)
+	}
+	if len(s.caps) != 0 {
+		t.Errorf("after a flush whose %s of its only pending trim failed, of.dirty holds indices "+
+			"%v, want none: the flush's copy of the trimmed chunk never enters of.dirty (ADR 0006 "+
+			"§5)", failed, s.indices())
+	}
+	if s.pending != 1 {
+		t.Errorf("after a flush whose %s of its only pending trim failed, len(of.pendingTrim) = "+
+			"%d, want 1: with the inode still there, a failed %s leaves of.pendingTrim as it was, "+
+			"and the file's next flush applies it again (ADR 0006 §5)", failed, s.pending, failed)
 	}
 	bpCheckAccounting(t, fs, "after the failed Sync")
 
 	bps.setGet(nil)
 	bps.setPut(nil)
+	bpWantFile(t, fs, h, data[:5000], "the truncated file after the failed flush, before the retry")
 	bpMustSync(t, fs, "Sync after the store recovered")
 	bpWantDirty(t, fs, "after the retried flush succeeded", 0)
 	bpCheckAccounting(t, fs, "after the retried flush")
@@ -1682,13 +1730,18 @@ func TestBackpressurePathsThatNeverWait(t *testing.T) {
 	b.release(t)
 }
 
-// TestBackpressureTruncateChargesWithoutWaiting (F11) pins ADR 0003 §2 site 3,
-// "Charged without waiting — see §6 and Assumption 6", and Assumption 6:
-// "truncate and the pendingTrim path charge without waiting and may therefore
-// push the charge above the limit". With the budget at its limit and a drain
-// held, a truncate that stages a cached chunk returns and charges the staged
-// copy's cap.
-func TestBackpressureTruncateChargesWithoutWaiting(t *testing.T) {
+// TestBackpressureTruncateNeverChargesOrWaits (F11) pins ADR 0003 §2 site 3,
+// "subtract cap for every map entry it deletes, and add nothing ... It never
+// waits", and its table's row "truncate into a stored chunk that is not dirty,
+// cached or not | 0"; with ADR 0006 §3(d), truncate "never reads the chunk
+// cache, never stages a buffer in of.dirty, never charges the budget and never
+// waits", and §7, "truncate does not wait on the budget, because it adds
+// nothing for a wait to bound". With the budget at its limit and a drain held,
+// a truncate of T into its chunk 1, which this FS's cache holds, returns
+// without parking, leaves DirtyBytes() unchanged, and queues a trim at index 1
+// without making it dirty. Before ADR 0006 it staged the cached chunk in
+// of.dirty and charged it without waiting.
+func TestBackpressureTruncateNeverChargesOrWaits(t *testing.T) {
 	var (
 		th    vfs.Handle
 		tid   uint64
@@ -1704,26 +1757,33 @@ func TestBackpressureTruncateChargesWithoutWaiting(t *testing.T) {
 	})
 	fs := b.fs
 	before := fs.DirtyBytes()
-	bpTruncate(t, fs, th, 5000, "SetAttr(T, size 5000) with the budget at its limit and a "+
-		"drain held (truncate charges without waiting, ADR 0003 Assumption 6)")
-	s := bpSnapshot(t, bpMustOpen(t, fs, tid, "T after the truncate"), "T after the truncate")
-	staged, ok := s.caps[1]
-	if !ok {
-		t.Fatalf("after truncating T into its cached chunk 1, of.dirty holds indices %v and "+
-			"%d pending trims, want a staged entry at index 1 (ADR 0003 §2, \"Staging from "+
-			"the cache\")", s.indices(), s.pending)
-	}
-	if got := fs.DirtyBytes() - before; got != int64(staged) {
-		t.Errorf("truncate staging a cached chunk while the budget was at its limit changed "+
-			"DirtyBytes() by %d, want +cap(of.dirty[1]) = %d", got, staged)
-	}
+	bpTruncate(t, fs, th, 5000, "SetAttr(T, size 5000), into its cached chunk 1, with the budget "+
+		"at its limit and a drain held (a hang here means truncate waited on the budget, ADR 0006 "+
+		"§3(d), §7)")
+	bpWantDirty(t, fs, "after truncating T into its cached chunk 1 with the budget at its limit "+
+		"(ADR 0006 §3(d): truncate never charges the budget)", before)
 	if w := fs.budget.waiters(); w != 0 {
 		t.Errorf("waiters() = %d after the truncate, want 0: truncate never waits", w)
 	}
+	s := bpSnapshot(t, bpMustOpen(t, fs, tid, "T after the truncate"), "T after the truncate")
+	if _, dirty := s.caps[1]; dirty || s.pending != 1 {
+		t.Errorf("after truncating T into its cached chunk 1, of.dirty holds indices %v and "+
+			"len(of.pendingTrim) = %d, want index 1 absent and one pending trim: truncate never "+
+			"reads the chunk cache and never stages a buffer in of.dirty (ADR 0006 §3(b), (d))",
+			s.indices(), s.pending)
+	}
 	b.stillBlocked(t, "after the truncate")
 	b.release(t)
+
+	want := tdata[:5000]
+	bpWantFile(t, fs, th, want, "T after the truncate, before the Sync")
 	bpMustSync(t, fs, "Sync after the drain")
-	bpWantFile(t, fs, th, tdata[:5000], "T after the truncate")
+	bpWantFile(t, fs, th, want, "T after the truncate and a Sync")
+	st, ok := b.bps.Store.(*store.Local)
+	if !ok {
+		t.Fatalf("bpBlockDrain's store wraps a %T, want *store.Local", b.bps.Store)
+	}
+	bpWantRemount(t, st, "t.bin", want, "T after the truncate and a Sync")
 }
 
 // bpReadOnlyStore is F12 with the second write sent as how.
@@ -2051,68 +2111,22 @@ func bpSite4Gone(t *testing.T, failGet bool) {
 // take FS.mu as well ... and check whether the inode has gone ... If it has,
 // release the file's whole remaining charge with of.bytes.Swap(0), reset
 // of.dirty to an empty map and of.pendingTrim to nil", "Why site 4 releases on
-// a failed flush", and Assumption 18. Without the check, the upload case would
-// leave the materialised chunk charged for good. In the "fetch fails" case the
-// only pending trim is the one whose fetch fails, so nothing is charged when
-// the flush fails; bpTwoTrimsGone covers a fetch failure with a trim already
-// materialised and charged.
+// a failed flush", and Assumption 18. Since ADR 0006 a flush applies a trim
+// through a copy it never charges (§5), so a failed flush of a removed file
+// finds nothing charged to it; the check stays for its reset (ADR 0006
+// Assumption 9), which these cases see as an empty of.dirty and no pending
+// trims, and for keeping DirtyBytes() at 0.
+//
+// A third case used to be here: two pending trims, the file removed while the
+// flush was held in the first fetch, that trim materialised and charged, and
+// the second fetch failing. It is gone because it cannot happen any more, not
+// because it went untested: a file has at most one pending trim (ADR 0006 §2,
+// I4), and a flush never charges one (§5), so nothing can be charged to the
+// removed file when a fetch fails. bpSite4Gone(t, true) covers the fetch
+// failure that remains.
 func TestBackpressureFailedFlushOfRemovedFileReleases(t *testing.T) {
 	t.Run("upload fails", func(t *testing.T) { bpSite4Gone(t, false) })
 	t.Run("fetch fails", func(t *testing.T) { bpSite4Gone(t, true) })
-	t.Run("second of two pending-trim fetches fails", func(t *testing.T) { bpTwoTrimsGone(t) })
-}
-
-// bpTwoTrimsGone is F18 with something charged when the fetch fails. The file
-// has two pending trims in different chunks (bpTwoTrims). Its flush is held in
-// the first of the two fetches while the file is removed, so site 5's release
-// comes before anything is materialised. The first fetch then succeeds, and
-// that trim is materialised and charged to an openFile that FS.open no longer
-// holds. The second fetch fails. Site 4's check on that failed return must
-// find the inode gone and release the file's whole remaining charge (ADR 0003
-// §2, site 4 and "Why site 4 releases on a failed flush": "One that fails would
-// strand it for good without the check"; Assumption 18). An implementation
-// that reset of.dirty and of.pendingTrim on the fetch path without releasing
-// would leave the materialised entry's cap on the budget for good. The ADR
-// does not pin the order in which flushOpen resolves pending trims, so the
-// hook holds whichever fetch comes first and fails whichever comes second.
-//
-// The removal is made during the first fetch rather than the second: made
-// during the second, it would come after the first trim was charged, site 5's
-// Swap would release that charge itself, and of.bytes would be 0 at the failed
-// fetch whatever site 4 did.
-func bpTwoTrimsGone(t *testing.T) {
-	t.Helper()
-	st := bpLocal(t)
-	const name = "two-trims-gone.bin"
-	bpSeedFile(t, st, name, 3*bpCS)
-	bps := &bpStore{Store: st}
-	fs := bpNew(t, bps, 0, quietLog())
-	h, attr := bpLookup(t, fs, name)
-	of := bpTwoTrims(t, fs, h, attr.FileID)
-
-	gate := newBTGate(t)
-	injected := errors.New("backpressure test: injected failure of the second pending-trim fetch")
-	get := &bpHook{entered: make(chan struct{}), gate: gate.ch, passFirst: 1, err: injected}
-	bps.setGet(get)
-	syncCall := bpGo(func() error { return fs.Sync(context.Background()) })
-	bpWaitEntered(t, "the flush's first pending-trim fetch", get.entered, syncCall)
-	bpRemove(t, fs, name, "Remove of the file while its flush is held in the first of its "+
-		"two pending-trim fetches")
-	gate.open()
-	if err := syncCall.wait(t, "Sync, after the first fetch was released"); err == nil {
-		t.Errorf("Sync = nil, want an error: the flush's second pending-trim fetch failed "+
-			"(the flush made %d chunk fetches)", bps.callsOf(get))
-	}
-	bpWantDirty(t, fs, "after a flush of a removed file that materialised one pending trim "+
-		"and then failed fetching the next (site 4 releases the file's whole remaining charge)", 0)
-	s := bpSnapshot(t, of, "the removed file's openFile after the failed flush")
-	if s.bytes != 0 || len(s.caps) != 0 || s.pending != 0 {
-		t.Errorf("the removed file's openFile holds of.bytes = %d, dirty indices %v and %d "+
-			"pending trims, want 0, none and 0: on a failed return with the inode gone, site "+
-			"4 releases the file's whole remaining charge with of.bytes.Swap(0), resets "+
-			"of.dirty to an empty map and of.pendingTrim to nil (ADR 0003 §2)",
-			s.bytes, s.indices(), s.pending)
-	}
 }
 
 // bpPanic is what the drain's Put panics with in F19.
