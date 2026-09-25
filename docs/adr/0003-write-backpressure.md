@@ -176,8 +176,13 @@
   alone adds. The decision, §4's algorithm, G1–G3, sites 1, 2 and 5, §3's lock
   rules, every pinned name and signature except the type of
   `openFile.pendingTrim`, and all numbering are unchanged, and no assumption is
-  added. Every sentence this pass rewrites cites code by symbol, because line
-  numbers move. What changed:
+  added. In each site, table row, paragraph, bullet and assumption this pass
+  rewrites, code in `internal/blobfs` is cited by symbol, because line numbers
+  move, and was checked against `7454bc4`. The line numbers those passages
+  keep, in sentences this pass left as they were, point into `internal/sunrpc`,
+  `internal/nfs` and `internal/xdr`, and match `7454bc4` as well. Elsewhere the
+  line numbers are as the earlier revisions left them, and not all of them
+  still match the code. What changed:
   **§1** — *There is no minimum* no longer counts `truncate`'s charges among
   the reasons a successful drain need not take the charge to zero.
   **§2** — the capacity paragraph drops its exception for buffers staged at a
@@ -199,9 +204,8 @@
   flush's transient copy for a pending trim; and the paragraph on an exact
   ceiling no longer needs `truncate` restructured.
   **Assumptions** — 6 is rewritten, keeping its history, #56's figures and the
-  alternative of waiting in `truncate`; 17 cites `New`'s default by symbol,
-  because the code at `fs.go:139-140` had moved; 18, 20 and 21 follow
-  ADR 0006.
+  alternative of waiting in `truncate`; 17 cites both defaults, `New`'s and
+  `newChunkCache`'s, by symbol; 18, 20 and 21 follow ADR 0006.
   ***What this does not decide*** — *Stale reads and resurrected truncated
   bytes* now ends by saying that ADR 0006 decides #40, together with #56.
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
@@ -295,7 +299,7 @@ default of 256 MiB is the issue's suggestion.
 There is **no minimum**. With the check-then-proceed discipline in §4 any
 positive limit keeps the system moving: a writer is admitted whenever the
 current charge is below the limit, and a drain that succeeds releases every file
-on the list `flushAll` took when it began (`internal/blobfs/fs.go:1357-1364`).
+on the list `flushAll` took when it began (`internal/blobfs/fs.go`).
 The first version said a successful drain takes the charge to zero. That holds
 only while nothing else writes. Releases during a drain wake parked calls, which
 are admitted while it is still running; and files opened after it began are not
@@ -342,7 +346,8 @@ adds 10 to `DirtyBytes()` is asserting the defect.
 Capacity is `cs` exactly for any buffer the write path allocates: `make([]byte,
 0, cs)` yields `cap == cs` — the language guarantees the capacity `make` was
 asked for, whatever the allocator rounds up to underneath — and the subsequent
-`append` at `fs.go:1161-1163` never needs more than `cs`, so it never grows.
+`append` in `bufferWrite` that grows it to cover the write never needs more
+than `cs`, so it never grows.
 Since ADR 0006 the write path is the only thing that puts a buffer in
 `of.dirty`: `truncate` stages none, and a flush applies a pending trim without
 buffering it. Until then, `truncate` and the flush staged buffers at a partial
@@ -380,10 +385,10 @@ whatever the capacity.
    is this site's addition.
 3. **`truncate`**, under `openFile.mu` and `FS.mu`: subtract `cap` for every map
    entry it deletes, and add nothing. The **shortened tail chunk contributes
-   no delta**: `of.dirty[lastIdx] =
-   chunk[:tail]` (`fs.go:1234`) is a reslice, so `len` falls and `cap` does
-   not, and the backing array is still resident. Not subtracting there is
-   accuracy, not conservatism — the memory really is still held. (The first
+   no delta**: `of.dirty[lastIdx] = chunk[:tail]`, in `truncate`, is a
+   reslice, so `len` falls and `cap` does not, and the backing array is still
+   resident. Not subtracting there is accuracy, not conservatism — the memory
+   really is still held. (The first
    version of this ADR subtracted for it, which was wrong for the same reason
    `len` accounting as a whole was.) A trim that `truncate` queues in
    `of.pendingTrim` is never charged, then or later (ADR 0006 §3, §5). Until
@@ -394,15 +399,14 @@ whatever the capacity.
    (ADR 0006 §5); when it replaces `of.dirty` with a fresh map, release
    `of.bytes.Swap(0)`. Until ADR 0006 it added `cap` for each pending trim it
    materialised into `of.dirty`. On each of its two failed returns — a
-   `pendingTrim` fetch (`fs.go:1305-1308`)
-   or an upload (`fs.go:1330-1333`) — take `FS.mu` as well, after
-   `openFile.mu` as §3 permits, and check whether the inode has gone:
-   `f.inodes[id]` is nil, the test its namespace update already makes
-   (`fs.go:1338-1339`). If it has, release the file's whole remaining charge
-   with `of.bytes.Swap(0)`, reset `of.dirty` to an empty map and
-   `of.pendingTrim` to nil, and return the error as before. If the inode is
-   still there, leave everything charged: those buffers really are held, and
-   the file's next flush retries them. Why, below.
+   `pendingTrim` fetch or an upload, after either of which `flushOpen` calls
+   `dropIfGone` — take `FS.mu` as well, after `openFile.mu` as §3 permits, and
+   check whether the inode has gone: `f.inodes[id]` is nil, the test
+   `flushOpen`'s namespace update already makes. If it has, release the file's
+   whole remaining charge with `of.bytes.Swap(0)`, reset `of.dirty` to an empty
+   map and `of.pendingTrim` to nil, and return the error as before. If the
+   inode is still there, leave everything charged: those buffers really are
+   held, and the file's next flush retries them. Why, below.
 5. **Immediately before every removal of an `openFile` from `FS.open`**, under
    `FS.mu`: release `of.bytes.Swap(0)`. Today the removals are the
    `delete(f.open, id)` in `unlink` (`fs.go:639`) and the one in `Rename`'s
@@ -452,7 +456,7 @@ each kind of operation is a better test than checking any single total.
   through its check for a gone inode.
 
 **Why site 4 releases on a failed flush.** `flushAll` lists the open files
-before it flushes any (`fs.go:1357-1364`), so a flush can run on an `openFile`
+before it flushes any, so a flush can run on an `openFile`
 that site 5 has already removed and released. Until ADR 0006, site 4 then
 charged whatever it materialised from `pendingTrim` to a file that nothing would
 flush again. A flush that succeeded returned that charge when it replaced the
@@ -478,7 +482,7 @@ The change each operation makes, which is what tests assert against:
 
 | Operation | Change to `DirtyBytes()` |
 |---|---|
-| `Write` to an index absent from `of.dirty`, whether or not a pending trim is queued for it (ADR 0006 §4) | `+cs` exactly: the buffer is `make([]byte, 0, cs)` or a copy into one (`fs.go:1142`, `:1153`), and the growth `append` (`fs.go:1161-1163`) stays within it |
+| `Write` to an index absent from `of.dirty`, whether or not a pending trim is queued for it (ADR 0006 §4) | `+cs` exactly: the buffer is `make([]byte, 0, cs)` or a copy into one, both in `bufferWrite`, and the `append` there that grows it to cover the write stays within it |
 | `Write` to an index already dirty, with room | 0 |
 | `Write` whose chunk fetch fails after it has stored something (`fs.go:1146-1147`) | the charge for the indices it stored before the failure, and nothing for the rest |
 | `Write` that stores nothing because it failed first: a path that never waits (§4), a failed wait, or a failed first fetch (`fs.go:1149`) | 0 |
@@ -1295,10 +1299,10 @@ calls it made while pinning what the first version left open.
     disguising it as a number.
 17. **`-max-dirty 0` means no limit, unlike `-cache 0` and
     `-snapshot-retention 0`.** §1. Both of those mean "the default": `-cache 0`
-    reaches `newChunkCache` as zero, which selects 256 MiB
-    (`internal/blobfs/cache.go:44-46`), and `-snapshot-retention 0` reaches
-    `New` as zero, which selects 10 (the `switch` on `cfg.SnapshotRetention` in
-    `New`, `internal/blobfs/fs.go`).
+    reaches `newChunkCache` as zero, which selects 256 MiB (the `maxBytes <= 0`
+    check in `newChunkCache`, `internal/blobfs/cache.go`), and
+    `-snapshot-retention 0` reaches `New` as zero, which selects 10 (the
+    `switch` on `cfg.SnapshotRetention` in `New`, `internal/blobfs/fs.go`).
     `-max-dirty` follows its own help text, "0 or less: no limit". I kept that
     rather than match its neighbours, because an operator who sets a memory
     limit to 0 more plausibly means "none" than "the default", and because §1's
@@ -1472,11 +1476,11 @@ to answer speculatively now.
   still mutate in place after a flush fails partway, changing a cached chunk's
   bytes (#46). ADR 0004 decides both.
 - **Stale reads and resurrected truncated bytes** (#41, #40). `Read` copies the
-  chunk list before the dirty buffers (`internal/blobfs/fs.go:988`,
-  `:1004-1011`), so a flush in between can make it return older contents than
-  an acknowledged write (#41). A write into a chunk with a pending trim starts
-  from the untrimmed chunk that `n.Chunks` still names (`fs.go:1144`), so
-  truncated bytes can come back (#40). Backpressure neither causes nor fixes
+  chunk list before the dirty buffers (`Read` as it stood before ADR 0005), so
+  a flush in between can make it return older contents than an acknowledged
+  write (#41). A write into a chunk with a pending trim starts from the
+  untrimmed chunk that `n.Chunks` still names (`bufferWrite` as it stood before
+  ADR 0006), so truncated bytes can come back (#40). Backpressure neither causes nor fixes
   either one, though its drains are flushes and so add to #41's windows.
   ADR 0005 decides #41, together with #49: `Read` now takes its view of the
   chunk list and the dirty buffers in one hold of `openFile.mu`. ADR 0006

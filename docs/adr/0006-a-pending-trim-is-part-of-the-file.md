@@ -2,6 +2,15 @@
 
 **Status:** Accepted
 **Date:** 2026-09-25
+**Revised:** 2026-09-25 — the same day, after the security audit of the change
+and before it merged. The bullet *The commit window* (#64) under *What this
+does not decide* now states the window's preconditions as the audit found them
+in the code: no crash is needed, because on a clean shutdown the server keeps
+dispatching calls from open connections while the final `Sync`s run; a crash is
+cheap anyway (#55); and a `WRITE` past the new end within the same chunk
+exposes the removed bytes as well as growth does. It also lists stopping
+dispatch before the final `Sync` among the options. The window is still left to
+#64, and the decision and everything else are unchanged.
 **Issue:** #40, #56
 
 ## Context
@@ -390,17 +399,37 @@ required, except where it says otherwise.
 
 ## What this does not decide
 
-- **The commit window** (#64). `Sync` flushes the open files and then commits
-  under `FS.mu`. A truncate that lands between the two leaves its trim in
-  memory, as a pending trim or as a dirty tail, while the commit stores the new
-  size together with the longer chunk. After a crash, growing the file shows
-  the removed bytes. It predates this ADR, affects a dirty tail as well as a
-  pending trim, and is neither widened nor narrowed here. Nothing in the
-  protocol makes a client resend a `SETATTR` after a restart: the write
-  verifier covers `WRITE` and `COMMIT` only (RFC 1813 §3.3.7), and §1.6 does
-  not list `SETATTR` among the procedures that are synchronous. The options are
-  a gate that orders a commit against the files' `openFile.mu`, a committed
-  trim length (a format version; *Alternatives considered*), or accepting it.
+- **The commit window** (#64). `Sync` flushes the open files and only then
+  takes `FS.mu` and commits. A truncate that lands between the two leaves its
+  trim in memory, as a pending trim or as a dirty tail, while the commit stores
+  the new size together with the longer chunk. If the process ends before a
+  later commit applies the trim, the bucket keeps that pairing, and the removed
+  bytes come back once the file grows over them: through a `SETATTR` that grows
+  it, or through a `WRITE` past the new end within the same chunk, which loads
+  the whole stored chunk, because no trim survives the restart, and so makes
+  the removed bytes between the new end and the write's offset part of the
+  file, for the next flush to upload.
+
+  No crash is needed. On shutdown `Serve` in `internal/sunrpc` closes only its
+  listener. `serveConn` goes on reading records from the connections already
+  open, and `readRecord` has no deadline; once the context is done, the
+  `select` in `serveConn` chooses at random between dispatching the record it
+  has read, when a slot is free, and returning. So `SETATTR`s are still
+  dispatched while the shutdown `Sync` in `cmd/strata` and the committer's
+  final `Sync` run, and the process exits as soon as the shutdown `Sync`
+  returns, without waiting for the committer's. A client that keeps sending
+  during a clean shutdown can land a truncate in the window of one of those
+  final `Sync`s, whose commit may then be the last. A crash is cheap as well:
+  #55 lets any local user who can reach the server's port crash it on demand.
+
+  It predates this ADR, affects a dirty tail as well as a pending trim, and is
+  neither widened nor narrowed here. Nothing in the protocol makes a client
+  resend a `SETATTR` after a restart: the write verifier covers `WRITE` and
+  `COMMIT` only (RFC 1813 §3.3.7), and §1.6 does not list `SETATTR` among the
+  procedures that are synchronous. The options are a gate that orders a commit
+  against the files' `openFile.mu`, a committed trim length (a format version;
+  *Alternatives considered*), stopping dispatch before the final `Sync`, or
+  accepting it.
 - **#42, #43 and #55.** `getOpen` can recreate an entry for an inode that has
   already gone, but `truncate` resolves the handle again under both locks
   before it touches the map, so such an entry never gets a trim (#42). A commit
