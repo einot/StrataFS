@@ -5,6 +5,18 @@
 **Revised:** 2026-09-25 — cross-references only. The bullet *`Read` and the
 dirty buffers* under *What this does not decide* now ends by saying that
 ADR 0005 decides #41 and #49. Nothing else changed.
+**Revised:** 2026-09-25 — a second pass the same day, for ADR 0006, which
+takes `truncate` off the cache: it no longer stages a shortened chunk from it,
+and the next flush applies a pending trim from what `loadChunk` returns. §1
+gives the reason `put` copies outside the mutex without `truncate`, which no
+longer reads the cache holding `FS.mu`, and keeps that as history; §3 drops
+`truncate` from the consumers that keep the rule and from the leaf-lock
+paragraph, and says nothing takes the cache's mutex holding `FS.mu`; §5's
+closing cross-reference points at ADR 0006 §8; §7's last bullet on reaching #46
+says a truncate's trim is applied by the next flush; and *What this does not
+decide* says ADR 0006 decides #40 and #56. The decision and every behaviour of
+the cache are unchanged, and *Context* and *Alternatives considered* are left
+as the history they are.
 **Issue:** #46, #47
 
 ## Context
@@ -73,9 +85,12 @@ promise that: `bytes.Clone`'s result "may have additional unused capacity",
 and `append` chooses the capacity of any new array it allocates.
 
 `put` makes the copy after its size guard and before it takes the cache's
-mutex. `truncate` reads the cache while holding `FS.mu`, so time spent under the
-cache's mutex is time the whole namespace can wait. A `put` that then finds its
-hash already present discards its copy.
+mutex, so that no memcpy is made under a lock that reads, writes and flushes
+all take, the last two holding a file's `openFile.mu` (§3). When this ADR was
+written, `truncate` also read the cache while holding `FS.mu`, so time under the
+cache's mutex was time the whole namespace could wait; since ADR 0006,
+`truncate` does not read the cache. A `put` that then finds its hash already
+present discards its copy.
 
 It follows that every entry is immutable while it is cached. An entry cached
 by `putChunk` matches its hash by construction: `putChunk` hashes, uploads and
@@ -116,21 +131,22 @@ later hit. A caller must not write through it, and must not append to it or to
 any reslice of it: appending to a reslice shorter than its capacity writes into
 the cache's array. `loadChunk`'s result falls under the same rule whether it was
 a hit or a miss, because its callers cannot tell which they got. `loadChunk`'s
-callers, and `truncate`, keep the rule today:
+callers keep the rule today:
 
 - `Read` copies what it needs out of the result into the reply;
 - `bufferWrite` copies the result into a new buffer before writing into it;
 - `flushOpen`, resolving a pending trim, reslices the result and then copies
-  it;
-- `truncate`, staging a shortened chunk from the cache, copies `data[:tail]`.
+  it.
 
-A new consumer copies before it modifies.
+`truncate`, which staged a shortened chunk by copying `data[:tail]` out of the
+cache, no longer reads the cache (ADR 0006 §3). A new consumer copies before it
+modifies.
 
 The cache's mutex is a leaf lock. It is taken while holding an `openFile.mu`
 (`putChunk` and `loadChunk` under `flushOpen`, `loadChunk` under
-`bufferWrite`), while holding both an `openFile.mu` and `FS.mu` (`truncate`),
-or while holding nothing (`loadChunk` called from `Read`, and `FS.Stats`).
-Nothing is acquired and nothing is logged while it is held.
+`bufferWrite`), or while holding nothing (`loadChunk` called from `Read`, and
+`FS.Stats`). Since ADR 0006 nothing takes it holding `FS.mu`. Nothing is
+acquired and nothing is logged while it is held.
 
 ### 4. Hits are not verified
 
@@ -168,7 +184,7 @@ exist:
 
 The cache is keyed by the chunk's hash as it appears in the chunk's object key
 after `chunkPrefix`: the lowercase hex SHA-256 of its bytes. This agrees with
-ADR 0003 §2, *Staging from the cache*.
+ADR 0006 §8, which says how a test reaches a cached chunk.
 
 ### 6. What the copy costs
 
@@ -240,8 +256,8 @@ buffer with a large capacity and checks the charge; `newChunkCache`, `put`,
   neither uploads nor caches again. Had the other file stored that content
   first, the failing flush would have skipped the upload and cached nothing.
 - A write into that second file that partly overwrites the chunk, or a truncate
-  into it that stages from the cache, then stores whatever the cache holds,
-  which a fresh mount shows.
+  into it, whose pending trim the next flush applies from the cache (ADR 0006
+  §5), then stores whatever the cache holds, which a fresh mount shows.
 
 ## Assumptions
 
@@ -324,7 +340,7 @@ them.
   (#49), which is a data race. That is the kind of sharing §1 removes from the
   cache, but it is in `Read`, and fixing it changes where `Read` takes its
   locks. It is left to those issues. ADR 0005 decides both.
-- **`truncate`'s deferred trims** (#40, #56).
+- **`truncate`'s deferred trims** (#40, #56). ADR 0006 decides both.
 - **One memory pool for dirty buffers and the cache.** Left open by ADR 0003.
 - **The form of the key.** `docs/DESIGN.md` §3 keys the redesign's cache by the
   full object key. This code keys by the bare hash, having one chunk prefix.

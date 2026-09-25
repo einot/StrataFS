@@ -695,3 +695,4 @@ it is not this one.
 | [0003](adr/0003-write-backpressure.md) | Buffered writes are bounded by a byte budget; a writer that has to wait performs the drain itself | 5, 9 |
 | [0004](adr/0004-chunk-cache-owns-its-bytes.md) | The chunk cache stores its own exact-length copy of each chunk, charges what it holds, and does not re-verify hits | 3 |
 | [0005](adr/0005-read-takes-one-view-under-the-file-lock.md) | A read takes its view of a file — size, chunk references and the dirty bytes it needs — at one instant under the file's lock, and fetches chunks holding no lock | 7 |
+| [0006](adr/0006-a-pending-trim-is-part-of-the-file.md) | A truncate that cannot shorten a stored chunk at once queues a trim that every read, write and flush honours and a later truncate can only lower; a flush applies it without buffering or charging it | none — it constrains `internal/blobfs`, which section 14 replaces |

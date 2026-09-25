@@ -78,3 +78,4 @@ URL, and what was taken from it.
 | [0003](0003-write-backpressure.md) | Bounding buffered writes, and the blocking discipline that makes it safe | Accepted |
 | [0004](0004-chunk-cache-owns-its-bytes.md) | The chunk cache owns its bytes and charges what it holds | Accepted |
 | [0005](0005-read-takes-one-view-under-the-file-lock.md) | A read takes one view of a file, under the file's lock | Accepted |
+| [0006](0006-a-pending-trim-is-part-of-the-file.md) | A pending trim is part of the file, and is never buffered | Accepted |

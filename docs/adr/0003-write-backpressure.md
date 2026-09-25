@@ -169,6 +169,41 @@
   resurrected truncated bytes* under *What this does not decide* now ends by
   saying that ADR 0005 decides #41, together with #49, and that #40 stays open.
   Nothing else changed.
+- **Revised:** 2026-09-25 — a second pass the same day, for ADR 0006, which
+  decides #40 and #56. `truncate` no longer stages a chunk from the cache, and
+  a flush applies a pending trim through a copy it never charges instead of
+  materialising it into `of.dirty`, so sites 3 and 4 only release and site 1
+  alone adds. The decision, §4's algorithm, G1–G3, sites 1, 2 and 5, §3's lock
+  rules, every pinned name and signature except the type of
+  `openFile.pendingTrim`, and all numbering are unchanged, and no assumption is
+  added. Every sentence this pass rewrites cites code by symbol, because line
+  numbers move. What changed:
+  **§1** — *There is no minimum* no longer counts `truncate`'s charges among
+  the reasons a successful drain need not take the charge to zero.
+  **§2** — the capacity paragraph drops its exception for buffers staged at a
+  partial length, and keeps the `cap` delta as exact whatever the capacity;
+  site 3 adds nothing and never waits; site 4 adds nothing, and its check on a
+  failed return is unchanged; the paragraph on `add` and `release`, and the
+  second statement about the whole budget, follow; *Why site 4 releases on a
+  failed flush* keeps its history and says why the check stays; the table
+  loses the rows for a write that grows a staged buffer and for `truncate`
+  staging a cached chunk, gains one for a truncate into a hole, and restates
+  the rows for a write to an absent index, a flush failing in a fetch or in an
+  upload, and a truncate deferring to `pendingTrim`; and the list of how a test
+  reaches each `truncate` row, with the sentence before it, loses *Staging from
+  the cache* and the staged buffer's `cap`, and points at ADR 0006 §8.
+  **§4** — the test surface pins `openFile.pendingTrim` as a map (ADR 0006 §2).
+  **§6** — the bound says `truncate` adds nothing; the paragraphs on `W` and on
+  a single writer lose the partial-length exception; *Why at every instant*
+  covers everything the budget counts; what the bound does not cover gains a
+  flush's transient copy for a pending trim; and the paragraph on an exact
+  ceiling no longer needs `truncate` restructured.
+  **Assumptions** — 6 is rewritten, keeping its history, #56's figures and the
+  alternative of waiting in `truncate`; 17 cites `New`'s default by symbol,
+  because the code at `fs.go:139-140` had moved; 18, 20 and 21 follow
+  ADR 0006.
+  ***What this does not decide*** — *Stale reads and resurrected truncated
+  bytes* now ends by saying that ADR 0006 decides #40, together with #56.
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
 - **Affects:** `internal/blobfs`, `cmd/strata`, doc comment on `vfs.FS.Write`
 
@@ -263,9 +298,9 @@ current charge is below the limit, and a drain that succeeds releases every file
 on the list `flushAll` took when it began (`internal/blobfs/fs.go:1357-1364`).
 The first version said a successful drain takes the charge to zero. That holds
 only while nothing else writes. Releases during a drain wake parked calls, which
-are admitted while it is still running; files opened after it began are not on
-its list and are not flushed by it; and `truncate` charges without waiting. So
-the guarantee is progress for the system, not for any one writer: whatever
+are admitted while it is still running; and files opened after it began are not
+on its list and are not flushed by it. So the guarantee is progress for the
+system, not for any one writer: whatever
 refills the budget during a drain is itself work that completed, but a
 particular writer can be starved — including a drainer that finds the budget
 refilled when its drain returns, and has to drain again (Assumption 4).
@@ -308,12 +343,13 @@ Capacity is `cs` exactly for any buffer the write path allocates: `make([]byte,
 0, cs)` yields `cap == cs` — the language guarantees the capacity `make` was
 asked for, whatever the allocator rounds up to underneath — and the subsequent
 `append` at `fs.go:1161-1163` never needs more than `cs`, so it never grows.
-The exception is a buffer that `truncate` or `pendingTrim` staged at a partial
-length (`fs.go:1256`, `fs.go:1312`) and a later write then grows: there
-`append` chooses the new capacity, which is at least what the write needs and
-may round above `cs`. Computing every delta as a difference of `cap` keeps the
-accounting exact in that case too, which is why the rule below is stated as a
-`cap` delta rather than as "add `cs` per new index".
+Since ADR 0006 the write path is the only thing that puts a buffer in
+`of.dirty`: `truncate` stages none, and a flush applies a pending trim without
+buffering it. Until then, `truncate` and the flush staged buffers at a partial
+length, and a write that grew one let `append` choose the new capacity, which
+could round above `cs`. The rule below is still stated as a `cap` delta rather
+than as "add `cs` per new index", because a difference of `cap` is exact
+whatever the capacity.
 
 #### The five sites
 
@@ -343,19 +379,22 @@ accounting exact in that case too, which is why the rule below is stated as a
    update for a vanished inode and leaves the buffers where they are; the reset
    is this site's addition.
 3. **`truncate`**, under `openFile.mu` and `FS.mu`: subtract `cap` for every map
-   entry it deletes (`fs.go:1227-1231`); add `cap` for the chunk it stages from
-   the cache (`fs.go:1256`, a fresh allocation of the truncated length). The
-   **shortened tail chunk contributes no delta**: `of.dirty[lastIdx] =
+   entry it deletes, and add nothing. The **shortened tail chunk contributes
+   no delta**: `of.dirty[lastIdx] =
    chunk[:tail]` (`fs.go:1234`) is a reslice, so `len` falls and `cap` does
    not, and the backing array is still resident. Not subtracting there is
    accuracy, not conservatism — the memory really is still held. (The first
    version of this ADR subtracted for it, which was wrong for the same reason
-   `len` accounting as a whole was.) Charged **without waiting** — see §6 and
-   Assumption 6.
-4. **`flushOpen`**, under `openFile.mu`: add `cap` for each entry it
-   materialises while resolving `pendingTrim` (`fs.go:1312`); when it replaces
-   `of.dirty` with a fresh map (`fs.go:1351`), release `of.bytes.Swap(0)`. On
-   each of its two failed returns — a `pendingTrim` fetch (`fs.go:1305-1308`)
+   `len` accounting as a whole was.) A trim that `truncate` queues in
+   `of.pendingTrim` is never charged, then or later (ADR 0006 §3, §5). Until
+   ADR 0006, `truncate` also added `cap` for a chunk it staged from the cache.
+   It **never waits** — see §6 and Assumption 6.
+4. **`flushOpen`**, under `openFile.mu`: add nothing, because a flush applies a
+   pending trim through a copy of its own that never enters `of.dirty`
+   (ADR 0006 §5); when it replaces `of.dirty` with a fresh map, release
+   `of.bytes.Swap(0)`. Until ADR 0006 it added `cap` for each pending trim it
+   materialised into `of.dirty`. On each of its two failed returns — a
+   `pendingTrim` fetch (`fs.go:1305-1308`)
    or an upload (`fs.go:1330-1333`) — take `FS.mu` as well, after
    `openFile.mu` as §3 permits, and check whether the inode has gone:
    `f.inodes[id]` is nil, the test its namespace update already makes
@@ -383,8 +422,8 @@ leaves the budget: `of.bytes.Add(-n)` or `of.bytes.Swap(0)`, then `release`
 
 **`add` and `release`** both take `n >= 0`, and neither clamps, so `used()` is
 exactly Σ`add` − Σ`release`. Every decrease goes through `release`, because
-`release` is what wakes parked writers: a `truncate` that frees more than it
-stages releases the difference rather than `add`ing a negative.
+`release` is what wakes parked writers: a `truncate` releases what it frees
+rather than `add`ing a negative.
 
 **The invariant.** For an `openFile` that `FS.open` holds, `of.bytes` equals the
 sum of `cap(v)` over `of.dirty` whenever it is observed holding that
@@ -407,26 +446,31 @@ each kind of operation is a better test than checking any single total.
   of a `bytes` before it is out of `used()`.
 - When no accounting step is in flight, `used()` equals that sum. It also
   equals the sum over `FS.open` alone, because an `openFile` that has left
-  `FS.open` holds no charge. Sites 1 and 2 net to zero on one, site 3 leaves
-  one alone, and whatever site 4 charges to one, the same flush releases:
-  a success when it replaces the map, a failure through its check for a gone
-  inode.
+  `FS.open` holds no charge. Sites 1 and 2 net to zero on one, and sites 3 and
+  4 add nothing (ADR 0006 §7). Until ADR 0006, site 4 could charge one, and
+  the same flush released it: a success when it replaced the map, a failure
+  through its check for a gone inode.
 
 **Why site 4 releases on a failed flush.** `flushAll` lists the open files
 before it flushes any (`fs.go:1357-1364`), so a flush can run on an `openFile`
-that site 5 has already removed and released. Site 4 then charges whatever it
-materialises from `pendingTrim` to a file that nothing will flush again. A flush
-that succeeds returns that charge when it replaces the map. One that fails would
-strand it for good without the check. Each occurrence would be small, about a
-chunk per pending trim, but the charge would never come back, and enough of them
-would hold the budget at its limit with nothing able to drain it, which is the
-failure site 5 exists to prevent. Making the check under `FS.mu` orders it
-against site 5, which runs under `FS.mu` too. If the removal came first, the
-check sees the inode gone and releases what site 5 could not see. If the
-removal comes after, site 5's own `Swap` takes everything charged so far.
-Resetting `pendingTrim` as well stops a second flush of the same `openFile`,
-listed by another `flushAll` before the removal, from materialising the same
-trims again (Assumption 18).
+that site 5 has already removed and released. Until ADR 0006, site 4 then
+charged whatever it materialised from `pendingTrim` to a file that nothing would
+flush again. A flush that succeeded returned that charge when it replaced the
+map. One that failed would have stranded it for good without the check. Each
+occurrence would have been small, about a chunk per pending trim, but the charge
+would never have come back, and enough of them would have held the budget at its
+limit with nothing able to drain it, which is the failure site 5 exists to
+prevent. Since ADR 0006 a flush charges nothing, and the only charge that can
+land on an `openFile` after site 5 has run is site 1's, which site 2 releases
+in the same hold of `openFile.mu`, so a flush that fails finds nothing charged
+to a removed file. The check stays, for its reset and to keep the accounting
+exact if a later change charges in a flush again. Making the check under
+`FS.mu` orders it against site 5, which runs under `FS.mu` too. If the removal
+came first, the check sees the inode gone and releases what site 5 could not
+see. If the removal comes after, site 5's own `Swap` takes everything charged
+so far. Resetting `pendingTrim` as well stops a second flush of the same
+`openFile`, listed by another `flushAll` before the removal, from applying the
+same trims again (Assumption 18).
 
 #### What each operation does to `DirtyBytes()`
 
@@ -434,44 +478,34 @@ The change each operation makes, which is what tests assert against:
 
 | Operation | Change to `DirtyBytes()` |
 |---|---|
-| `Write` to an index absent from `of.dirty` | `+cs` exactly: the buffer is `make([]byte, 0, cs)` or a copy into one (`fs.go:1142`, `:1153`), and the growth `append` (`fs.go:1161-1163`) stays within it |
+| `Write` to an index absent from `of.dirty`, whether or not a pending trim is queued for it (ADR 0006 §4) | `+cs` exactly: the buffer is `make([]byte, 0, cs)` or a copy into one (`fs.go:1142`, `:1153`), and the growth `append` (`fs.go:1161-1163`) stays within it |
 | `Write` to an index already dirty, with room | 0 |
-| `Write` that grows a buffer `truncate` or `pendingTrim` staged at a partial length | `+(new cap − old cap)`; `append` picks the new capacity, so read it from the map |
 | `Write` whose chunk fetch fails after it has stored something (`fs.go:1146-1147`) | the charge for the indices it stored before the failure, and nothing for the rest |
 | `Write` that stores nothing because it failed first: a path that never waits (§4), a failed wait, or a failed first fetch (`fs.go:1149`) | 0 |
 | `Write` whose inode has gone when `bufferWrite` first resolves it (`fs.go:1113-1130`) | 0: it stores nothing |
 | `Write` whose inode goes while it buffers, found at the tail block (`fs.go:1171`) | 0 net: site 2 releases the file's whole remaining charge, this write's included |
 | `Sync`, `Commit`, a stable write's sync, or a budget drain, succeeding | every file on `flushAll`'s list drops to 0 (site 4); with nothing else running, the total is 0 |
 | The same, with `flushAll` failing partway (`fs.go:1366-1370`) | files flushed before the failing one drop to 0; the failing file changes as the next three rows say; files after it keep their charge |
-| `flushOpen` failing while it fetches a `pendingTrim` chunk (`fs.go:1305-1308`), its inode still there | what it had materialised stays charged, until the file's next successful flush |
-| `flushOpen` failing during upload (`fs.go:1330-1333`), its inode still there | unchanged, plus anything it materialised from `pendingTrim` |
+| `flushOpen` failing while it fetches a pending trim's chunk, its inode still there | 0: a trim is never charged, and it stays pending (ADR 0006 §5) |
+| `flushOpen` failing during upload, its inode still there | unchanged; trims stay pending |
 | Either failure, once the file's inode has gone (removed from `FS.open` after `flushAll` listed it) | site 4 releases the file's whole remaining charge, so nothing stays charged to it |
 | `Sync` failing after `flushAll` succeeded — a commit error, divergence included (`internal/blobfs/commit.go:138-139`, `:180-189`) | the flushed files stay released |
 | `truncate` deleting dirty indices (`fs.go:1227-1231`) | `−cap` of each |
 | `truncate` shortening a dirty tail in place (`fs.go:1232-1236`) | 0 |
-| `truncate` staging a cached chunk (`fs.go:1255-1256`) | `+cap` of the staged copy; read it from the map |
-| `truncate` deferring to `pendingTrim` (`fs.go:1258`) | 0 now; charged, then released, inside the next flush |
+| `truncate` into a stored chunk that is not dirty, cached or not (ADR 0006 §3) | 0, now and at the next flush |
+| `truncate` into a hole | 0; nothing is queued |
 | `truncate` extending the file | 0 |
 | `Remove` of the last name, or `Rename` over a victim (`fs.go:639`, `:717`) | minus that file's whole charge |
 
-The two `truncate` rows that add a buffer differ only in whether this `FS`'s
-chunk cache holds the chunk, which a test cannot see. How a test reaches each
-`truncate` row:
+Since ADR 0006 no `truncate` row adds a buffer, and a truncate into a stored
+chunk that is not dirty does the same whether or not this `FS`'s chunk cache
+holds the chunk. How a test reaches each `truncate` row, with ADR 0006 §8
+saying how a test reaches a cold chunk, a cached one and a hole:
 
-- **Staging from the cache.** The chunk must be in this `FS`'s cache. A flush on
-  the same `FS` that uploads the content for the first time puts it there
-  (`putChunk`, `fs.go:958-965`), and so does a `Read` on the same `FS` that
-  fetches it (`loadChunk`, `fs.go:919`). An upload that is skipped caches
-  nothing — content the `FS` already knew (`fs.go:944-946`), or content the
-  pre-upload `HEAD` found in the bucket (`fs.go:951-953`) — so the content must
-  be new to the bucket.
 - **Deferring to `pendingTrim`.** A fresh `FS` mounted on the bucket, whose
   cache is empty, truncating into a stored chunk it has not read.
 - **Deleting indices and shortening a tail** need only buffered, unflushed
   writes on the same `FS`.
-- A staged buffer's `cap` is whatever `append` chose (`fs.go:1256`, and
-  `fs.go:1312` for a materialised trim), so a test reads it from `of.dirty`
-  rather than predicting it.
 
 ### 3. Lock ordering
 
@@ -795,8 +829,9 @@ reach them without reading `fs.go`:
   Read it holding `FS.mu` (a read lock is enough), and release `FS.mu` before
   locking an `openFile.mu` (§3).
 - `openFile.mu`, a `sync.Mutex`; `openFile.dirty`, a `map[uint64][]byte` from
-  chunk index to buffer; `openFile.pendingTrim`, a slice whose length is all a
-  test needs; and `openFile.bytes`, the `atomic.Int64` of §2.
+  chunk index to buffer; `openFile.pendingTrim`, a map from chunk index to a
+  pending trim (ADR 0006 §2), whose length and keys a test may read holding
+  `openFile.mu`; and `openFile.bytes`, the `atomic.Int64` of §2.
 
 A test may read all of these. It may write only `warnAfter`, to any value, and
 only before the budget is first used. Renaming any of them changes this ADR's
@@ -872,41 +907,39 @@ reading would. Saying so rather than quietly moving either one:
 > capacity one call can add: for a call of `n` bytes at offset `off` with chunk
 > size `cs`, the number of chunk indices `[off/cs, (off+n-1)/cs]` it spans,
 > times `cs`. A single writer issuing calls of at most `cs` bytes spans at most
-> two indices and therefore sees at most `MaxDirtyBytes + 2×cs`. `truncate` may
-> add one further partial chunk per `SETATTR`, outside this bound and without
-> limit between flushes (Assumption 6).
+> two indices and therefore sees at most `MaxDirtyBytes + 2×cs`. `truncate`
+> adds nothing (site 3; ADR 0006).
 
 `W` is `cs` per spanned index because `cs` is what the write path allocates for
 an index it has to create, whether the call puts one byte in it or a full chunk
-(§2); an index already dirty at full capacity adds nothing. The one case that
-is not exactly `cs` is an index staged at a partial length by `truncate` or
-`pendingTrim` and then grown by a write, where `append` picks the capacity and
-may round above `cs`. That is per-index allocator rounding rather than a term
-that scales with the workload, so it is left inside "bounded by" instead of
-being given a symbol.
+(§2); an index already dirty at full capacity adds nothing. Until ADR 0006 an
+index staged at a partial length by `truncate` or by a flush's pending trim,
+and then grown by a write, could let `append` round its capacity above `cs`.
+Nothing stages one now.
 
 Why at every instant: a call is admitted only while the charge is below the
 limit, and once admitted it charges at most `W`. While the charge is at or above
 the limit nobody is admitted, so everything charged since it last stood below
 the limit came from calls admitted before then, and at most `k` of those can be
-admitted and not yet charged. `truncate` and `pendingTrim` charges fall outside
-that argument, which is why the bound names them separately, and nothing else
-bounds them. Between flushes, every size-setting `SETATTR` can stage a cached
-chunk, charged at once, or queue a `pendingTrim` entry, not charged at all; the
-next flush then materialises a file's whole queue in one pass, charging it at
-site 4 without waiting and without regard to the limit (Assumption 6). #56
-tracks the fix.
+admitted and not yet charged. Since ADR 0006 nothing but site 1 adds to the
+charge, so the argument covers everything the budget counts. Until then,
+`truncate` and `pendingTrim` charges fell outside it: between flushes, every
+size-setting `SETATTR` could stage a cached chunk, charged at once, or queue a
+`pendingTrim` entry, not charged at all, and the next flush materialised a
+file's whole queue in one pass, charging it at site 4 without waiting and
+without regard to the limit (#56; Assumption 6).
 
 For a single writer, with one `Write` in flight at a time and so `k = 1`, that
 means `DirtyBytes() <= MaxDirtyBytes + W` after each call returns, `W` being
 that call's. `W` is then exact: the call charges precisely `cs` for each index
-it spans that was absent from `of.dirty`, unless the index was staged at a
-partial length by `truncate` or `pendingTrim`.
+it spans that was absent from `of.dirty`.
 
 What the bound is a bound *on*: bytes of buffer capacity resident in the
 `openFile.dirty` maps. It does not cover the chunk cache (a separate pool — see
-*Consequences*), the snapshot body a commit encodes, per-entry map and
-slice-header overhead, or the files' chunk lists, which one `SETATTR`, or one
+*Consequences*), the snapshot body a commit encodes, the transient copy through
+which a flush applies a pending trim and the chunk it fetches for it (ADR 0006
+§5, §7), per-entry map and slice-header overhead, or the files' chunk lists,
+which one `SETATTR`, or one
 `WRITE` at a huge offset, can lengthen without bound (#55; *What this does not
 decide*). Nor does it cover the `WRITE` payloads that backpressure
 itself holds. A stalled call keeps its decoded data across the wait: `Opaque`
@@ -927,8 +960,9 @@ disconnects stays parked, holding its payload, until a drain lets it through or
 fails, or the server shuts down (#57).
 
 An exact ceiling would require reserving worst-case bytes before buffering and
-reconciling afterwards, plus restructuring `truncate`, which holds both locks and
-must not block. This ADR does not take that on, so what it guarantees is a
+reconciling afterwards. Until ADR 0006 it would also have required restructuring
+`truncate`, which holds both locks and must not block, and which then charged.
+This ADR does not take that on, so what it guarantees is a
 configured number plus `k × W`, and the first version was wrong to call that
 term a small constant. Nothing bounds `k` but the server's concurrency.
 Admission reserves nothing: a call is admitted when it finds the charge below
@@ -1078,35 +1112,42 @@ Recorded because the issue did not specify them.
 5. **The drain is a full `Sync`**, not a partial flush of the largest buffers.
    `Sync` is what exists, it is what `COMMIT` already does, and a partial drain
    would need a policy for which files to flush.
-6. **`truncate` and the `pendingTrim` path charge without waiting** and may
-   therefore push the charge above the limit. They hold both locks, so they
-   cannot wait. Note also that shrinking a file does not necessarily lower the
-   charge: a tail chunk shortened in place is a reslice, and the backing array
-   stays resident (§2, site 3).
+6. **`truncate` never waits, and since ADR 0006 it never charges.** It holds
+   both locks, so it cannot wait. Note also that shrinking a file does not
+   necessarily lower the charge: a tail chunk shortened in place is a reslice,
+   and the backing array stays resident (§2, site 3).
 
-   Nothing bounds what they add between flushes. Each size-setting `SETATTR`
-   can stage one cached tail chunk (`internal/blobfs/fs.go:1255-1256`), charged
-   at once, or queue one `pendingTrim` entry, charged not at all until a flush.
-   A workload that only truncates never triggers a drain, because only `Write`
-   waits, so both are flushed only when something else commits: the ticker, a
-   `COMMIT`, a stable write, or a writer's drain. Between flushes the staged
-   excess grows with the number of `SETATTR`s. The queue is neither pruned nor
-   deduplicated, and the next flush materialises its whole backlog in one pass,
-   charging each entry at site 4 without waiting and without regard to the
-   limit. An entry that truncates into a hole costs that flush no fetch, so at
-   the defaults 1,000 `SETATTR`s in one commit interval, each truncating into a
-   different hole, can hold about 1 GiB at that flush with nothing written. The
-   same queue can also bring truncated bytes back without a `WRITE`. Both are
-   pre-existing, and #56 tracks the fix; this ADR does not decide it. The
-   earlier text covered only the cached case. The alternative is to wait in
-   `truncate` before it takes its locks, as `Write` does, and ADR 0002 would
-   tolerate that: `SETATTR` is non-idempotent, so a stalled one holds its
-   duplicate-cache marker only for the length of the stall, which ADR 0002 §7
-   accepts of any slow call, and a retransmission meanwhile is dropped as a
-   duplicate still in flight. I did not choose it. Whether a truncate will stage
-   anything is known only under both locks, so waiting before them would hold
-   every size-setting `SETATTR` behind a drain, including the common case,
-   which shrinks a file and frees memory.
+   Until ADR 0006 `truncate` and the `pendingTrim` path did charge, without
+   waiting, and could therefore push the charge above the limit, and nothing
+   bounded what they added between flushes. Each size-setting `SETATTR` could
+   stage one cached tail chunk, charged at once, or queue one `pendingTrim`
+   entry, charged not at all until a flush. A workload that only truncates never
+   triggers a drain, because only `Write` waits, so both were flushed only when
+   something else committed: the ticker, a `COMMIT`, a stable write, or a
+   writer's drain. Between flushes the staged excess grew with the number of
+   `SETATTR`s. The queue was neither pruned nor deduplicated, and the next
+   flush materialised its whole backlog in one pass, charging each entry at
+   site 4 without waiting and without regard to the limit. An entry that
+   truncated into a hole cost that flush no fetch, so at the defaults 1,000
+   `SETATTR`s in one commit interval, each truncating into a different hole,
+   could hold about 1 GiB at that flush with nothing written, and 100,000 could
+   get the process killed for want of memory (#56). The same queue could also
+   bring truncated bytes back without a `WRITE`. The text before ADR 0006 left
+   that to #56, and before that covered only the cached case. ADR 0006 removes
+   both ways of charging rather than bounding them: `truncate` stages nothing,
+   a flush applies a pending trim through a copy it never charges, and a file
+   holds at most one pending trim (ADR 0006 §7).
+
+   The alternative was to wait in `truncate` before it takes its locks, as
+   `Write` does, and ADR 0002 would tolerate that: `SETATTR` is non-idempotent,
+   so a stalled one holds its duplicate-cache marker only for the length of the
+   stall, which ADR 0002 §7 accepts of any slow call, and a retransmission
+   meanwhile is dropped as a duplicate still in flight. I did not choose it.
+   Whether a truncate would stage anything was known only under both locks, so
+   waiting before them would have held every size-setting `SETATTR` behind a
+   drain, including the common case, which shrinks a file and frees memory.
+   Since ADR 0006 it is also unnecessary: a truncate adds nothing for a wait to
+   bound.
 7. **Stalled writes hold RPC slots.** Once `maxInFlight` (64) requests on a
    connection are stalled writes, other operations on that connection queue
    behind them. That is intended backpressure for writes, but it also delays
@@ -1256,7 +1297,8 @@ calls it made while pinning what the first version left open.
     `-snapshot-retention 0`.** §1. Both of those mean "the default": `-cache 0`
     reaches `newChunkCache` as zero, which selects 256 MiB
     (`internal/blobfs/cache.go:44-46`), and `-snapshot-retention 0` reaches
-    `New` as zero, which selects 10 (`internal/blobfs/fs.go:139-140`).
+    `New` as zero, which selects 10 (the `switch` on `cfg.SnapshotRetention` in
+    `New`, `internal/blobfs/fs.go`).
     `-max-dirty` follows its own help text, "0 or less: no limit". I kept that
     rather than match its neighbours, because an operator who sets a memory
     limit to 0 more plausibly means "none" than "the default", and because §1's
@@ -1275,8 +1317,7 @@ calls it made while pinning what the first version left open.
     are never reused, and the entry `getOpen` can recreate for a gone inode
     (#42) is always empty, so its flush returns before it can fail. Resetting
     `of.dirty` and `of.pendingTrim` along with the release is mine too; it
-    keeps another flush of the same `openFile` from uploading and charging it
-    again. The alternatives: leaving the leak, which is permanent and ratchets
+    keeps another flush of the same `openFile` from uploading it again. The alternatives: leaving the leak, which is permanent and ratchets
     as §2 describes; checking before the flush starts, in `flushAll` or at the
     top of `flushOpen`, which misses a removal made during the flush; and
     checking on every return rather than only on failure, which gains nothing,
@@ -1317,11 +1358,13 @@ the repository owner's, not a judgement call of mine.
     `of.bytes` falls below the sum of `cap` over `of.dirty`, and `DirtyBytes()`
     under-counts, until the file's next successful flush replaces the map or
     its removal discards the `openFile`. Site 4 checks for a gone inode only on
-    `flushOpen`'s two failed returns, so a panic in a fetch or an upload after
-    a `pendingTrim` entry was materialised skips the check, and if the inode
-    had already gone, that entry's charge stays on an `openFile` nothing will
-    flush again. Each occurrence is small: at most one call's `W`,
-    under-counted for a while, or about a chunk per pending trim, stranded.
+    `flushOpen`'s two failed returns, so until ADR 0006 a panic in a fetch or an
+    upload after a `pendingTrim` entry was materialised skipped the check, and
+    if the inode had already gone, that entry's charge stayed on an `openFile`
+    nothing would flush again. Since ADR 0006 a flush charges nothing, so that
+    case is moot. Each occurrence is small: at most one call's `W`,
+    under-counted for a while, or, until ADR 0006, about a chunk per pending
+    trim, stranded.
     Each also needs a store or cache call that panics, which already fails the
     call it runs in. I accepted both rather than extend the rules with a
     deferred charge at site 1 and a deferred check at site 4. The budget
@@ -1332,12 +1375,10 @@ the repository owner's, not a judgement call of mine.
     along with `dirty` when it finds the inode gone (Assumption 18); site 2,
     written before that refinement, resets `dirty` only. The difference costs
     no charge. A flush that listed the `openFile` before the removal and has
-    yet to run materialises the trims, reading each original chunk and
-    charging the copy, uploads the shortened chunks, which nothing references,
-    and releases the charge when it replaces the map, or through site 4's
-    check if it fails. So the cost is that I/O, for a removed file with a
-    pending trim, and only while such a flush is still to run. I kept site 2's
-    rule as it is.
+    yet to run fetches the chunk of the file's one pending trim and uploads one
+    shortened copy, which nothing references, charging nothing (ADR 0006 §5).
+    So the cost is that I/O, for a removed file with a pending trim, and only
+    while such a flush is still to run. I kept site 2's rule as it is.
 
 ## Consequences
 
@@ -1438,8 +1479,8 @@ to answer speculatively now.
   truncated bytes can come back (#40). Backpressure neither causes nor fixes
   either one, though its drains are flushes and so add to #41's windows.
   ADR 0005 decides #41, together with #49: `Read` now takes its view of the
-  chunk list and the dirty buffers in one hold of `openFile.mu`. #40 stays
-  open.
+  chunk list and the dirty buffers in one hold of `openFile.mu`. ADR 0006
+  decides #40, together with #56.
 - **Enforcing the advertised maximum file size** (#55). `FSINFO` advertises a
   `maxfilesize` of 2^62 (`internal/nfs/nfs3.go:564`), and nothing enforces it.
   One `SETATTR` to a huge size, or one `WRITE` at a huge offset, makes
