@@ -41,15 +41,13 @@ package blobfs
 // TestReadSeesWriteAcknowledgedBeforeAFlush and
 // TestReadAnswersFromTheCheckUnderTheFileLock.
 //
-// Two setups rest on something the documents imply without stating it as a
-// rule:
+// Two setups rest on how a call other than Read behaves:
 //   - The permission case of TestReadAnswersFromTheCheckUnderTheFileLock needs
 //     a SetAttr of the mode alone to complete while a flush holds the file's
-//     openFile.mu. ADR 0002 Assumption 7 names a size-setting SETATTR, not a
-//     SETATTR as such, among the calls that can wait on openFile.mu; ADR
-//     0005's Consequences keep that list and add only a Read's step 2 to it;
-//     and §6's list of the file's other lock holders has no mode change in it.
-//     If that changes, the SetAttr hangs and the failure says so.
+//     openFile.mu. ADR 0005 pins that: §6, "An attribute change" ("It takes
+//     FS.mu for writing and never an openFile.mu"), §7's list of behaviours a
+//     test may rely on, and Assumption 15. If that changes, the SetAttr hangs
+//     and the failure says so.
 //   - TestReadRangeEndDoesNotWrap needs a Write at 2^64 − 2 to be accepted,
 //     which Assumption 9 and ADR 0003's "What this does not decide" (#55)
 //     imply. A decision on #55 may change its setup.
@@ -897,9 +895,9 @@ const rcRemoveNoLock = " (a hang here means the Remove waits for the file's open
 
 // rcModeNoLock does the same for the SetAttr of the mode alone.
 const rcModeNoLock = " (a hang here means a SetAttr of the mode alone waits for the file's " +
-	"openFile.mu, which the Sync holds in its chunk Put: ADR 0002 Assumption 7 names only a " +
-	"size-setting SETATTR among the calls that can wait on it, ADR 0005's Consequences add " +
-	"only a Read's step 2 to that list, and ADR 0005 §6 says a flush's uploads need no FS.mu)"
+	"openFile.mu, which the Sync holds in its chunk Put: ADR 0005 §6, \"An attribute change\", " +
+	"§7 and Assumption 15 say a SetAttr that sets no size takes FS.mu for writing and never an " +
+	"openFile.mu, so a flush of the file held in a chunk upload does not hold it up)"
 
 // rcStaleRule and rcAccesRule are what the two cases of
 // TestReadAnswersFromTheCheckUnderTheFileLock pin, for their failure messages.
@@ -936,13 +934,12 @@ const rcAccesRule = "ADR 0005 §2 step 2: \"Resolve the handle and apply both ch
 //     vfs.ErrStale.
 //   - "permission": a SetAttr of the mode alone, from 0644 to 0600, by the
 //     owner. The Read, by rcOther, whom 0644 lets read and 0600 does not
-//     (TestPermissionsEnforced), must return vfs.ErrAcces. That the SetAttr
-//     completes while the Sync holds the file's lock rests on ADR 0002
-//     Assumption 7, which names a size-setting SETATTR, and not a SETATTR as
-//     such, among the calls that can wait on openFile.mu; on ADR 0005's
-//     Consequences, which keep that list and add only a Read's step 2 to it;
-//     and on §6, whose list of the file's other lock holders has no mode
-//     change in it. No document says it in so many words.
+//     (TestPermissionsEnforced), must return vfs.ErrAcces. The SetAttr must
+//     complete while the Sync holds the file's lock: §6, "An attribute
+//     change", says a SetAttr that sets no size "takes FS.mu for writing and
+//     never an openFile.mu", and that it "can fall between the two while a
+//     Read waits for the file's lock; step 2's checks then see it"; §7 lists
+//     it among the behaviours a test may rely on; and Assumption 15 pins it.
 //
 // Then the Sync is released. A correct Read gives the same answer however it
 // is scheduled: if its step 1 ran before the change, its step 2 runs after it
