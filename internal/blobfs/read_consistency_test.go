@@ -2,9 +2,9 @@ package blobfs
 
 // Clean-room tests for ADR 0005, "A read takes one view of a file, under the
 // file's lock" (docs/adr/0005-read-takes-one-view-under-the-file-lock.md),
-// written from that ADR, docs/DESIGN.md §7, ADR 0003 §3 and §4 (its test
-// surface), ADR 0004 §5 and §7, and internal/vfs/vfs.go, without reading the
-// implementation. They are the tests for #41 and #49, and cover:
+// written from that ADR, docs/DESIGN.md §7, ADR 0003 §2, §3 and §4 (its test
+// surface) and "What this does not decide", ADR 0004 §5 and §7, ADR 0002
+// Assumption 7, and internal/vfs/vfs.go, without reading the implementation. They are the tests for #41 and #49, and cover:
 //
 //   - §1, what a Read returns: freshness, (a), for a Write acknowledged before
 //     the Read was called, whatever flush of the file runs meanwhile; and
@@ -13,6 +13,14 @@ package blobfs
 //   - §2, the three steps: step 2 copies the dirty bytes under the file's
 //     lock, step 3 fetches holding no lock, and Read never adds an entry to
 //     FS.open;
+//   - §2 step 2's second check, whose answer is the Read's: a Read waiting for
+//     the file's lock across a Remove of the file gets vfs.ErrStale (§6, "A
+//     removal"; Assumption 5), and across a SetAttr of the mode alone that
+//     takes its read permission away gets vfs.ErrAcces. The window between
+//     steps 1 and 2 is reached as §7 reaches #41's, with a flush held in its
+//     chunk Put and rcGrace;
+//   - §2's end of the range, which cannot wrap (Assumption 9), for a file whose
+//     size one buffered Write makes 2^64 − 1;
 //   - §4's path for a file with no FS.open entry, and §3's invariant 3, which
 //     makes that path's view complete;
 //   - §5, that a slow fetch holds up no Write, flush or namespace operation;
@@ -30,7 +38,21 @@ package blobfs
 // fetch, and a flush in its chunk Put, through bpStore's gates, and each is
 // known to be there because the fake closes a channel on entry. Goroutines
 // never touch t. The one fixed wait is rcGrace, in
-// TestReadSeesWriteAcknowledgedBeforeAFlush.
+// TestReadSeesWriteAcknowledgedBeforeAFlush and
+// TestReadAnswersFromTheCheckUnderTheFileLock.
+//
+// Two setups rest on something the documents imply without stating it as a
+// rule:
+//   - The permission case of TestReadAnswersFromTheCheckUnderTheFileLock needs
+//     a SetAttr of the mode alone to complete while a flush holds the file's
+//     openFile.mu. ADR 0002 Assumption 7 names a size-setting SETATTR, not a
+//     SETATTR as such, among the calls that can wait on openFile.mu; ADR
+//     0005's Consequences keep that list and add only a Read's step 2 to it;
+//     and §6's list of the file's other lock holders has no mode change in it.
+//     If that changes, the SetAttr hangs and the failure says so.
+//   - TestReadRangeEndDoesNotWrap needs a Write at 2^64 − 2 to be accepted,
+//     which Assumption 9 and ADR 0003's "What this does not decide" (#55)
+//     imply. A decision on #55 may change its setup.
 //
 // Not covered, on purpose:
 //   - Truncate interleavings: a Read meeting a size change (§1's atomicity
@@ -40,10 +62,13 @@ package blobfs
 //     (#40, #56) and §7 tells a test to avoid.
 //   - Symlinks: §1 defines what a Read of a regular file returns, and nothing
 //     else.
-//   - A Read racing the removal of its file, which now gets vfs.ErrStale (§6,
-//     Assumption 5), and a permission change between steps 1 and 2 (§2 step
-//     2). No store call lies between the two steps, so no store fake can hold
-//     a Read there.
+//   - A Read whose file goes by a Rename over it, the other way ADR 0003 §2
+//     site 5 takes an entry out of FS.open: §6's removal bullet speaks of
+//     dropOpen whichever call makes it, and one removal pins step 2's answer.
+//   - What a Sync returns when the file it is uploading is removed meanwhile:
+//     ADR 0003 §2 site 4 says what a failed flush of a removed file does, and
+//     nothing says what a successful one returns, so
+//     TestReadAnswersFromTheCheckUnderTheFileLock only logs it.
 //   - A Read meeting a flush that fails (§6), which repoints nothing and
 //     leaves the dirty buffers in place. The Read that ADR 0005 replaces
 //     handled it correctly too, so it is not part of #41.
@@ -51,14 +76,13 @@ package blobfs
 //   - §2's lock rules and §4's hold times (FS.mu read-locked at most once,
 //     only the references the range touches copied): nothing observable
 //     through the interface distinguishes them.
-//   - The overflow-safe end of the range (§2, Assumption 9): it needs a file
-//     whose size is near 2^64, which #55 leaves undecided.
 //   - Anything across files: §1 promises nothing there.
 
 import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -76,6 +100,8 @@ import (
 // "waits a fixed grace period for it to reach its first lock"). A correct Read
 // passes however long or short it is; only the Read that ADR 0005 replaces
 // needs it to be long enough to be caught.
+// TestReadAnswersFromTheCheckUnderTheFileLock waits it for the same reason,
+// before it changes the file under the Read.
 const rcGrace = 100 * time.Millisecond
 
 // rcNoLock ends the description of a call made while a Read is held in its
@@ -839,5 +865,253 @@ func TestReadCreatesNoOpenFile(t *testing.T) {
 	if of := bpOpen(t, fs, attr.FileID, "after the Reads"); of != nil {
 		t.Errorf("FS.open has an entry for inode %d after nothing but Reads of it on a fresh "+
 			"mount; ADR 0005 §2 and §7: Read never adds an entry to FS.open", attr.FileID)
+	}
+}
+
+// rcOther is a caller who is neither the owner of the files these tests
+// create, testCaller, nor in their group, as in TestPermissionsEnforced.
+var rcOther = vfs.Caller{UID: 999, GID: 999}
+
+// rcStartReadAs starts one fs.Read as c in its own goroutine.
+func rcStartReadAs(fs *FS, c vfs.Caller, h vfs.Handle, off uint64, count uint32) *bpCall[rcReply] {
+	return bpGo(func() rcReply {
+		data, eof, err := fs.Read(context.Background(), c, h, off, count)
+		return rcReply{data, eof, err}
+	})
+}
+
+// The changes TestReadAnswersFromTheCheckUnderTheFileLock makes to a file
+// while a Read of it waits for the file's lock.
+const (
+	rcChangeRemove = "Remove"
+	rcChangeMode   = "SetAttr of the mode alone"
+)
+
+// rcRemoveNoLock ends the description of the Remove that
+// TestReadAnswersFromTheCheckUnderTheFileLock makes while a Sync of the file
+// holds its lock, so that a hang names the rule it breaks.
+const rcRemoveNoLock = " (a hang here means the Remove waits for the file's openFile.mu, which " +
+	"the Sync holds in its chunk Put: ADR 0005 §6, \"A removal\", says dropOpen runs under FS.mu " +
+	"alone, ADR 0003 §3 that site 5 takes no openFile.mu, and ADR 0005 §6 that a flush's " +
+	"uploads need no FS.mu)"
+
+// rcModeNoLock does the same for the SetAttr of the mode alone.
+const rcModeNoLock = " (a hang here means a SetAttr of the mode alone waits for the file's " +
+	"openFile.mu, which the Sync holds in its chunk Put: ADR 0002 Assumption 7 names only a " +
+	"size-setting SETATTR among the calls that can wait on it, ADR 0005's Consequences add " +
+	"only a Read's step 2 to that list, and ADR 0005 §6 says a flush's uploads need no FS.mu)"
+
+// rcStaleRule and rcAccesRule are what the two cases of
+// TestReadAnswersFromTheCheckUnderTheFileLock pin, for their failure messages.
+const rcStaleRule = "ADR 0005 §2 step 2: \"The answer comes from this hold: a handle that has " +
+	"gone since step 1 returns its error, vfs.ErrStale\"; §6, \"A removal\": a Read \"whose " +
+	"step 2 comes after the removal returns vfs.ErrStale\"; Assumption 5: \"A handle removed " +
+	"between the steps now gets vfs.ErrStale where the old Read returned data from its first hold\""
+
+const rcAccesRule = "ADR 0005 §2 step 2: \"Resolve the handle and apply both checks again. The " +
+	"answer comes from this hold: ... a permission change made since step 1 applies\""
+
+// TestReadAnswersFromTheCheckUnderTheFileLock pins ADR 0005 §2 step 2:
+// "Resolve the handle and apply both checks again. The answer comes from this
+// hold: a handle that has gone since step 1 returns its error, vfs.ErrStale,
+// and a permission change made since step 1 applies"; Assumption 5, "The
+// checks are repeated in step 2, and the answer comes from there"; and §6, "A
+// removal": "dropOpen (ADR 0003 §2, site 5) runs under FS.mu alone and leaves
+// of.dirty in place. ... one whose step 2 comes after the removal returns
+// vfs.ErrStale".
+//
+// It reaches the point between steps 1 and 2 the way §7 reaches #41's window.
+// f.bin is created with mode 0644 and written, which gives it an FS.open entry
+// (§4), so a Read of it takes that entry's openFile.mu in step 2. A Sync of it
+// is held in its chunk Put, which holds that lock and "has repointed nothing
+// yet" (§7). A Read of [0, 100) is started, rcGrace passes for it to get
+// through step 1 and wait for the lock (§6: "A Read of a file waits for a
+// flush of that file that is in progress"; Assumption 8), and then, while the
+// Sync is still held, the file is changed:
+//
+//   - "removal": a Remove of f.bin, which must complete while the Sync holds
+//     the file's lock: dropOpen "runs under FS.mu alone" (§6), site 5 "runs
+//     under FS.mu and takes no openFile.mu" (ADR 0003 §3), and "a flush's
+//     uploads ... need no FS.mu" (§6). The Read, by the owner, must return
+//     vfs.ErrStale.
+//   - "permission": a SetAttr of the mode alone, from 0644 to 0600, by the
+//     owner. The Read, by rcOther, whom 0644 lets read and 0600 does not
+//     (TestPermissionsEnforced), must return vfs.ErrAcces. That the SetAttr
+//     completes while the Sync holds the file's lock rests on ADR 0002
+//     Assumption 7, which names a size-setting SETATTR, and not a SETATTR as
+//     such, among the calls that can wait on openFile.mu; on ADR 0005's
+//     Consequences, which keep that list and add only a Read's step 2 to it;
+//     and on §6, whose list of the file's other lock holders has no mode
+//     change in it. No document says it in so many words.
+//
+// Then the Sync is released. A correct Read gives the same answer however it
+// is scheduled: if its step 1 ran before the change, its step 2 runs after it
+// and answers from there; if its step 1 ran after the change, step 1 fails the
+// same way. A Read that answered from step 1's checks returns the 100 bytes,
+// and is caught if it got through step 1 within rcGrace. A setup Read first
+// shows that the same caller can read the file, so that the case cannot pass
+// for want of it. What the Sync returns after the removal is not pinned
+// (see the file header).
+func TestReadAnswersFromTheCheckUnderTheFileLock(t *testing.T) {
+	t.Run("removal", func(t *testing.T) { rcChangeWindow(t, rcChangeRemove) })
+	t.Run("permission", func(t *testing.T) { rcChangeWindow(t, rcChangeMode) })
+}
+
+// rcChangeWindow is one case of TestReadAnswersFromTheCheckUnderTheFileLock.
+func rcChangeWindow(t *testing.T, change string) {
+	t.Helper()
+	ctx := context.Background()
+	bps := &bpStore{Store: bpLocal(t)}
+	fs := bpNew(t, bps, 0, quietLog())
+	const name = "f.bin"
+	f, _ := bpCreate(t, fs, name, 0o644)
+	data := bpUnique(100)
+	bpMustWrite(t, fs, "the Write of 100 bytes at 0 of f.bin, which gives it an FS.open entry "+
+		"(ADR 0005 §4)", f, 0, data)
+
+	reader, readerIs, want, wantIs, rule := testCaller, "its owner", vfs.ErrStale, "vfs.ErrStale", rcStaleRule
+	if change == rcChangeMode {
+		reader, readerIs = rcOther, "a caller who is neither its owner nor in its group"
+		want, wantIs, rule = vfs.ErrAcces, "vfs.ErrAcces", rcAccesRule
+	}
+
+	pre := rcStartReadAs(fs, reader, f, 0, 100).wait(t, "setup: a Read of [0, 100) of f.bin by "+readerIs)
+	if pre.err != nil || !bytes.Equal(pre.data, data) {
+		t.Fatalf("setup: a Read of [0, 100) of f.bin, mode 0644, by %s = (%d bytes, %v), want the "+
+			"100 bytes just written; without that, a Read that answered from step 1's checks could "+
+			"not be told from one that answered from step 2's", readerIs, len(pre.data), pre.err)
+	}
+
+	gate := newBTGate(t)
+	put := &bpHook{entered: make(chan struct{}), gate: gate.ch}
+	bps.setPut(put)
+	fl := bpGo(func() error { return fs.Sync(ctx) })
+	bpWaitEntered(t, "the Sync of f.bin entering its chunk Put", put.entered, fl)
+
+	rd := rcStartReadAs(fs, reader, f, 0, 100)
+	time.Sleep(rcGrace)
+	if change == rcChangeRemove {
+		err := bpDo(t, "the Remove of f.bin, made while a Read of it waits for its lock"+rcRemoveNoLock,
+			func() error { return fs.Remove(ctx, testCaller, fs.Root(), name) })
+		if err != nil {
+			t.Fatalf("the Remove of f.bin by its owner = %v, want success", err)
+		}
+	} else {
+		type setAttrResult struct {
+			attr vfs.Attr
+			err  error
+		}
+		mode := uint32(0o600)
+		sa := bpGo(func() setAttrResult {
+			attr, err := fs.SetAttr(ctx, testCaller, f, vfs.SetAttr{Mode: &mode})
+			return setAttrResult{attr, err}
+		}).wait(t, "the SetAttr of f.bin's mode alone, to 0600, made while a Read of it waits for "+
+			"its lock"+rcModeNoLock)
+		if sa.err != nil {
+			t.Fatalf("the SetAttr of f.bin's mode to 0600 by its owner = %v, want success", sa.err)
+		}
+		if sa.attr.Mode != 0o600 {
+			t.Fatalf("setup: the SetAttr of f.bin's mode to 0600 returned mode %#o, want 0600",
+				sa.attr.Mode)
+		}
+	}
+	if rd.finished() {
+		t.Logf("the Read returned while the Sync still held the file's lock: its step 1 most "+
+			"likely ran after the %s, so this run did not exercise the window between steps 1 "+
+			"and 2; the reply is still checked", change)
+	}
+
+	gate.open()
+	ferr := fl.wait(t, "the Sync, after its chunk Put was released")
+	switch {
+	case ferr == nil:
+	case change == rcChangeMode:
+		t.Errorf("the Sync of f.bin = %v, want success against a healthy writable store", ferr)
+	default:
+		t.Logf("the Sync of the removed f.bin = %v; no document says what a flush of a file "+
+			"removed during its upload returns, so this test does not check it", ferr)
+	}
+
+	r := rd.wait(t, "the Read of [0, 100) of f.bin, after the Sync was released")
+	switch {
+	case r.err == nil:
+		t.Errorf("the Read of [0, 100) of f.bin by %s, which waited for the file's lock while a %s "+
+			"was made, returned %d bytes and no error, want %s: it answered from checks made "+
+			"before the %s. %s", readerIs, change, len(r.data), wantIs, change, rule)
+	case !errors.Is(r.err, want):
+		t.Errorf("the Read of [0, 100) of f.bin by %s, which waited for the file's lock while a %s "+
+			"was made, = %v, want %s. %s", readerIs, change, r.err, wantIs, rule)
+	}
+}
+
+// The offsets TestReadRangeEndDoesNotWrap uses. The file's one written byte is
+// at rcHugeByte, which makes its size rcHugeByte+1 = 2^64 − 1, and the Read
+// asks for rcHugeCount bytes at rcHugeOff. Both offsets lie in the file's last
+// chunk index, 2^52 − 1.
+const (
+	rcHugeByte  uint64 = 1<<64 - 2
+	rcHugeOff   uint64 = 1<<64 - 10
+	rcHugeCount uint32 = 100
+)
+
+// TestReadRangeEndDoesNotWrap pins ADR 0005 §2's end of the range, "The end of
+// the range is off + min(count, size − off), computed once off < size is
+// known, so that it cannot wrap", and Assumption 9, "off + count can wrap for
+// an offset near 2^64, which a file can reach because nothing enforces the
+// advertised maximum file size (#55)"; with §2's "the reply is exactly as long
+// as the clamped range" and §1's "eof decided by that size".
+//
+// One UNSTABLE Write of 1 byte at 2^64 − 2 to an empty file makes its size
+// 2^64 − 1. A Read of 100 bytes at 2^64 − 10 must then return the 9 bytes
+// [2^64 − 10, 2^64 − 1): 8 zeros, which nothing wrote (§2: "bytes past the end
+// of a chunk or of a dirty buffer read as zeros"; ADR 0003 §4: an index past
+// the end of the chunk list starts from zeros), and the written byte, with
+// eof. An end computed as off + count wraps round to 90, below off.
+//
+// It depends on that Write being accepted, which no document states as a rule.
+// Assumption 9 says a file can reach such an offset, and ADR 0003's "What this
+// does not decide" that nothing enforces FSINFO's maxfilesize of 2^62, so that
+// "one WRITE at a huge offset" makes "the next flush's namespace update append
+// a hole to the file's chunk list for every chunk index up to it" (#55). That
+// is why the file is never flushed: the Write is UNSTABLE, the budget is the
+// default, which one chunk does not reach, and nothing here Syncs, Commits or
+// remounts, so its chunk list never grows towards 2^52 entries. If #55 is
+// decided so that the Write is refused, the setup fails saying so, and the
+// setup is what must change.
+func TestReadRangeEndDoesNotWrap(t *testing.T) {
+	fs := bpNew(t, bpLocal(t), 0, quietLog())
+	h, _ := bpCreate(t, fs, "huge.bin", 0)
+	b := []byte{0xa5}
+	w := bpWrite(t, fs, "the UNSTABLE Write of 1 byte at 2^64 − 2 of the empty huge.bin", h, rcHugeByte, b,
+		vfs.Unstable)
+	if w.err != nil || w.n != 1 {
+		t.Fatalf("setup: the UNSTABLE Write of 1 byte at 2^64 − 2 of the empty huge.bin = %v, want "+
+			"(1, UNSTABLE, nil). This test depends on that Write being accepted: ADR 0005 "+
+			"Assumption 9 says a file can reach an offset near 2^64 because nothing enforces the "+
+			"advertised maximum file size (#55). If #55 is decided so that it is refused, change "+
+			"this setup", w)
+	}
+	if a := bpGetAttr(t, fs, h, "GetAttr of huge.bin after the Write"); a.Size != rcHugeByte+1 {
+		t.Fatalf("setup: huge.bin's size after 1 byte written at 2^64 − 2 is %d, want 2^64 − 1 = %d",
+			a.Size, rcHugeByte+1)
+	}
+
+	r := rcStartRead(fs, h, rcHugeOff, rcHugeCount).wait(t, "the Read of 100 bytes at 2^64 − 10 of huge.bin")
+	if r.err != nil {
+		t.Fatalf("the Read of 100 bytes at 2^64 − 10 of the (2^64 − 1)-byte huge.bin = %v, want success",
+			r.err)
+	}
+	want := append(make([]byte, 8), b...)
+	if !bytes.Equal(r.data, want) {
+		t.Errorf("the Read of 100 bytes at 2^64 − 10 of the (2^64 − 1)-byte huge.bin returned %d "+
+			"bytes, %x, want the 9 bytes to the end of the file, %x: 8 zeros and the byte written "+
+			"at 2^64 − 2. ADR 0005 §2: the reply is exactly as long as the clamped range, whose end "+
+			"is off + min(count, size − off), computed so that it cannot wrap (Assumption 9); "+
+			"off + count wraps round to 90", len(r.data), r.data, want)
+	}
+	if !r.eof {
+		t.Errorf("the Read of 100 bytes at 2^64 − 10 of the (2^64 − 1)-byte huge.bin returned eof = " +
+			"false, want true: its range reaches the end of the file (ADR 0005 §1: eof is decided by " +
+			"the size at the view; §2, the end of the range)")
 	}
 }
