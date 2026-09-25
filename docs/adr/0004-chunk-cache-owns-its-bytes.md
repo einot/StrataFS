@@ -2,6 +2,9 @@
 
 **Status:** Accepted
 **Date:** 2026-09-24
+**Revised:** 2026-09-25 — cross-references only. The bullet *`Read` and the
+dirty buffers* under *What this does not decide* now ends by saying that
+ADR 0005 decides #41 and #49. Nothing else changed.
 **Issue:** #46, #47
 
 ## Context
@@ -320,7 +323,7 @@ them.
   after releasing that lock while `bufferWrite` writes into them in place
   (#49), which is a data race. That is the kind of sharing §1 removes from the
   cache, but it is in `Read`, and fixing it changes where `Read` takes its
-  locks. It is left to those issues.
+  locks. It is left to those issues. ADR 0005 decides both.
 - **`truncate`'s deferred trims** (#40, #56).
 - **One memory pool for dirty buffers and the cache.** Left open by ADR 0003.
 - **The form of the key.** `docs/DESIGN.md` §3 keys the redesign's cache by the
