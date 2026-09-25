@@ -97,7 +97,11 @@ type FS struct {
 	retention int
 	pruning   bool
 
-	// open holds buffered writes per inode.
+	// open holds buffered writes per inode. An entry enters only through
+	// getOpen and leaves only through dropOpen as its inode leaves the table,
+	// and an inode with no entry has no dirty buffers or pending trims, which
+	// is what lets Read take its view under mu alone for such a file (ADR 0005
+	// §3, invariants 2 and 3).
 	open map[uint64]*openFile
 
 	// budget counts the buffer capacity held across open and holds writers
@@ -1038,84 +1042,196 @@ func (f *FS) putChunk(ctx context.Context, data []byte) (chunkRef, error) {
 	return ref, nil
 }
 
+// Read returns the bytes the file holds at one instant between the call and its
+// return, its view, clamped to the size at that instant, with eof decided by
+// that size (ADR 0005 §1). It takes the view in three steps (§2):
+//
+//  1. Holding mu for reading, it resolves the handle and applies its checks. A
+//     file with no FS.open entry has no buffered state (§3), so the size and
+//     the references in range, taken in this same hold, are the whole view.
+//  2. Otherwise, holding the entry's openFile.mu, and mu for reading inside it,
+//     it checks again and answers from there, then takes the size and the
+//     references of the indices in range that are not dirty. It releases mu
+//     and copies the dirty bytes in range into the reply before releasing
+//     openFile.mu, since writes change those buffers in place.
+//  3. Holding no lock, it fetches the references. Each names bytes that cannot
+//     change (§5), so a slow bucket holds up no write, flush or namespace
+//     operation.
+//
+// Each lock is held for work proportional to the range, not the file (§4).
+// Read never calls getOpen, so it adds no FS.open entry, and it never touches
+// the budget.
 func (f *FS) Read(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, count uint32) ([]byte, bool, error) {
-	// Take a consistent view of the chunk list, then release the namespace lock
-	// before any network I/O.
 	f.mu.RLock()
-	n, err := f.resolve(h)
+	n, err := f.readable(c, h)
 	if err != nil {
 		f.mu.RUnlock()
 		return nil, false, err
 	}
-	if n.isDir() {
+	of := f.open[n.ID]
+	var (
+		size, end uint64
+		out       []byte
+		refs      []readRef
+	)
+	if of == nil {
+		size = n.Size
+		if off < size {
+			end = readEnd(off, size, count)
+			refs = f.readRefs(n, nil, off, end)
+		}
 		f.mu.RUnlock()
-		return nil, false, vfs.ErrIsDir
-	}
-	if !permitted(n, c, 4) {
+	} else {
 		f.mu.RUnlock()
-		return nil, false, vfs.ErrAcces
+		size, end, out, refs, err = f.readBuffered(c, h, of, off, count)
+		if err != nil {
+			return nil, false, err
+		}
 	}
-	size := n.Size
-	id := n.ID
-	refs := append([]chunkRef(nil), n.Chunks...)
-	of := f.open[id]
-	f.mu.RUnlock()
-
 	if off >= size {
 		return nil, true, nil
 	}
-	end := off + uint64(count)
-	if end > size {
-		end = size
-	}
-	out := make([]byte, 0, end-off)
-
-	// Copy any buffered chunks so the per-file lock is not held across reads.
-	var staged map[uint64][]byte
-	if of != nil {
-		of.mu.Lock()
-		if len(of.dirty) > 0 {
-			staged = make(map[uint64][]byte, len(of.dirty))
-			for k, v := range of.dirty {
-				staged[k] = v
-			}
-		}
-		of.mu.Unlock()
+	if of == nil {
+		out = make([]byte, end-off)
 	}
 
-	cs := uint64(f.chunkSize)
-	for pos := off; pos < end; {
-		idx := pos / cs
-		within := pos % cs
-
-		var chunk []byte
-		if d, ok := staged[idx]; ok {
-			chunk = d
-		} else if idx < uint64(len(refs)) {
-			chunk, err = f.loadChunk(ctx, refs[idx])
-			if err != nil {
-				return nil, false, err
-			}
+	// Holes, indices past the end of the chunk list and bytes past the end of
+	// a chunk were never recorded or copied, and read as the zeros out starts
+	// with. A loadChunk result may be the cache's own slice, so it is only
+	// copied from (ADR 0004 §3).
+	for _, r := range refs {
+		data, err := f.loadChunk(ctx, r.ref)
+		if err != nil {
+			return nil, false, err
 		}
-
-		// Bytes past the end of a stored chunk but inside the file's size are
-		// holes, which read as zeros.
-		avail := cs - within
-		if remaining := end - pos; remaining < avail {
-			avail = remaining
+		within, dst := f.readSpan(out, off, end, r.idx)
+		if within < uint64(len(data)) {
+			copy(dst, data[within:])
 		}
-		piece := make([]byte, avail)
-		if within < uint64(len(chunk)) {
-			copy(piece, chunk[within:])
-		}
-		out = append(out, piece...)
-		pos += avail
 	}
 
 	// Reading updates atime, but doing so would dirty the namespace on every
 	// read and force a commit; the cost is not worth it for a PoC, so atime is
 	// left to writes. This matches a Linux "relatime"-style tradeoff.
 	return out, end >= size, nil
+}
+
+// readRef is a chunk reference a Read's view names, with the index it is for.
+type readRef struct {
+	idx uint64
+	ref chunkRef
+}
+
+// readable resolves h for a Read and applies its checks, in the order Read has
+// always applied them. Caller must hold mu.
+func (f *FS) readable(c vfs.Caller, h vfs.Handle) (*inode, error) {
+	n, err := f.resolve(h)
+	if err != nil {
+		return nil, err
+	}
+	if n.isDir() {
+		return nil, vfs.ErrIsDir
+	}
+	if !permitted(n, c, 4) {
+		return nil, vfs.ErrAcces
+	}
+	return n, nil
+}
+
+// readBuffered is step 2 of Read (ADR 0005 §2), for a file with an FS.open
+// entry. It returns the size, the end of the range, the reply with the dirty
+// bytes in range already in it, and the references still to fetch; for
+// off >= size it returns only the size. It releases of.mu by defer, as
+// bufferWrite does, so that a panic cannot leave the lock held.
+//
+// Nothing checks that FS.open still holds of: a successful resolve here means
+// it does, because an entry leaves FS.open only with its inode (ADR 0005 §3,
+// invariant 2; Assumption 6).
+func (f *FS) readBuffered(c vfs.Caller, h vfs.Handle, of *openFile, off uint64, count uint32) (size, end uint64, out []byte, refs []readRef, err error) {
+	of.mu.Lock()
+	defer of.mu.Unlock()
+
+	// The answer comes from this hold, not step 1's: the handle may have gone,
+	// or the mode changed, while no lock was held.
+	f.mu.RLock()
+	n, err := f.readable(c, h)
+	if err != nil {
+		f.mu.RUnlock()
+		return 0, 0, nil, nil, err
+	}
+	size = n.Size
+	if off >= size {
+		f.mu.RUnlock()
+		return size, 0, nil, nil, nil
+	}
+	end = readEnd(off, size, count)
+	refs = f.readRefs(n, of.dirty, off, end)
+	// The copy below needs only of.mu, under which of.dirty changes (ADR 0005
+	// §3, invariant 1), and releasing mu first keeps the namespace lock's hold
+	// independent of how many bytes it copies.
+	f.mu.RUnlock()
+
+	out = make([]byte, end-off)
+	if end > off {
+		cs := uint64(f.chunkSize)
+		for idx, last := off/cs, (end-1)/cs; idx <= last; idx++ {
+			buf, ok := of.dirty[idx]
+			if !ok {
+				continue
+			}
+			within, dst := f.readSpan(out, off, end, idx)
+			if within < uint64(len(buf)) {
+				copy(dst, buf[within:])
+			}
+		}
+	}
+	return size, end, out, refs, nil
+}
+
+// readEnd returns the end of a Read's range clamped to size, as
+// off + min(count, size-off), so that an offset near 2^64 cannot wrap it
+// (ADR 0005 §2). It needs off < size.
+func readEnd(off, size uint64, count uint32) uint64 {
+	if rem := size - off; uint64(count) < rem {
+		return off + uint64(count)
+	}
+	return size
+}
+
+// readRefs returns the references of the chunk indices that [off, end)
+// touches, leaving out indices present in dirty, holes, and indices past the
+// end of the chunk list, none of which a Read fetches. It visits only those
+// indices, never the whole list (ADR 0005 §4). Caller must hold mu.
+func (f *FS) readRefs(n *inode, dirty map[uint64][]byte, off, end uint64) []readRef {
+	if end <= off {
+		return nil
+	}
+	var refs []readRef
+	cs := uint64(f.chunkSize)
+	for idx, last := off/cs, (end-1)/cs; idx <= last && idx < uint64(len(n.Chunks)); idx++ {
+		if _, ok := dirty[idx]; ok || n.Chunks[idx].isHole() {
+			continue
+		}
+		refs = append(refs, readRef{idx: idx, ref: n.Chunks[idx]})
+	}
+	return refs
+}
+
+// readSpan returns where chunk index idx meets a Read's range [off, end): the
+// offset into the chunk, and the part of out, which holds the range from off,
+// that the chunk fills. idx must be one the range touches. The chunk's end,
+// base + cs, is computed only when it lies below end, so it cannot wrap.
+func (f *FS) readSpan(out []byte, off, end, idx uint64) (within uint64, dst []byte) {
+	cs := uint64(f.chunkSize)
+	base := idx * cs
+	lo, hi := base, end
+	if lo < off {
+		lo = off
+	}
+	if end-base > cs {
+		hi = base + cs
+	}
+	return lo - base, out[lo-off : hi-off]
 }
 
 func (f *FS) Write(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, data []byte, how vfs.Stability) (uint32, vfs.Stability, error) {
