@@ -463,6 +463,15 @@ is its hash. That is worth stating plainly: **a content-addressed cache has no
 coherence protocol**, because a given key's contents can never change. The PoC
 already relies on this; the redesign extends it to all metadata.
 
+A read sees the file at one instant. Holding what orders it against writes to
+the file and against a consistency point's swap, it decides which blocks of its
+range are dirty in memory and which references name the rest, and copies out
+the dirty bytes it needs; it fetches the referenced blocks only after letting
+go. Fetching late loses nothing, because a block named by its hash cannot
+change. So a read never returns less than a write acknowledged before it
+began, nor a mixture of bytes from before and after one write
+([ADR 0005](adr/0005-read-takes-one-view-under-the-file-lock.md)).
+
 ---
 
 ## 8. Free space: why the block-map becomes mark-and-sweep
@@ -685,3 +694,4 @@ it is not this one.
 | [0002](adr/0002-duplicate-request-cache.md) | A duplicate request cache, keyed per connection instance, replays the reply to a retransmitted non-idempotent call | none — it constrains `internal/sunrpc` and `internal/nfs`, which section 14 carries over unchanged |
 | [0003](adr/0003-write-backpressure.md) | Buffered writes are bounded by a byte budget; a writer that has to wait performs the drain itself | 5, 9 |
 | [0004](adr/0004-chunk-cache-owns-its-bytes.md) | The chunk cache stores its own exact-length copy of each chunk, charges what it holds, and does not re-verify hits | 3 |
+| [0005](adr/0005-read-takes-one-view-under-the-file-lock.md) | A read takes its view of a file — size, chunk references and the dirty bytes it needs — at one instant under the file's lock, and fetches chunks holding no lock | 7 |

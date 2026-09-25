@@ -165,6 +165,10 @@
   chunk-cache bullet under *What this does not decide* by saying that ADR 0004
   decides both #47 and #46; Assumption 17's citation moves to `cache.go:44-46`,
   where the fix moved the code. Nothing else changed.
+- **Revised:** 2026-09-25 — cross-references only. The bullet *Stale reads and
+  resurrected truncated bytes* under *What this does not decide* now ends by
+  saying that ADR 0005 decides #41, together with #49, and that #40 stays open.
+  Nothing else changed.
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
 - **Affects:** `internal/blobfs`, `cmd/strata`, doc comment on `vfs.FS.Write`
 
@@ -1433,6 +1437,9 @@ to answer speculatively now.
   from the untrimmed chunk that `n.Chunks` still names (`fs.go:1144`), so
   truncated bytes can come back (#40). Backpressure neither causes nor fixes
   either one, though its drains are flushes and so add to #41's windows.
+  ADR 0005 decides #41, together with #49: `Read` now takes its view of the
+  chunk list and the dirty buffers in one hold of `openFile.mu`. #40 stays
+  open.
 - **Enforcing the advertised maximum file size** (#55). `FSINFO` advertises a
   `maxfilesize` of 2^62 (`internal/nfs/nfs3.go:564`), and nothing enforces it.
   One `SETATTR` to a huge size, or one `WRITE` at a huge offset, makes

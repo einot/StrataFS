@@ -38,10 +38,11 @@ package blobfs
 //     budget). Two unsynchronised reads cannot observe it; bpCheckAccounting
 //     checks the equality at rest.
 //
-// Avoided, because they are pre-existing and out of scope, and trip -race or
-// flake: a Read concurrent with a Write to the same file; and divergence while
-// other goroutines write. cache_test.go now covers writing into a file again
-// after its flush failed partway through its uploads (#46).
+// Avoided, because it is pre-existing and out of scope, and trips -race or
+// flakes: divergence while other goroutines write. A Read concurrent with a
+// Write to the same file is covered by read_consistency_test.go (ADR 0005).
+// cache_test.go now covers writing into a file again after its flush failed
+// partway through its uploads (#46).
 
 import (
 	"bytes"

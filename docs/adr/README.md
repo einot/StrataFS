@@ -77,3 +77,4 @@ URL, and what was taken from it.
 | [0002](0002-duplicate-request-cache.md) | Duplicate request cache for non-idempotent NFS procedures | Accepted |
 | [0003](0003-write-backpressure.md) | Bounding buffered writes, and the blocking discipline that makes it safe | Accepted |
 | [0004](0004-chunk-cache-owns-its-bytes.md) | The chunk cache owns its bytes and charges what it holds | Accepted |
+| [0005](0005-read-takes-one-view-under-the-file-lock.md) | A read takes one view of a file, under the file's lock | Accepted |
