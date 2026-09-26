@@ -11,6 +11,14 @@ cheap anyway (#55); and a `WRITE` past the new end within the same chunk
 exposes the removed bytes as well as growth does. It also lists stopping
 dispatch before the final `Sync` among the options. The window is still left to
 #64, and the decision and everything else are unchanged.
+**Revised:** 2026-09-26 — for ADR 0007, which decides #55 and #66. Under *What
+this does not decide*, the bullet on the commit window no longer says that
+#55 lets any local user crash the server on demand: it says that until
+ADR 0007 one request could, and that ADR 0007 bounds what one request can add
+while many can still exhaust memory. The bullet on #42, #43 and #55 says that
+a `SETATTR` above the maximum file size is refused before any lock, so a
+truncate appends at most 2^20 holes. The revision above is left as the history
+it is, and the decision and everything else are unchanged.
 **Issue:** #40, #56
 
 ## Context
@@ -419,8 +427,10 @@ required, except where it says otherwise.
   final `Sync` run, and the process exits as soon as the shutdown `Sync`
   returns, without waiting for the committer's. A client that keeps sending
   during a clean shutdown can land a truncate in the window of one of those
-  final `Sync`s, whose commit may then be the last. A crash is cheap as well:
-  #55 lets any local user who can reach the server's port crash it on demand.
+  final `Sync`s, whose commit may then be the last. A crash was cheap as well:
+  until ADR 0007, #55 let any local user who could reach the server's port
+  crash it on demand with one request. ADR 0007 bounds what one request can
+  add, but many can still exhaust memory (its *What this does not decide*).
 
   It predates this ADR, affects a dirty tail as well as a pending trim, and is
   neither widened nor narrowed here. Nothing in the protocol makes a client
@@ -434,10 +444,12 @@ required, except where it says otherwise.
   already gone, but `truncate` resolves the handle again under both locks
   before it touches the map, so such an entry never gets a trim (#42). A commit
   holding `FS.mu` across its store calls still holds up a truncate (#43). A
-  `SETATTR` to a huge size still appends a hole to the chunk list for every
-  index up to it, holding `FS.mu`. Holes take no trim, so this ADR changes
+  `SETATTR` that grows a file appends a hole to the chunk list for every index
+  up to its new size, holding `FS.mu`. Holes take no trim, so this ADR changes
   nothing there, and after it that is the cheapest way left to exhaust memory
-  with `SETATTR` (#55).
+  with `SETATTR` (#55). ADR 0007 refuses a size above the maximum file size
+  before any lock, so such a truncate appends at most 2^20 holes; it bounds one
+  file, not all of them together.
 - **The redesign's truncate** (`docs/DESIGN.md` §4, §5), which shortens a
   leaf's span in the file tree.
 - **A doc comment on `vfs.FS.SetAttr`** stating the zero-fill rule for every
