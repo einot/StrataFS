@@ -9,7 +9,9 @@ package nfs
 //
 //   - FSINFO's maxfilesize is MaxFileSize() (§5);
 //   - a SETATTR, WRITE or CREATE that blobfs refuses is answered NFS3ERR_FBIG,
-//     27, with its procedure's usual error body, one wcc_data (§5);
+//     27, with its procedure's usual error body, one wcc_data and nothing
+//     after it (§5, including "The end of a reply"), and every reply these
+//     tests decode ends at its last field;
 //   - a WRITE that crosses the limit is answered NFS3_OK with the count it
 //     wrote (§5), and a WRITE whose end runs past 2^64 is refused (#66);
 //   - a CREATE whose size is above the limit creates nothing, UNCHECKED and
@@ -31,6 +33,7 @@ package nfs
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"testing"
 
@@ -93,6 +96,22 @@ func nmfsFattr(r *xdr.Reader) uint64 {
 	return size
 }
 
+// nmfsWantEnd requires r, a reply whose last field has just been read, to have
+// decoded without error and to hold nothing more: Err() is nil and Remaining()
+// is 0 (ADR 0007 §5, "The end of a reply"). For a refused SETATTR, WRITE or
+// CREATE that is §5's "one wcc_data after its status, and nothing else".
+func nmfsWantEnd(t *testing.T, r *xdr.Reader, what string) {
+	t.Helper()
+	if err := r.Err(); err != nil {
+		t.Fatalf("decoding %s: %v (ADR 0007 §5)", what, err)
+	}
+	if n := r.Remaining(); n != 0 {
+		t.Fatalf("%s holds %d more bytes after its last field, want none: a reply carries "+
+			"nothing after its last field, and a refused SETATTR, WRITE or CREATE carries one "+
+			"wcc_data after its status, and nothing else (ADR 0007 §5)", what, n)
+	}
+}
+
 // nmfsGetSize sends a GETATTR of fh, which must succeed, and returns the size
 // it reports.
 func nmfsGetSize(t *testing.T, c *rpcClient, fh []byte, what string) uint64 {
@@ -120,10 +139,8 @@ func nmfsSetSize(t *testing.T, c *rpcClient, fh []byte, size uint64) uint32 {
 	})
 	st := r.Uint32()
 	skipWccData(r)
-	if err := r.Err(); err != nil {
-		t.Fatalf("decoding the reply to a SETATTR of size %d, status %d: %v; SETATTR3resok and "+
-			"SETATTR3resfail each carry one wcc_data (ADR 0007 §5)", size, st, err)
-	}
+	nmfsWantEnd(t, r, fmt.Sprintf("the reply to a SETATTR of size %d, status %d, whose "+
+		"SETATTR3resok or SETATTR3resfail is one wcc_data", size, st))
 	return st
 }
 
@@ -154,10 +171,8 @@ func nmfsWrite(t *testing.T, c *rpcClient, fh []byte, off uint64, data []byte) n
 		rep.committed = r.Uint32()
 		r.Fixed(8)
 	}
-	if err := r.Err(); err != nil {
-		t.Fatalf("decoding the reply to a WRITE of %d bytes at %d, status %d: %v (ADR 0007 §5)",
-			len(data), off, rep.status, err)
-	}
+	nmfsWantEnd(t, r, fmt.Sprintf("the reply to a WRITE of %d bytes at %d, status %d",
+		len(data), off, rep.status))
 	return rep
 }
 
@@ -193,10 +208,8 @@ func nmfsCreate(t *testing.T, c *rpcClient, dir []byte, name string, mode uint32
 		}
 	}
 	skipWccData(r)
-	if err := r.Err(); err != nil {
-		t.Fatalf("decoding the reply to a CREATE of %s with size %d, status %d: %v (ADR 0007 §5)",
-			name, size, rep.status, err)
-	}
+	nmfsWantEnd(t, r, fmt.Sprintf("the reply to a CREATE of %s with size %d, status %d",
+		name, size, rep.status))
 	return rep
 }
 
@@ -240,9 +253,7 @@ func TestNFSMaxFileSizeFSInfo(t *testing.T) {
 	maxFileSize := r.Uint64()
 	deltaSec, deltaNsec := r.Uint32(), r.Uint32()
 	properties := r.Uint32()
-	if err := r.Err(); err != nil {
-		t.Fatalf("decoding FSINFO3resok (ADR 0007 §5): %v", err)
-	}
+	nmfsWantEnd(t, r, "the FSINFO reply, whose last field is FSINFO3resok's properties")
 	t.Logf("FSINFO: rtmax %d, rtpref %d, rtmult %d, wtmax %d, wtpref %d, wtmult %d, dtpref %d, "+
 		"maxfilesize %d, time_delta %d.%09d, properties %#x", words[0], words[1], words[2], words[3],
 		words[4], words[5], words[6], maxFileSize, deltaSec, deltaNsec, properties)

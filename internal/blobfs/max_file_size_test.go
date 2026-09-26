@@ -22,8 +22,8 @@ package blobfs
 //   - §4's order: a read-only mount's vfs.ErrROFS (reached as §7's "A
 //     read-only mount" says), a diverged mount's vfs.ErrStale and a bad
 //     name's vfs.ErrInval come before vfs.ErrFBig, and vfs.ErrFBig comes before a
-//     stale handle, a directory, a permission failure, a parent that is not a
-//     directory and an existing name;
+//     stale handle, a malformed handle, a directory, a permission failure, a
+//     parent that is not a directory and an existing name;
 //   - §6, a file an earlier build left larger, and the record New logs for it;
 //   - §7, the test surface: FS.maxFileSize, set after New and before first
 //     use, stands for a build with another limit.
@@ -33,7 +33,8 @@ package blobfs
 // FS.open entry, or its absence; its dirty buffers and pending trims, read
 // through bpSnapshot; its contents; and ADR 0003 §2's accounting invariant.
 // What a fresh mount finds is checked after a Sync once every refusal has been
-// confirmed.
+// confirmed. Dirty buffers are present before the refused calls in several
+// tests; a pending trim is present in TestMaxFileSizeRefusedCallsKeepAPendingTrim.
 //
 // ADR 0007 §7 says how a test stays safe against a build that compiles but
 // lacks a check, which turns an over-limit request into a chunk list as long
@@ -58,6 +59,13 @@ package blobfs
 // goroutines never touch t.
 //
 // Not covered, on purpose:
+//   - That §6's record counts regular files only, and not a directory or a
+//     symlink above the limit. ADR 0007 §7 pins no way to put a non-regular
+//     inode above the limit: the only route is SETATTR with a size on a
+//     symlink's handle, which "What this does not decide" leaves open as a
+//     defect, and a test built on it would make that defect part of the test
+//     surface. TestMaxFileSizeMountRecord's bucket holds no such inode, so the
+//     filter is never exercised.
 //   - ErrNameTooLong before ErrFBig: no document here gives the name limit.
 //   - Cloner.CloneRange (§3): nothing implements it.
 //   - That truncate's and flushOpen's fills are unchanged and bounded by
@@ -826,12 +834,78 @@ func TestMaxFileSizeCreate(t *testing.T) {
 	})
 }
 
+// TestMaxFileSizeRefusedCallsKeepAPendingTrim pins ADR 0007 §4, "A refused call
+// ... changes no size, time, mode, chunk list, dirty buffer or pending trim",
+// and §7: afterwards "the file's dirty buffers and pending trims ... are all as
+// they were", for a file that has a pending trim when the refused calls are
+// made. The trim is reached as ADR 0006 §8 says: a two-chunk file is seeded
+// through another mount, the bucket is mounted afresh so that its chunks are
+// cold, and a SetAttr truncates the file into the middle of chunk 1, which
+// queues one trim and stages no buffer (ADR 0006 §3(b), (d); ADR 0003 §2's
+// "Deferring to pendingTrim"). A SetAttr to 2^32 + 1, a Write of 1 byte at
+// 2^32 and a Write of 20 bytes at 2^64 − 10 (#66) are then refused, and after
+// each the file still has exactly one pending trim, no dirty buffer, and
+// everything else as it was (mfsWantUnchanged). A Sync then applies the trim,
+// and a fresh mount finds the file truncated to 4196 bytes.
+func TestMaxFileSizeRefusedCallsKeepAPendingTrim(t *testing.T) {
+	st := bpLocal(t)
+	data := bpSeedFile(t, st, "trim.bin", 2*bpCS)
+	fs := mfsNew(t, st, quietLog())
+	h, attr := bpLookup(t, fs, "trim.bin")
+	const cut = bpCS + 100
+	bpTruncate(t, fs, h, cut, "SetAttr of trim.bin to 4196, into the middle of its cold chunk 1 "+
+		"(ADR 0006 §8)")
+	of := bpMustOpen(t, fs, attr.FileID, "setup: trim.bin after the truncate")
+	if s := bpSnapshot(t, of, "setup: trim.bin after the truncate"); s.pending != 1 || len(s.caps) != 0 {
+		t.Fatalf("setup: after truncating trim.bin into its cold chunk 1 on a fresh mount, "+
+			"len(of.pendingTrim) = %d and of.dirty holds indices %v, want one pending trim and no "+
+			"dirty buffer (ADR 0006 §3(b), (d), §8); this test needs a file with a pending trim",
+			s.pending, s.indices())
+	}
+	wantTrim := func(what string) {
+		t.Helper()
+		if s := bpSnapshot(t, of, what); s.pending != 1 || len(s.caps) != 0 {
+			t.Errorf("%s: len(of.pendingTrim) = %d and of.dirty holds indices %v, want the one "+
+				"pending trim and no dirty buffer, as before the call. %s", what, s.pending,
+				s.indices(), mfsRule)
+		}
+	}
+
+	what := "SetAttr of trim.bin, which has a pending trim, to size 2^32 + 1"
+	before := mfsCapture(t, fs, h, "before "+what)
+	if d := wsDiff(before.data, data[:cut], 512); d != "" {
+		t.Fatalf("setup: trim.bin truncated to 4196 bytes, before the refused calls: %s", d)
+	}
+	mfsWantFBig(t, what, bpDo(t, what, mfsSetSize(fs, h, mfsMax+1)))
+	mfsWantUnchanged(t, fs, h, before, what)
+	wantTrim("after " + what)
+
+	what = "the UNSTABLE Write of 1 byte at 2^32 to trim.bin, which has a pending trim"
+	before = mfsCapture(t, fs, h, "before "+what)
+	mfsWantRefusedWrite(t, what, bpWrite(t, fs, what, h, mfsMax, bpUnique(1), vfs.Unstable))
+	mfsWantUnchanged(t, fs, h, before, what)
+	wantTrim("after " + what)
+
+	what = "the UNSTABLE Write of 20 bytes at 2^64 − 10 to trim.bin, which has a pending trim (#66)"
+	before = mfsCapture(t, fs, h, "before "+what)
+	mfsWantRefusedWrite(t, what, bpWrite(t, fs, what, h, 1<<64-10, bpUnique(20), vfs.Unstable))
+	mfsWantUnchanged(t, fs, h, before, what)
+	wantTrim("after " + what)
+
+	bpMustSync(t, fs, "Sync applying trim.bin's pending trim, after the refused calls")
+	bpWantRemount(t, st, "trim.bin", data[:cut], "trim.bin truncated to 4196 bytes, after the "+
+		"refused calls and a Sync")
+}
+
 // TestMaxFileSizeCheckedBeforeTheHandle pins ADR 0007 §4's order: "It comes
 // before a stale handle's ErrStale, ErrBadHandle, ErrIsDir, ErrAcces,
 // ErrNotDir, ErrExist and any wait", and Assumption 7: "a request that is both
 // too large and for a stale handle is answered NFS3ERR_FBIG". Each call below
 // would fail for its handle, its caller or its parent, and must fail with
-// vfs.ErrFBig instead. rcOther is neither f.bin's owner nor in its group.
+// vfs.ErrFBig instead. rcOther is neither f.bin's owner nor in its group. The
+// malformed handle is three bytes, {1, 2, 3}, the one TestNFSErrorsAreProtocolErrors
+// sends and expects NFS3ERR_BADHANDLE or NFS3ERR_STALE for; either answer, in
+// place of vfs.ErrFBig, means the handle was resolved before the size check.
 func TestMaxFileSizeCheckedBeforeTheHandle(t *testing.T) {
 	ctx := context.Background()
 	fs := mfsNew(t, bpLocal(t), quietLog())
@@ -873,6 +947,9 @@ func TestMaxFileSizeCheckedBeforeTheHandle(t *testing.T) {
 	}
 	check("the Write of 1 byte at 2^32 to gone.bin's stale handle", write(testCaller, gone))
 	check("SetAttr of gone.bin's stale handle to size 2^32 + 1", setSize(testCaller, gone))
+	malformed := vfs.Handle{1, 2, 3}
+	check("the Write of 1 byte at 2^32 to a malformed three-byte handle", write(testCaller, malformed))
+	check("SetAttr of a malformed three-byte handle to size 2^32 + 1", setSize(testCaller, malformed))
 	check("the Write of 1 byte at 2^32 to the root directory", write(testCaller, root))
 	check("the Write of 1 byte at 2^32 to f.bin by a caller it does not let write", write(rcOther, f))
 	check("SetAttr of f.bin to size 2^32 + 1 by a caller who does not own it", setSize(rcOther, f))
@@ -1008,8 +1085,8 @@ func TestMaxFileSizeMountRecord(t *testing.T) {
 				slog.LevelWarn)
 		}
 		if v, ok := mfsWantKind(t, rec, "count", slog.KindInt64); ok && v.Int64() != 1 {
-			t.Errorf("the %q record's count = %d, want 1: one regular file is above the limit, and "+
-				"directories and symlinks are not counted (ADR 0007 §6)", mfsMsgLarger, v.Int64())
+			t.Errorf("the %q record's count = %d, want 1: the bucket holds one regular file above "+
+				"the limit, wide.bin, and nothing else above it (ADR 0007 §6)", mfsMsgLarger, v.Int64())
 		}
 		if v, ok := mfsWantKind(t, rec, "largest", slog.KindUint64); ok && v.Uint64() != mfsMax+1 {
 			t.Errorf("the %q record's largest = %d, want %d (ADR 0007 §6)", mfsMsgLarger, v.Uint64(),
