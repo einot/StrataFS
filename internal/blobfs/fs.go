@@ -70,6 +70,13 @@ type FS struct {
 	readOnly       bool
 	skipVerify     bool
 
+	// maxFileSize is the largest size a regular file may reach, maxFileChunks
+	// times the chunk size the mount adopted (ADR 0007 §1). New sets it once
+	// the filesystem is loaded and nothing else writes it, so it is read
+	// without a lock; a test may set it after New and before first use to
+	// stand for a build with another limit (ADR 0007 §7).
+	maxFileSize uint64
+
 	// mu guards the namespace: the inode table, the allocator, the epoch and
 	// the dirty flags.
 	//
@@ -150,6 +157,11 @@ type openFile struct {
 
 const defaultChunkSize = 1 << 20
 
+// maxFileChunks bounds a regular file's chunk list, and so its size: a hole
+// costs an entry like any stored chunk, so a size, not the data behind it,
+// is what sets the list's length (ADR 0007 §1, §2).
+const maxFileChunks = 1 << 20
+
 // defaultSnapshotRetention keeps a short rollback window without letting the
 // bucket grow without bound.
 const defaultSnapshotRetention = 10
@@ -213,6 +225,34 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 	if err := f.loadOrInit(ctx); err != nil {
 		return nil, err
 	}
+
+	// The limit follows the chunk size loadOrInit adopted, not the one
+	// configured, and cannot overflow: the chunk size is a uint32 (ADR 0007
+	// §1).
+	f.maxFileSize = uint64(f.chunkSize) * maxFileChunks
+
+	// A build that allowed more may have left larger files. They stay
+	// mounted, but a deployment should learn of them now rather than when a
+	// write past the limit fails or a copy through a client comes out short
+	// (ADR 0007 §6).
+	var (
+		over    int
+		largest uint64
+	)
+	f.mu.RLock()
+	for _, n := range f.inodes {
+		if n.isFile() && n.Size > f.maxFileSize {
+			over++
+			if n.Size > largest {
+				largest = n.Size
+			}
+		}
+	}
+	f.mu.RUnlock()
+	if over > 0 {
+		f.log.Warn("files larger than the maximum file size",
+			"count", over, "largest", largest, "max_file_size", f.maxFileSize)
+	}
 	return f, nil
 }
 
@@ -243,6 +283,11 @@ func (f *FS) Stats() (epoch uint64, inodes int, cacheHits, cacheMisses, cacheByt
 // written into each of three chunk indices reports three chunk sizes. It is
 // safe for concurrent use.
 func (f *FS) DirtyBytes() int64 { return f.budget.used() }
+
+// MaxFileSize returns the largest size a regular file may reach (ADR 0007
+// §1, §3). It takes no lock, since New fixes the value before the FS is
+// shared (§4, §7).
+func (f *FS) MaxFileSize() uint64 { return f.maxFileSize }
 
 // ---- handles ----
 
@@ -560,6 +605,14 @@ func (f *FS) createEntry(ctx context.Context, c vfs.Caller, dir vfs.Handle, name
 	}
 	if err := validName(name); err != nil {
 		return nil, vfs.Attr{}, err
+	}
+	// Create does not apply sa.Size, but the NFS server applies it with a
+	// SetAttr afterwards and ignores that call's error, so the file would be
+	// made and the create answered success. Refusing here, before any lock or
+	// lookup, creates nothing whether or not name exists. Directories and
+	// symlinks have no chunk list (ADR 0007 §3, §4, Assumption 9).
+	if t == vfs.TypeReg && sa.Size != nil && *sa.Size > f.maxFileSize {
+		return nil, vfs.Attr{}, vfs.ErrFBig
 	}
 
 	f.mu.Lock()
@@ -1272,6 +1325,20 @@ func (f *FS) Write(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, 
 	if len(data) == 0 {
 		return 0, vfs.FileSync, nil
 	}
+	// No byte lands at or past the limit (ADR 0007 §4). This reads only the
+	// arguments, so it refuses before the handle is looked up, any lock is
+	// taken or the budget is waited on, and it is written as a comparison and
+	// a subtraction because off + len(data) can wrap past 2^64 (#66). A write
+	// that crosses the limit keeps the bytes below it and reports a short
+	// count, which RFC 1813 §3.3.7 permits. After the clamp, off + len(data)
+	// is at most maxFileSize, so bufferWrite's off + written, for a position
+	// and for the new end, cannot wrap either.
+	if off >= f.maxFileSize {
+		return 0, 0, vfs.ErrFBig
+	}
+	if uint64(len(data)) > f.maxFileSize-off {
+		data = data[:f.maxFileSize-off]
+	}
 
 	f.mu.RLock()
 	n, err := f.resolve(h)
@@ -1331,6 +1398,10 @@ func (f *FS) Write(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, 
 // fetches included, and releases it by defer, so that a panic underneath (a
 // store fetch, the cache) cannot leave the lock held: every later flush, and
 // so every Sync, would hang behind it.
+//
+// Its caller must first clamp data as Write does, so that off + len(data) is
+// at most maxFileSize: off + written is computed unchecked below (ADR 0007
+// §4, #66).
 func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off uint64, data []byte) (int, error) {
 	of.mu.Lock()
 	defer of.mu.Unlock()
@@ -1461,6 +1532,14 @@ func (f *FS) syncFileAndNamespace(ctx context.Context, id uint64) error {
 // fetches: a cut into a stored chunk it cannot shorten becomes a pending trim
 // (ADR 0006 §3). It makes no store call, charges nothing and never waits.
 func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint64) error {
+	// A size above the limit is refused before anything is looked up or
+	// locked, even one that would shrink a file an earlier build left larger;
+	// this is what bounds the hole fill below to maxFileChunks entries (ADR
+	// 0007 §4, Assumption 6). SetAttr calls this before it changes any
+	// attribute, so it applies none of sa.
+	if size > f.maxFileSize {
+		return vfs.ErrFBig
+	}
 	f.mu.RLock()
 	n, err := f.resolve(h)
 	if err != nil {

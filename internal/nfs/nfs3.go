@@ -554,16 +554,16 @@ func (s *Server) fsinfo(ctx context.Context, r *xdr.Reader, w *xdr.Writer) error
 	w.Uint32(uint32(vfs.OK))
 	putPostOpAttr(w, s.attrOf(ctx, h))
 
-	w.Uint32(maxReadSize)  // rtmax
-	w.Uint32(maxReadSize)  // rtpref
-	w.Uint32(4096)         // rtmult: preferred read size multiple
-	w.Uint32(maxWriteSize) // wtmax
-	w.Uint32(maxWriteSize) // wtpref
-	w.Uint32(4096)         // wtmult
-	w.Uint32(dirPrefSize)  // dtpref: preferred READDIR size
-	w.Uint64(1 << 62)      // maxfilesize
-	w.Uint32(1)            // time_delta seconds
-	w.Uint32(0)            // time_delta nanoseconds
+	w.Uint32(maxReadSize)        // rtmax
+	w.Uint32(maxReadSize)        // rtpref
+	w.Uint32(4096)               // rtmult: preferred read size multiple
+	w.Uint32(maxWriteSize)       // wtmax
+	w.Uint32(maxWriteSize)       // wtpref
+	w.Uint32(4096)               // wtmult
+	w.Uint32(dirPrefSize)        // dtpref: preferred READDIR size
+	w.Uint64(s.fs.MaxFileSize()) // maxfilesize: what the backend enforces (ADR 0007 §5)
+	w.Uint32(1)                  // time_delta seconds
+	w.Uint32(0)                  // time_delta nanoseconds
 	// Hard links are deliberately absent from the property set.
 	w.Uint32(fsfSymlink | fsfHomogeneous | fsfCanSetTime)
 	return nil
