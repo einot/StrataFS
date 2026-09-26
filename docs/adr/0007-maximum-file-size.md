@@ -464,6 +464,12 @@ How a test reaches each case:
 - **A refused `Write` while a drain is held:** fill the budget and hold a drain
   in its chunk `Put`, as the existing tests' `bpBlockDrain` does, then make the
   call.
+- **A read-only mount:** pass `blobfs.Config{ReadOnly: true}` to `New`, on a
+  bucket that already holds a filesystem; such a mount answers every call that
+  would change the filesystem, `SetAttr`, `Create` and `Write` among them, with
+  `vfs.ErrROFS`, before `ErrFBig` (§4's order), whereas a store wrapped in
+  `store.ReadOnly` refuses only the store's own writes, so on it those calls
+  are accepted in memory and fail only when a commit reaches the store.
 
 A build without these checks turns an over-limit request into a chunk list as
 long as the request asks for. So a test reaches a clean failure with the
