@@ -112,7 +112,11 @@ measurement (Assumption 15):
 
 A commit holds the snapshot JSON uncompressed while it encodes it, holding
 `FS.mu`, and a mount holds it while it decodes it. A fill reallocates the list
-as it grows, so it briefly holds more than the final list. For comparison,
+as it grows, so it briefly holds more than the final list. Every memory figure
+in this ADR counts a list's length: a list that grew by appends, as
+`truncate`'s fill and `flushOpen`'s gap fill grow it, can keep a capacity
+larger than its length, so what a file at the limit keeps resident can exceed
+these figures, by an amount that has not been measured. For comparison,
 `-max-dirty` and `-cache` each default to 256 MiB. One request's worst case is
 24 MiB of references and 2^20 appends holding `FS.mu`: a `SETATTR` to the
 limit, or the flush after a `WRITE` just below it.
@@ -184,13 +188,23 @@ As rules, for every backend:
   above `MaxFileSize` fails with `ErrFBig`. `Mkdir` and `Symlink` ignore
   `sa.Size`, as before.
 
-A refused call takes no lock, neither `FS.mu` nor any `openFile.mu`; adds no
-`FS.open` entry; neither waits on the budget nor charges it; makes no store
-call; changes no size, time, mode, chunk list, dirty buffer or pending trim;
-creates nothing; and, for a stable write, syncs nothing. So `ErrFBig` comes
-after `ErrROFS` and a diverged mount's `ErrStale`, and after a bad name's
-`ErrInval` or `ErrNameTooLong`. It comes before a stale handle's `ErrStale`,
+A refused `vfs.FS` call, `SetAttr`, `Create` or `Write` on `blobfs`, takes no
+lock, neither `FS.mu` nor any `openFile.mu`; adds no `FS.open` entry; neither
+waits on the budget nor charges it; makes no store call; changes no size,
+time, mode, chunk list, dirty buffer or pending trim; creates nothing; and,
+for a stable write, syncs nothing. So `ErrFBig` comes after `ErrROFS` and a
+diverged mount's `ErrStale`, and after a bad name's `ErrInval` or
+`ErrNameTooLong`. It comes before a stale handle's `ErrStale`,
 `ErrBadHandle`, `ErrIsDir`, `ErrAcces`, `ErrNotDir`, `ErrExist` and any wait.
+
+That is a property of the `vfs.FS` call, not of an NFS request. The NFS
+server's `SETATTR`, `WRITE` and `CREATE` handlers read attributes with
+`GetAttr` before and after the call, the file's or, for `CREATE`, the
+directory's, for their reply's `wcc_data`, and a `SETATTR` with a guard reads
+them once more to check it. Each `GetAttr` takes `FS.mu` for reading and, for a
+file, walks its chunk list (`inode.used`), so a refused request still waits
+behind a commit that holds `FS.mu` (#43). That predates this ADR, and lets a
+client do nothing that a plain `GETATTR` does not.
 
 The fills in `truncate` and `flushOpen` are unchanged, and admission bounds
 them: `truncate` appends at most 2^20 entries, and `flushOpen` fills at most
@@ -245,6 +259,11 @@ order. They match `Server.getattr`, `setattr`, `lookup`, `read`, `write`,
   `uint32`s `type` to `gid`. `GETATTR3resok` is a bare `fattr3`, and a
   `GETATTR` that fails carries nothing after its status. A `post_op_attr` is a
   `bool`, followed by an `fattr3` when it is true.
+- **The end of a reply.** A test shows that a reply carries nothing after its
+  last field with the `*xdr.Reader` that the existing wire tests'
+  `rpcClient.call` returns: once that field is read, `Err()` is nil and
+  `Remaining()`, which reports the bytes not yet decoded, is 0, since the
+  server's reply record ends where the procedure's body does.
 
 ```
 enum nfsstat3 { NFS3_OK = 0, NFS3ERR_NOENT = 2, NFS3ERR_FBIG = 27 /* , ... */ };
@@ -429,11 +448,11 @@ A test may rely on these behaviours:
 - A refused call returns `vfs.ErrFBig`, which `errors.Is` finds, and a refused
   `Write` returns `(0, 0, vfs.ErrFBig)`, a zero `vfs.Stability` being
   `vfs.Unstable` (§4).
-- A refused call returns while another goroutine holds `FS.mu` for writing and
-  the file's `openFile.mu`; it never parks in the budget; and afterwards the
-  file's attributes, `DirtyBytes()`, the file's `FS.open` entry or its
-  absence, the file's dirty buffers and pending trims, its contents, and what
-  a fresh mount of the bucket finds are all as they were (§4).
+- A refused `vfs.FS` call returns while another goroutine holds `FS.mu` for
+  writing and the file's `openFile.mu`; it never parks in the budget; and
+  afterwards the file's attributes, `DirtyBytes()`, the file's `FS.open` entry
+  or its absence, the file's dirty buffers and pending trims, its contents, and
+  what a fresh mount of the bucket finds are all as they were (§4).
 - A refused stable write syncs nothing (§4).
 - A write that crosses the limit returns the count of its bytes below it, and
   makes the file exactly `MaxFileSize` long if it was shorter; it is charged as
@@ -621,7 +640,10 @@ required, except where it says otherwise.
 
 - One request can no longer make the server hold more than 2^20 chunk
   references for one file. #55's exhaustion by one request is gone, and so is
-  its lasting form, which every later commit, drain and mount paid for.
+  its lasting form for one request: no single request can leave more than one
+  file at the limit in the bucket for every later commit, drain and mount to
+  pay for. Many requests still can, one file each, and what they leave lasts
+  across a restart as #55's did (*What this does not decide*).
 - `FSINFO` advertises what is enforced.
 - The `WRITE` wrap (#66) is closed: no write accepts a byte at or past
   `MaxFileSize`, and `bufferWrite`'s arithmetic cannot wrap.
@@ -639,12 +661,23 @@ required, except where it says otherwise.
 
 ## What this does not decide
 
-- **The total across files.** A bound per file is not a bound per mount: `F`
-  files at the limit hold `F × 24 MiB` of holes, so 1,000 of them, made by
-  2,000 requests, hold about 24 GiB. The options are a bound per mount on
-  chunk references, refused with `NFS3ERR_NOSPC`; sparse holes; and the
-  redesign. The server is loopback-only, and its clients are inside the trust
-  boundary that ADR 0003 Assumption 19 records for the budget's overshoot.
+- **The total across files.** A bound per file is not a bound per mount, and
+  one request makes a file at the limit: a `CREATE` with mode `UNCHECKED` and a
+  size of `MaxFileSize`, which `Create` admits and the NFS server then applies
+  with a `SetAttr`. `F` such files hold `F × 24 MiB` of holes. A commit, which
+  encodes every inode holding `FS.mu`, holds about `F × 14 MiB` more of
+  snapshot JSON at 1 MiB chunks while it does, about `F × 38 MiB` in all; so
+  1,000 files, made by 1,000 requests, hold about 24 GiB, and about 38 GiB
+  while a commit encodes them. Once a commit has stored them, the cost
+  survives a restart: every mount decodes the snapshot and rebuilds the lists
+  before it can serve any request, the one that would remove the files
+  included. These figures are arithmetic, not measurements, and count each
+  list's length, which may fall short of what the list keeps resident (§2).
+  The options are a bound
+  per mount on chunk references, refused with `NFS3ERR_NOSPC`; sparse holes;
+  and the redesign. The server is loopback-only, and its clients are inside the
+  trust boundary that ADR 0003 Assumption 19 records for the budget's
+  overshoot.
 - **Sparse holes, and implicit trailing holes** (*Alternatives considered*).
 - **The redesign's maximum file size.** In `docs/DESIGN.md` §4 a hole of any
   span is one entry, so a file's logical size no longer sets its cost, and its
@@ -664,9 +697,10 @@ required, except where it says otherwise.
   `-chunk-size 4194308` becomes 4 KiB chunks and a 4 GiB limit.
 - **#64, #42 and #43.** The commit window (#64) is unchanged. The checks of §4
   run before `getOpen`, so they neither widen nor narrow #42, and before any
-  lock, so a refused call never waits behind a commit that holds `FS.mu`
-  (#43); a commit still encodes every chunk list holding it, one at the limit
-  included.
+  lock, so a refused `vfs.FS` call never waits behind a commit that holds
+  `FS.mu` (#43), though the NFS handler around it still does, when it reads
+  attributes for its reply (§4); a commit still encodes every chunk list
+  holding it, one at the limit included.
 
 ## Sources
 

@@ -262,10 +262,10 @@ This is a proof of concept. What that means concretely:
 - **A file is at most 2^20 chunks long**: 1 TiB at the default 1 MiB chunk
   size, and proportionally more or less for a filesystem created with another
   `-chunk-size`, which is fixed when the filesystem is created. FSINFO
-  advertises the limit, and a size or write past it fails with
-  `NFS3ERR_FBIG`. It bounds what one request can make the server hold for one
-  file, not the total across files
-  ([ADR 0007](docs/adr/0007-maximum-file-size.md)).
+  advertises the limit, and a size past it, or a write that starts at or past
+  it, fails with `NFS3ERR_FBIG`, and one that runs across it is cut short. It
+  bounds what one request can make the server hold for one file, not the
+  total across files ([ADR 0007](docs/adr/0007-maximum-file-size.md)).
 - **Writes are buffered in memory** until commit, bounded by `-max-dirty`
   (MiB, default 256; 0 or less for no limit): past it, a write waits while the
   server commits. The bound is not a hard ceiling; writes already admitted can
