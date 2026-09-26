@@ -141,6 +141,13 @@
   Assumption 7 and this entry are the whole of this revision. Nothing else
   moved: §1–§8, *Alternatives considered*, *Consequences*, *References*, every
   other assumption, and the five earlier revisions. Status stays `Accepted`.
+- **Revised:** 2026-09-25 — **Assumption 7** follows ADR 0006: a size-setting
+  `SETATTR` no longer consults the chunk cache either, because a truncate into
+  a stored chunk always leaves the trim to the next flush. The sentence that
+  said it consults only the cache, and cited the code by line, now says so,
+  without line numbers. The assumption's conclusion, the decision and every
+  behaviour of this ADR are unchanged. Assumption 7 and this entry are the
+  whole of this revision. Status stays `Accepted`.
 - **Issue:** #2 — *Retransmitted requests are re-executed: no duplicate request cache*
 - **Affects:** `internal/sunrpc`, `internal/nfs`
 
@@ -812,10 +819,9 @@ push back on them individually.
    retransmission timer is the recovery mechanism. Non-idempotent procedures in
    this filesystem do in-memory namespace work and fetch nothing. That includes
    a size-setting `SETATTR`, which this assumption first said "may fetch a
-   chunk": truncation never does. It consults only the in-memory chunk cache
-   (`internal/blobfs/fs.go:1255`), and on a miss it defers the trim to the next
-   flush (`fs.go:1258`). What can hold one of these calls up is waiting for a
-   lock:
+   chunk": truncation never does, and since ADR 0006 it does not read the chunk
+   cache either: a truncate into a stored chunk always leaves the trim to the
+   next flush. What can hold one of these calls up is waiting for a lock:
    - Any of them can wait on `FS.mu` while a commit holds it for writing across
      its snapshot PUT and root-pointer swap (`internal/blobfs/commit.go:129-134`,
      with the PUT at `commit.go:163` and the swap at `:180`; #43). The mutating

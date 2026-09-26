@@ -12,6 +12,16 @@ naming only a size-setting `SETATTR` among the calls that can wait on
 `openFile.mu`, but nothing stated it, and the test of §2 step 2's permission
 check depends on it. The decision, the three steps, the invariants and
 everything else are unchanged.
+**Revised:** 2026-09-25 — a second revision the same day, for ADR 0006, which
+decides what a pending trim means. §1's exception is gone, because a pending
+trim is now part of the view; §2's step 2 takes each reference with the length
+of the pending trim queued for its index, step 3 copies only below it, and the
+sentence on zeros says so; §3's invariant 1 counts the trim as part of an
+index's current contents instead of as an exception; §6's flush and `truncate`
+bullets say what a `Read` takes from each; §7 loses *What to avoid*; and *What
+this does not decide* says ADR 0006 decides what a pending trim means. The
+three steps and their locks, the other invariants, and everything else are
+unchanged.
 **Issue:** #41, #49
 
 ## Context
@@ -80,16 +90,12 @@ These are the guarantees POSIX gives `read()` against `write()` and
 `ftruncate()` on a regular file (*Sources*). A view is of one file; nothing is
 promised across files.
 
-One way a `Read` can return bytes the file should not hold is outside this ADR.
-A truncate into a stored chunk that this `FS` has not cached keeps the chunk
-list naming the untrimmed chunk, and queues the trim in `of.pendingTrim` for
-the next flush to apply (ADR 0003 §2; Assumption 6). A `Read` is clamped to the
-size, so the bytes past the new end stay hidden until the file grows back over
-them. After that a `Read` can return them where it should return zeros: before
-the next flush, and in some cases after it too, because a flush applies only
-the first trim queued for an index. That is a defect in what a pending trim
-means, not in how a `Read` takes its view. #56 tracks it, and #40 tracks a
-write into such an index, which starts from the untrimmed chunk.
+A pending trim is part of the view (ADR 0006 §1, §6). A truncate into a stored
+chunk whose index is not dirty keeps the chunk list naming the whole chunk and
+queues the trim in `of.pendingTrim` for the next flush to apply, and until then
+a `Read` returns zeros for the bytes past the trim, as it does past the end of
+a chunk. Until ADR 0006 this paragraph named that case as the one way a `Read`
+could return bytes the file should not hold (#40, #56).
 
 ### 2. The three steps, and the locks each holds
 
@@ -104,14 +110,18 @@ write into such an index, which starts from the untrimmed chunk.
    hold: a handle that has gone since step 1 returns its error, `vfs.ErrStale`,
    and a permission change made since step 1 applies. Take the size, and the
    chunk references of the indices the range touches that are absent from
-   `of.dirty`. Release `FS.mu`. Then, still holding `openFile.mu`, allocate the
-   reply and copy into it the bytes the range needs from each index it touches
-   that is present in `of.dirty`. Release `openFile.mu`.
+   `of.dirty`, each with the length of the pending trim queued for its index,
+   if there is one (ADR 0006 §6). Release `FS.mu`. Then, still holding
+   `openFile.mu`, allocate the reply and copy into it the bytes the range needs
+   from each index it touches that is present in `of.dirty`. Release
+   `openFile.mu`.
 3. **Holding no lock.** Fetch each recorded reference with `loadChunk`, and
-   copy the bytes the range needs into the reply.
+   copy into the reply the bytes the range needs, only those below the
+   reference's trim length if it has one.
 
-In steps 2 and 3, a hole, an index past the end of the chunk list, and bytes
-past the end of a chunk or of a dirty buffer read as zeros.
+In steps 2 and 3, a hole, an index past the end of the chunk list, bytes past
+the end of a chunk or of a dirty buffer, and bytes of a chunk at or past its
+pending trim's length read as zeros.
 
 The rules that go with the steps:
 
@@ -143,8 +153,8 @@ too.
    tail block included, `truncate`, `flushOpen`, and `dropIfGone`, which
    `flushOpen` calls. So a holder of `openFile.mu` sees the dirty map, the
    pending trims, the size and the chunk list as one state, and an index missing
-   from `of.dirty` has its current contents in `n.Chunks`, except that a trim
-   waiting in `of.pendingTrim` has not been applied to it (§1). ADR 0003 §4
+   from `of.dirty` has its current contents in `n.Chunks`, cut to the length of
+   the pending trim queued for it, if any (§1; ADR 0006 §1). ADR 0003 §4
    states this for `bufferWrite`; `Read` now relies on it too.
 2. **An entry lives as long as its inode.** An `openFile` enters `FS.open` only
    through `getOpen`, and leaves it only through `dropOpen`, in the critical
@@ -207,18 +217,20 @@ fetched. Nothing deletes chunk objects today; the sweeper of `docs/DESIGN.md`
 - **A flush.** Every flush of a file is `flushOpen`: the ticker's `Sync`, the
   shutdown `Sync`, a `COMMIT`, a stable write's sync and a budget drain
   (ADR 0003 §4) all reach it. It holds `openFile.mu` from before its first
-  pending-trim fetch or upload until it has repointed `n.Chunks` and replaced
-  `of.dirty`. So step 2 comes entirely before a flush and copies the dirty
-  bytes, which are the newest, or entirely after it and takes the new
+  pending-trim fetch or upload until it has repointed `n.Chunks`, replaced
+  `of.dirty` and emptied `of.pendingTrim`. So step 2 comes entirely before a
+  flush, and copies the dirty bytes, which are the newest, and takes the
+  references with their trims, or entirely after it and takes the new
   references. A flush that fails has repointed nothing and leaves the dirty
-  buffers in place, with any pending trims it had materialised added, unless
-  the inode has gone (ADR 0003 §2, site 4); step 2 then copies the dirty bytes.
+  buffers and the pending trims as they were, unless the inode has gone
+  (ADR 0003 §2, site 4); step 2 then copies the dirty bytes and takes the
+  references with their trims.
   A `Read` of a file waits for a flush of that file that is in progress. It did
   before this ADR too, because the old `Read` also took `openFile.mu`.
 - **`truncate`** holds `openFile.mu`, and `FS.mu` for writing, across the whole
-  of its change, so step 2 comes before or after it, and takes the size and
-  the chunk list as it left them, including a trim it queued in
-  `of.pendingTrim` (§1).
+  of its change, so step 2 comes before or after it, and takes the size, the
+  chunk list and the pending trims as it left them, including a trim it queued
+  or lowered, which step 3 honours (§1; ADR 0006 §3, §6).
 - **The budget.** `Read` neither charges nor waits, so ADR 0003 §3's leaf rule
   and its two further rules are untouched. A drain is a flush.
 - **A removal.** `dropOpen` (ADR 0003 §2, site 5) runs under `FS.mu` alone and
@@ -283,8 +295,6 @@ How a test reaches each case:
   and without flushes, under `-race`, checking freshness and atomicity for each
   `Read` call. The race detector finds only races that happen in the run
   (*Sources*), so detection there is probabilistic.
-- **What to avoid:** truncating into a stored chunk and then growing the file
-  over it, and writing into an index with a pending trim (§1).
 
 ## Assumptions
 
@@ -382,7 +392,7 @@ required.
 
 - **What a pending trim means** to a reader, a writer and a flush (#40, #56;
   §1). Step 2 leaves room for the fix: it already holds the lock under which
-  pending trims change.
+  pending trims change. ADR 0006 decides it.
 - **`getOpen` recreating an entry for an inode that has already gone** (#42).
   `Read` is unaffected (§3, invariant 3).
 - **Evicting idle `openFile` entries.** §3's invariant 2 says what that would

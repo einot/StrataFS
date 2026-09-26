@@ -2,8 +2,9 @@ package blobfs
 
 // Clean-room tests for ADR 0004, "The chunk cache owns its bytes and charges
 // what it holds" (docs/adr/0004-chunk-cache-owns-its-bytes.md), written from
-// that ADR, docs/DESIGN.md §3 ("Keys, integrity and the cache") and ADR 0003
-// §2 and §4, without reading the implementation. They cover §1 (put stores a
+// that ADR as revised for ADR 0006, docs/DESIGN.md §3 ("Keys, integrity and
+// the cache"), ADR 0003 §2 and §4, and ADR 0006 §3 and §5, without reading the
+// implementation. They cover §1 (put stores a
 // copy with cap == len, which the caller may then change, and a cached chunk's
 // bytes cannot change); §2 (the charge equals Σ len and Σ cap over the entries
 // and is at most maxBytes; an entry longer than maxBytes is not stored; a put
@@ -25,15 +26,15 @@ package blobfs
 // upload has succeeded (bpStore with passFirst 1); get to find which chunk that
 // upload cached, because the upload order is not pinned; and a second file
 // that comes to name the same hash after the failed flush uploaded it, because
-// the file whose flush failed reads its own dirty buffers.
+// the file whose flush failed reads its own dirty buffers. Of the three paths
+// in Context that copy cached bytes into what the next flush stores, T14
+// covers bufferWrite loading a chunk it partly overwrites, and T15 covers a
+// pending trim that the next flush applies from a cache entry (ADR 0006 §5).
+// The third, truncate staging a shortened chunk from the cache, no longer
+// exists: since ADR 0006 truncate never reads the cache (ADR 0006 §3(d)), and
+// T15 checks that it does not.
 //
 // Not covered, on purpose:
-//   - Pending-trim resolution reading a changed cache entry (Context: the third
-//     path that copies cached bytes into a buffer the next flush stores). It
-//     needs a truncate made while the chunk is not cached, then that chunk
-//     cached through an upload. The FS skips uploading a hash that is already
-//     in the bucket (§5), so the upload would have to follow a HEAD that fails
-//     to find an object that is there, a fault bpStore does not have.
 //   - FS.Stats itself. Nothing this file is written from gives its signature
 //     or where cacheBytes sits among its results, so cacheBytes is read
 //     through chunkCache.stats, which §7 says is what FS.Stats reports.
@@ -726,14 +727,16 @@ func TestChunkCacheFreshMountAndHoles(t *testing.T) {
 // holds C0||C1, both of content new to the bucket; its flush uploaded one of
 // the two chunks and failed on the other; and that one, chunk i, is the only
 // one of the two in the cache. Which chunk it is is found with get, because
-// the order in which flushOpen uploads a file's chunks is not pinned (§7).
+// the order in which flushOpen uploads a file's chunks is not pinned (§7). bps
+// is the store fake the FS runs over, with no hook armed once setup returns.
 type cc46 struct {
-	st *store.Local
-	fs *FS
-	f  vfs.Handle
-	c  [2][]byte
-	h  [2]string
-	i  int
+	st  *store.Local
+	bps *bpStore
+	fs  *FS
+	f   vfs.Handle
+	c   [2][]byte
+	h   [2]string
+	i   int
 }
 
 // cc46Setup reaches the cc46 state on a fresh bucket, with the default
@@ -743,7 +746,7 @@ func cc46Setup(t *testing.T) *cc46 {
 	t.Helper()
 	st := bpLocal(t)
 	bps := &bpStore{Store: st}
-	s := &cc46{st: st, fs: bpNew(t, bps, 0, quietLog())}
+	s := &cc46{st: st, bps: bps, fs: bpNew(t, bps, 0, quietLog())}
 	s.f, _ = bpCreate(t, s.fs, ccF, 0)
 	s.c[0], s.c[1] = bpUnique(bpCS), bpUnique(bpCS)
 	s.h[0], s.h[1] = ccHash(s.c[0]), ccHash(s.c[1])
@@ -891,12 +894,29 @@ func TestChunkCacheFailedFlushWriteFromCachedChunk(t *testing.T) {
 		"chunk (ADR 0004 §1, §3; #46)")
 }
 
-// TestChunkCacheFailedFlushTruncateStagesCachedChunk (T15) pins ADR 0004 §1
-// and §3 for truncate "staging a shortened chunk from the cache", which copies
-// data[:tail], and ADR 0003 §2, "Staging from the cache": the chunk must be in
-// this FS's cache, which the failed flush's successful upload put there
-// (ADR 0004 §5).
-func TestChunkCacheFailedFlushTruncateStagesCachedChunk(t *testing.T) {
+// TestChunkCacheFailedFlushTruncateAppliesFromCachedChunk (T15) pins ADR 0004
+// §1 and §3 for the third path of Context that copies cached bytes into what
+// the next flush stores: a pending trim that the flush applies from the cache.
+// §7, "How a test reaches #46": "a truncate into it, whose pending trim the
+// next flush applies from the cache (ADR 0006 §5)". Since ADR 0006, truncate
+// "never reads the chunk cache, never stages a buffer in of.dirty" (ADR 0006
+// §3(d)), so the truncate of g.bin into its index i leaves that index out of
+// of.dirty and queues one trim; the chunk is in this FS's cache, which the
+// failed flush's successful upload put there (ADR 0004 §5), so the flush that
+// applies the trim finds it there (ADR 0006 §7: "none if this FS's cache holds
+// it") and copies its first bytes (ADR 0004 §3; ADR 0006 §5).
+//
+// g.bin's bytes are right whether or not the flush damaged the cache's slice,
+// so after the Sync the test also checks the cache entry itself: it must still
+// hold C_i whole, with cap == len (ADR 0004 §1, §2), because what loadChunk
+// returns is the cache's own slice and a caller "must not write through it,
+// and must not append to it or to any reslice of it" (§3); ADR 0006 §5: the
+// flush "copies the first min(to, len) bytes of the result into a buffer of
+// its own". And the flush's fetch must have been a cache hit, with no store
+// Get of chunk i's key (ADR 0006 §7, §8: at most one Get of the chunk's key,
+// "none if this FS's cache holds the chunk"), which also shows that the entry
+// checked is the one the trim was applied from.
+func TestChunkCacheFailedFlushTruncateAppliesFromCachedChunk(t *testing.T) {
 	s := cc46Setup(t)
 	s.patchF(t)
 	g, gAttr := s.shareG(t)
@@ -905,16 +925,34 @@ func TestChunkCacheFailedFlushTruncateStagesCachedChunk(t *testing.T) {
 		ccG, s.i))
 	of := bpMustOpen(t, s.fs, gAttr.FileID, "after truncating "+ccG)
 	snap := bpSnapshot(t, of, "after truncating "+ccG)
-	if _, staged := snap.caps[uint64(s.i)]; !staged || snap.pending != 0 {
-		t.Fatalf("after truncating %s to %d, of.dirty holds indices %v and %d pending trims, "+
-			"want index %d staged and nothing pending, so the test has not reached the staging "+
-			"path (ADR 0003 §2, \"Staging from the cache\"; ADR 0004 §5: the failed flush's "+
-			"successful upload cached chunk %d)", ccG, size, snap.indices(), snap.pending, s.i, s.i)
+	if _, staged := snap.caps[uint64(s.i)]; staged || snap.pending != 1 {
+		t.Errorf("after truncating %s to %d, of.dirty holds indices %v and len(of.pendingTrim) = "+
+			"%d, want index %d absent and one pending trim: truncate never reads the chunk cache "+
+			"and never stages a buffer in of.dirty, and a truncate into a stored chunk that is not "+
+			"dirty makes an entry at its index (ADR 0006 §3(b), (d))", ccG, size, snap.indices(),
+			snap.pending, s.i)
 	}
-	bpMustSync(t, s.fs, "Sync of the truncated "+ccG)
 	want := s.whole()[:size]
-	bpWantFile(t, s.fs, g, want, ccG+" after a truncate that staged the cached chunk (ADR "+
-		"0004 §1, §3)")
-	bpWantRemount(t, s.st, ccG, want, ccG+" after a truncate that staged the cached chunk "+
-		"(ADR 0004 §1, §3; #46)")
+	bpWantFile(t, s.fs, g, want, ccG+" after a truncate into its cached chunk, before the Sync "+
+		"(ADR 0006 §6)")
+	s.wantCached(t, "before the Sync that applies "+ccG+"'s trim")
+
+	get := &bpHook{key: bpChunkKey(t, s.st, s.c[s.i])}
+	s.bps.setGet(get)
+	bpMustSync(t, s.fs, "Sync of the truncated "+ccG)
+	gets := s.bps.callsOf(get)
+	s.bps.setGet(nil)
+	if gets != 0 {
+		t.Errorf("the Sync that applied %s's trim made %d store Gets of chunk %d's key, want 0: "+
+			"this FS's cache holds the chunk, and a flush applies an entry with no Get of its "+
+			"chunk's key when the cache holds it (ADR 0006 §7, §8)", ccG, gets, s.i)
+	}
+	s.wantCached(t, "after the Sync that applied "+ccG+"'s trim from the cached chunk")
+	ccWantEntry(t, s.fs.cache, s.h[s.i], s.c[s.i], "after the Sync that applied "+ccG+"'s trim",
+		"ADR 0004 §3: a caller of loadChunk must not write through, or append to, the cache's "+
+			"slice; ADR 0006 §5: the flush copies into a buffer of its own")
+	bpWantFile(t, s.fs, g, want, ccG+" after a truncate into its cached chunk and the flush that "+
+		"applied the trim (ADR 0004 §1, §3)")
+	bpWantRemount(t, s.st, ccG, want, ccG+" after a truncate into its cached chunk and the flush "+
+		"that applied the trim (ADR 0004 §1, §3; #46)")
 }

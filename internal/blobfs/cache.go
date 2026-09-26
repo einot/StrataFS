@@ -73,10 +73,11 @@ func (c *chunkCache) get(hash string) ([]byte, bool) {
 // append to or reuse data once put returns (ADR 0004 §1). The copy is made
 // with make and copy, which gives cap == len, where bytes.Clone and append
 // promise nothing about capacity. It is made after the size guard, so an
-// oversized chunk costs nothing, and before taking mu, because truncate reads
-// the cache while holding FS.mu and a memcpy under mu would make the whole
-// namespace wait on it. A put that finds its hash already present discards
-// the copy.
+// oversized chunk costs nothing, and before taking mu, so that no memcpy is
+// made under a lock that reads, writes and flushes all take, the last two
+// holding a file's openFile.mu (ADR 0004 §1, §3). Nothing takes mu holding
+// FS.mu since truncate stopped reading the cache (ADR 0006 §3). A put that
+// finds its hash already present discards the copy.
 func (c *chunkCache) put(hash string, data []byte) {
 	if int64(len(data)) > c.maxBytes {
 		return // a single chunk larger than the whole budget is not worth evicting everything for

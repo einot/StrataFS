@@ -130,10 +130,14 @@ type FS struct {
 type openFile struct {
 	mu    sync.Mutex
 	dirty map[uint64][]byte // chunk index -> full chunk contents
-	// pendingTrim holds truncates that still need the original chunk fetched
-	// before it can be shortened; the fetch cannot happen under the namespace
-	// lock, so it is deferred to the flush.
-	pendingTrim []trimReq
+	// pendingTrim holds, by chunk index, the length a truncate cut a stored
+	// chunk to. truncate cannot fetch the chunk under the namespace lock, so
+	// the next flush applies the trim, and until then Read and bufferWrite
+	// honour it: the index holds the chunk's first to bytes, then zeros (ADR
+	// 0006 §1, §2). It is never buffered and never charged. An index is never
+	// both here and in dirty (I1), and a file has at most one entry (I4). It
+	// may be nil after a reset; only truncate inserts, and it allocates first.
+	pendingTrim map[uint64]trimReq
 
 	// bytes is the sum of cap(v) over dirty, this file's share of FS.budget:
 	// capacity rather than length, because a buffer is resident at its
@@ -1047,16 +1051,18 @@ func (f *FS) putChunk(ctx context.Context, data []byte) (chunkRef, error) {
 // that size (ADR 0005 §1). It takes the view in three steps (§2):
 //
 //  1. Holding mu for reading, it resolves the handle and applies its checks. A
-//     file with no FS.open entry has no buffered state (§3), so the size and
-//     the references in range, taken in this same hold, are the whole view.
+//     file with no FS.open entry has no buffered state and no pending trims
+//     (§3), so the size and the references in range, taken in this same hold,
+//     are the whole view.
 //  2. Otherwise, holding the entry's openFile.mu, and mu for reading inside it,
 //     it checks again and answers from there, then takes the size and the
-//     references of the indices in range that are not dirty. It releases mu
+//     references of the indices in range that are not dirty, each with the
+//     length of its index's pending trim, if any (ADR 0006 §6). It releases mu
 //     and copies the dirty bytes in range into the reply before releasing
 //     openFile.mu, since writes change those buffers in place.
-//  3. Holding no lock, it fetches the references. Each names bytes that cannot
-//     change (§5), so a slow bucket holds up no write, flush or namespace
-//     operation.
+//  3. Holding no lock, it fetches the references, and copies from each only
+//     the bytes below its trim's length. Each names bytes that cannot change
+//     (§5), so a slow bucket holds up no write, flush or namespace operation.
 //
 // Each lock is held for work proportional to the range, not the file (§4).
 // Read never calls getOpen, so it adds no FS.open entry, and it never touches
@@ -1078,7 +1084,7 @@ func (f *FS) Read(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, c
 		size = n.Size
 		if off < size {
 			end = readEnd(off, size, count)
-			refs = f.readRefs(n, nil, off, end)
+			refs = f.readRefs(n, nil, nil, off, end)
 		}
 		f.mu.RUnlock()
 	} else {
@@ -1095,14 +1101,18 @@ func (f *FS) Read(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, c
 		out = make([]byte, end-off)
 	}
 
-	// Holes, indices past the end of the chunk list and bytes past the end of
-	// a chunk were never recorded or copied, and read as the zeros out starts
-	// with. A loadChunk result may be the cache's own slice, so it is only
-	// copied from (ADR 0004 §3).
+	// Holes, indices past the end of the chunk list, bytes past the end of a
+	// chunk and bytes at or past a pending trim's length were never recorded or
+	// copied, and read as the zeros out starts with (ADR 0006 §6). A loadChunk
+	// result may be the cache's own slice, so it is only resliced and copied
+	// from (ADR 0004 §3).
 	for _, r := range refs {
 		data, err := f.loadChunk(ctx, r.ref)
 		if err != nil {
 			return nil, false, err
+		}
+		if r.trimmed && uint64(r.trim) < uint64(len(data)) {
+			data = data[:r.trim]
 		}
 		within, dst := f.readSpan(out, off, end, r.idx)
 		if within < uint64(len(data)) {
@@ -1116,10 +1126,14 @@ func (f *FS) Read(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, c
 	return out, end >= size, nil
 }
 
-// readRef is a chunk reference a Read's view names, with the index it is for.
+// readRef is a chunk reference a Read's view names, with the index it is for
+// and, when trimmed is set, the length of that index's pending trim, below
+// which alone the chunk's bytes are part of the view (ADR 0006 §6).
 type readRef struct {
-	idx uint64
-	ref chunkRef
+	idx     uint64
+	ref     chunkRef
+	trim    uint32
+	trimmed bool
 }
 
 // readable resolves h for a Read and applies its checks, in the order Read has
@@ -1140,9 +1154,10 @@ func (f *FS) readable(c vfs.Caller, h vfs.Handle) (*inode, error) {
 
 // readBuffered is step 2 of Read (ADR 0005 §2), for a file with an FS.open
 // entry. It returns the size, the end of the range, the reply with the dirty
-// bytes in range already in it, and the references still to fetch; for
-// off >= size it returns only the size. It releases of.mu by defer, as
-// bufferWrite does, so that a panic cannot leave the lock held.
+// bytes in range already in it, and the references still to fetch, each with
+// its index's pending trim (ADR 0006 §6); for off >= size it returns only the
+// size. It releases of.mu by defer, as bufferWrite does, so that a panic
+// cannot leave the lock held.
 //
 // Nothing checks that FS.open still holds of: a successful resolve here means
 // it does, because an entry leaves FS.open only with its inode (ADR 0005 §3,
@@ -1165,7 +1180,7 @@ func (f *FS) readBuffered(c vfs.Caller, h vfs.Handle, of *openFile, off uint64, 
 		return size, 0, nil, nil, nil
 	}
 	end = readEnd(off, size, count)
-	refs = f.readRefs(n, of.dirty, off, end)
+	refs = f.readRefs(n, of.dirty, of.pendingTrim, off, end)
 	// The copy below needs only of.mu, under which of.dirty changes (ADR 0005
 	// §3, invariant 1), and releasing mu first keeps the namespace lock's hold
 	// independent of how many bytes it copies.
@@ -1200,9 +1215,14 @@ func readEnd(off, size uint64, count uint32) uint64 {
 
 // readRefs returns the references of the chunk indices that [off, end)
 // touches, leaving out indices present in dirty, holes, and indices past the
-// end of the chunk list, none of which a Read fetches. It visits only those
-// indices, never the whole list (ADR 0005 §4). Caller must hold mu.
-func (f *FS) readRefs(n *inode, dirty map[uint64][]byte, off, end uint64) []readRef {
+// end of the chunk list, none of which a Read fetches. Each carries the length
+// of the pending trim in trims at its index, if any, and a reference whose part
+// of the range lies wholly at or past that length is left out too, since it
+// would contribute only zeros (ADR 0006 §6). It visits only those indices,
+// looking trims up by index, never walking the list or the map (ADR 0005 §4).
+// Caller must hold mu, and, when it passes dirty and trims, the openFile.mu
+// that guards them.
+func (f *FS) readRefs(n *inode, dirty map[uint64][]byte, trims map[uint64]trimReq, off, end uint64) []readRef {
 	if end <= off {
 		return nil
 	}
@@ -1212,7 +1232,18 @@ func (f *FS) readRefs(n *inode, dirty map[uint64][]byte, off, end uint64) []read
 		if _, ok := dirty[idx]; ok || n.Chunks[idx].isHole() {
 			continue
 		}
-		refs = append(refs, readRef{idx: idx, ref: n.Chunks[idx]})
+		r := readRef{idx: idx, ref: n.Chunks[idx]}
+		if t, ok := trims[idx]; ok {
+			within := uint64(0)
+			if base := idx * cs; off > base {
+				within = off - base
+			}
+			if within >= uint64(t.to) {
+				continue
+			}
+			r.trim, r.trimmed = t.to, true
+		}
+		refs = append(refs, r)
 	}
 	return refs
 }
@@ -1294,10 +1325,12 @@ func (f *FS) Write(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, 
 }
 
 // bufferWrite copies data into the file's dirty chunks and extends the file to
-// cover it, returning how many bytes it took. It holds of.mu throughout and
-// releases it by defer, so that a panic underneath (a store fetch, the cache)
-// cannot leave the lock held: every later flush, and so every Sync, would
-// hang behind it.
+// cover it, returning how many bytes it took. An index it fills that has a
+// pending trim starts from the chunk's first to bytes only, and loses its
+// trim when the buffer is stored (ADR 0006 §4). It holds of.mu throughout,
+// fetches included, and releases it by defer, so that a panic underneath (a
+// store fetch, the cache) cannot leave the lock held: every later flush, and
+// so every Sync, would hang behind it.
 func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off uint64, data []byte) (int, error) {
 	of.mu.Lock()
 	defer of.mu.Unlock()
@@ -1327,9 +1360,10 @@ func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off ui
 		written = len(data)
 	}
 	// charge is the capacity this call adds to of.dirty, as the difference of
-	// cap before and after each index: append may grow a buffer that truncate
-	// staged short, and an index already dirty at full capacity adds nothing
-	// (ADR 0003 §2, site 1). Indices only increase, so none counts twice.
+	// cap before and after each index, which stays exact whatever capacity a
+	// buffer has: an index new to of.dirty adds its buffer's, and an index
+	// already dirty at full capacity adds nothing (ADR 0003 §2, site 1).
+	// Indices only increase, so none counts twice.
 	var charge int64
 	for written < len(data) {
 		pos := off + uint64(written)
@@ -1347,13 +1381,22 @@ func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off ui
 			} else {
 				loaded, err := f.loadChunk(ctx, refs[idx])
 				if err != nil {
+					// The index stays as it was, pending trim included
+					// (ADR 0006 §4).
 					if written > 0 {
 						break // report the partial write rather than losing it
 					}
 					return 0, err
 				}
-				// Copy: the cache hands out shared slices that must not be
-				// mutated in place.
+				// A pending trim means only the chunk's first to bytes are
+				// the file's; the rest must read as zeros unless this write
+				// puts something there (ADR 0006 §1, §4). Cut by reslicing
+				// and copy out: loadChunk may have returned the cache's own
+				// slice, which must not be written or appended to (ADR 0004
+				// §3).
+				if t, ok := of.pendingTrim[idx]; ok && uint64(t.to) < uint64(len(loaded)) {
+					loaded = loaded[:t.to]
+				}
 				chunk = append(make([]byte, 0, cs), loaded...)
 			}
 		}
@@ -1367,6 +1410,11 @@ func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off ui
 		}
 		copy(chunk[within:within+nw], data[written:written+nw])
 		of.dirty[idx] = chunk
+		// The buffer now holds everything the index is, so its trim, applied
+		// above or covered by a whole-chunk write, goes in the same hold of
+		// of.mu, keeping an index out of both maps at once (ADR 0006 §2 I1,
+		// §4). delete on a nil map is a no-op.
+		delete(of.pendingTrim, idx)
 		charge += int64(cap(chunk) - oldCap)
 		written += nw
 	}
@@ -1409,6 +1457,9 @@ func (f *FS) syncFileAndNamespace(ctx context.Context, id uint64) error {
 }
 
 // truncate changes a file's length, dropping or extending chunks as needed.
+// It holds of.mu and then mu for writing across the whole change, and so never
+// fetches: a cut into a stored chunk it cannot shorten becomes a pending trim
+// (ADR 0006 §3). It makes no store call, charges nothing and never waits.
 func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint64) error {
 	f.mu.RLock()
 	n, err := f.resolve(h)
@@ -1442,10 +1493,10 @@ func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint
 		return err
 	}
 
-	// Drop whole chunks past the new end. Their capacity is freed, and is
-	// released rather than netted against the staging below, because only
-	// release wakes parked writers. Neither this nor the staging waits: both
-	// locks are held (ADR 0003 §2, site 3).
+	// Drop whole chunks past the new end, and their pending trims by the same
+	// rule (ADR 0006 §3(a)). The capacity freed is released at once, because
+	// only release wakes parked writers. Nothing here waits: both locks are
+	// held (ADR 0003 §2, site 3).
 	var freed int64
 	for idx, chunk := range of.dirty {
 		if idx > lastIdx || (idx == lastIdx && tail == 0) {
@@ -1456,6 +1507,11 @@ func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint
 	if freed > 0 {
 		of.bytes.Add(-freed)
 		f.budget.release(freed)
+	}
+	for idx := range of.pendingTrim {
+		if idx > lastIdx || (idx == lastIdx && tail == 0) {
+			delete(of.pendingTrim, idx)
+		}
 	}
 	// Shortening the tail in place is a reslice: the backing array stays
 	// resident at the same capacity, so the charge does not change.
@@ -1474,22 +1530,25 @@ func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint
 			n.Chunks = n.Chunks[:keep]
 		}
 	}
-	// Truncating into the middle of a stored chunk needs that chunk rewritten;
-	// stage it so the flush re-uploads a shortened copy.
-	if tail != 0 && uint64(len(n.Chunks)) == lastIdx+1 {
-		if _, staged := of.dirty[lastIdx]; !staged {
-			ref := n.Chunks[lastIdx]
-			if uint64(ref.Size) > tail {
-				// Load outside the lock is not possible here; fetch from cache
-				// if we can, otherwise mark the chunk for the flush to shorten.
-				if data, ok := f.cache.get(ref.Hash); ok {
-					buf := append([]byte(nil), data[:tail]...)
-					of.dirty[lastIdx] = buf
-					f.budget.add(int64(cap(buf)))
-					of.bytes.Add(int64(cap(buf)))
-				} else {
-					of.pendingTrim = append(of.pendingTrim, trimReq{idx: lastIdx, to: uint32(tail), ref: ref})
+	// A new end inside a stored chunk that is not dirty cuts that chunk, which
+	// cannot be fetched under mu: record the cut as a pending trim for the
+	// next flush to apply, and for Read and bufferWrite to honour until then
+	// (ADR 0006 §1, §3(b)). Only the smallest length is kept, so growing the
+	// file within the chunk leaves the bytes an earlier truncate removed
+	// reading as zeros. A hole takes no trim, since it reads as zeros past any
+	// length (§3(c)). Nothing is read from the cache, staged in of.dirty or
+	// charged (§3(d)).
+	if _, dirty := of.dirty[lastIdx]; tail != 0 && !dirty && uint64(len(n.Chunks)) == lastIdx+1 {
+		if ref := n.Chunks[lastIdx]; !ref.isHole() {
+			v := uint64(ref.Size)
+			if t, ok := of.pendingTrim[lastIdx]; ok {
+				v = uint64(t.to)
+			}
+			if tail < v {
+				if of.pendingTrim == nil {
+					of.pendingTrim = make(map[uint64]trimReq)
 				}
+				of.pendingTrim[lastIdx] = trimReq{to: uint32(tail), ref: ref}
 			}
 		}
 	}
@@ -1506,9 +1565,9 @@ func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint
 	return nil
 }
 
-// trimReq records a truncate that still needs the original chunk fetched.
+// trimReq is a pending trim: its index holds the first to bytes of the chunk
+// ref names, then zeros (ADR 0006 §1, §2).
 type trimReq struct {
-	idx uint64
 	to  uint32
 	ref chunkRef
 }
@@ -1524,36 +1583,35 @@ func (f *FS) commitFile(ctx context.Context, id uint64) error {
 	return f.flushOpen(ctx, id, of)
 }
 
-// flushOpen uploads buffered chunks for one inode. It takes the per-file lock
-// and then briefly the namespace lock, never the other way around.
+// flushOpen uploads buffered chunks for one inode, and applies its pending
+// trims. It takes the per-file lock and then briefly the namespace lock, never
+// the other way around, and holds the per-file lock throughout, so nothing
+// changes of.dirty or of.pendingTrim underneath it.
 func (f *FS) flushOpen(ctx context.Context, id uint64, of *openFile) error {
 	of.mu.Lock()
 	defer of.mu.Unlock()
 
-	// Resolve any truncates that needed the original chunk contents. Each
-	// materialised buffer is charged as it is stored, so a fetch failing on a
-	// later one leaves the earlier ones counted (ADR 0003 §2, site 4).
-	for _, t := range of.pendingTrim {
-		if _, staged := of.dirty[t.idx]; staged {
-			continue
-		}
-		data, err := f.loadChunk(ctx, t.ref)
+	if len(of.dirty) == 0 && len(of.pendingTrim) == 0 {
+		return nil
+	}
+
+	// Upload first, update the namespace second. If a fetch or an upload
+	// fails, the namespace still describes the previous, intact contents, and
+	// of.dirty and of.pendingTrim stay as they were for the next flush to
+	// retry; a shortened chunk already uploaded is then found known (ADR 0006
+	// §5).
+	//
+	// Each trim is applied one at a time through a transient copy that never
+	// enters of.dirty and is never charged, so a flush adds nothing to the
+	// budget (ADR 0006 §5, §7; ADR 0003 §2, site 4).
+	trimmed := make(map[uint64]chunkRef, len(of.pendingTrim))
+	for idx, t := range of.pendingTrim {
+		ref, err := f.applyTrim(ctx, t)
 		if err != nil {
 			f.dropIfGone(id, of)
 			return err
 		}
-		if uint32(len(data)) > t.to {
-			data = data[:t.to]
-		}
-		buf := append([]byte(nil), data...)
-		of.dirty[t.idx] = buf
-		f.budget.add(int64(cap(buf)))
-		of.bytes.Add(int64(cap(buf)))
-	}
-	of.pendingTrim = nil
-
-	if len(of.dirty) == 0 {
-		return nil
+		trimmed[idx] = ref
 	}
 
 	idxs := make([]uint64, 0, len(of.dirty))
@@ -1562,8 +1620,6 @@ func (f *FS) flushOpen(ctx context.Context, id uint64, of *openFile) error {
 	}
 	sort.Slice(idxs, func(i, j int) bool { return idxs[i] < idxs[j] })
 
-	// Upload first, update the namespace second. If an upload fails the
-	// namespace still describes the previous, intact contents.
 	uploaded := make(map[uint64]chunkRef, len(idxs))
 	for _, idx := range idxs {
 		ref, err := f.putChunk(ctx, of.dirty[idx])
@@ -1577,6 +1633,14 @@ func (f *FS) flushOpen(ctx context.Context, id uint64, of *openFile) error {
 	f.mu.Lock()
 	n := f.inodes[id]
 	if n != nil {
+		// A trim's index is in the chunk list while its entry exists (ADR 0006
+		// §2, I2), so the check never fails; it keeps a broken invariant from
+		// putting a chunk back past the end of the file.
+		for idx, ref := range trimmed {
+			if idx < uint64(len(n.Chunks)) {
+				n.Chunks[idx] = ref
+			}
+		}
 		for _, idx := range idxs {
 			for uint64(len(n.Chunks)) <= idx {
 				// Fill any gap with holes so indices stay aligned.
@@ -1589,18 +1653,42 @@ func (f *FS) flushOpen(ctx context.Context, id uint64, of *openFile) error {
 	f.mu.Unlock()
 
 	of.dirty = make(map[uint64][]byte)
+	of.pendingTrim = nil
 	f.budget.release(of.bytes.Swap(0))
 	return nil
 }
 
+// applyTrim uploads the first t.to bytes of the chunk t.ref names, and returns
+// the reference to them (ADR 0006 §5). It copies into a buffer of its own
+// rather than uploading a reslice, because loadChunk may return the cache's
+// own slice and store.Store does not promise that Put leaves its argument
+// alone (ADR 0004 §1, §3). Nothing of the copy outlives the call. Caller must
+// not hold mu.
+func (f *FS) applyTrim(ctx context.Context, t trimReq) (chunkRef, error) {
+	data, err := f.loadChunk(ctx, t.ref)
+	if err != nil {
+		return chunkRef{}, err
+	}
+	n := len(data)
+	if uint64(t.to) < uint64(n) {
+		n = int(t.to)
+	}
+	buf := make([]byte, n)
+	copy(buf, data)
+	return f.putChunk(ctx, buf)
+}
+
 // dropIfGone is flushOpen's cleanup on a failed return, called holding of.mu.
-// If the inode has gone, nothing will flush this file again, and whatever the
-// flush charged to it (materialised trims, most likely after dropOpen had
-// already released the rest) would otherwise stay charged for good. Checking
-// under mu orders this against dropOpen. Resetting pendingTrim keeps another
-// flush of the same openFile from charging the trims again. A file whose
-// inode is still there keeps its charge: those buffers are really held, and
-// its next flush retries them (ADR 0003 §2, site 4; Assumption 18).
+// If the inode has gone, nothing will flush this file again. A flush charges
+// nothing (ADR 0006 §5), and what a write charges to a removed file it
+// releases in the same hold of of.mu, so this finds nothing charged in
+// practice; the release is kept so the accounting stays exact if a flush ever
+// charges again (ADR 0006 Assumption 9). Checking under mu orders this against
+// dropOpen. Resetting of.dirty and pendingTrim keeps another flush of the same
+// openFile from uploading them again; pendingTrim is reset to nil, which
+// truncate allocates again before inserting. A file whose inode is still there
+// keeps everything: its buffers are really held, and its next flush retries
+// them and its trims (ADR 0003 §2, site 4; Assumption 18).
 func (f *FS) dropIfGone(id uint64, of *openFile) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
