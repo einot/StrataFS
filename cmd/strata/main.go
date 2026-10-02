@@ -178,19 +178,34 @@ func maxDirtyBytes(mib int) int64 {
 
 // chunkSizeBytes converts -chunk-size, in KiB, to Config.ChunkSize.
 //
-// For now it keeps the conversion run used to make inline, which wraps for a
-// count outside 0 to 4194303 (#61). ADR 0008 §2 specifies the conversion that
-// replaces it, refusing such a count with an error.
+// A count no uint32 can hold in bytes, or a negative one, is refused rather
+// than clamped or wrapped: a new filesystem keeps its chunk size for good, so
+// any substitute would be one the operator did not ask for. Zero passes
+// through for New to take as the default, and 1 to 3 KiB are left to New,
+// which owns the least size it accepts. Converting before comparing keeps the
+// constant representable where int is 32 bits (ADR 0008 §2, §5).
 func chunkSizeBytes(kib int) (uint32, error) {
+	if kib < 0 || int64(kib) > math.MaxUint32>>10 {
+		return 0, fmt.Errorf("-chunk-size %d is out of range: a chunk size is from 4 to 4194303 KiB, or 0 for the default", kib)
+	}
 	return uint32(kib) * 1024, nil
 }
 
 // cacheBytes converts -cache, in MiB, to Config.CacheBytes.
 //
-// For now it keeps the conversion run used to make inline, which wraps where
-// int is 64 bits for a count above 2^43 - 1 or below -2^43 (#61). ADR 0008 §3
-// specifies the conversion that replaces it.
+// Zero or less is 0, which Config takes as the default, so no negative count
+// wraps into a positive bound. A count too large to express in bytes is a
+// bound no host reaches, so it maps to math.MaxInt64 rather than wrapping;
+// Config has no other spelling for an unbounded cache. Converting before
+// comparing keeps the constant representable where int is 32 bits (ADR 0008
+// §3).
 func cacheBytes(mib int) int64 {
+	if mib <= 0 {
+		return 0
+	}
+	if int64(mib) > math.MaxInt64>>20 {
+		return math.MaxInt64
+	}
 	return int64(mib) << 20
 }
 
