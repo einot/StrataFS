@@ -73,6 +73,13 @@ func run() error {
 		return errors.New("-bucket is required")
 	}
 
+	// Judged before the store is opened, so that a refused -chunk-size creates
+	// and contacts nothing, -check included (ADR 0008 §5).
+	chunkSize, err := chunkSizeBytes(*chunkKiB)
+	if err != nil {
+		return err
+	}
+
 	creds := store.Credentials{
 		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
 		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
@@ -101,8 +108,8 @@ func run() error {
 
 	fs, err := blobfs.New(ctx, blobfs.Config{
 		Store:             bucket,
-		ChunkSize:         uint32(*chunkKiB) * 1024,
-		CacheBytes:        int64(*cacheMiB) << 20,
+		ChunkSize:         chunkSize,
+		CacheBytes:        cacheBytes(*cacheMiB),
 		CommitInterval:    *interval,
 		OwnerUID:          uid,
 		OwnerGID:          gid,
@@ -166,6 +173,24 @@ func maxDirtyBytes(mib int) int64 {
 	if mib <= 0 || int64(mib) > math.MaxInt64>>20 {
 		return -1
 	}
+	return int64(mib) << 20
+}
+
+// chunkSizeBytes converts -chunk-size, in KiB, to Config.ChunkSize.
+//
+// For now it keeps the conversion run used to make inline, which wraps for a
+// count outside 0 to 4194303 (#61). ADR 0008 §2 specifies the conversion that
+// replaces it, refusing such a count with an error.
+func chunkSizeBytes(kib int) (uint32, error) {
+	return uint32(kib) * 1024, nil
+}
+
+// cacheBytes converts -cache, in MiB, to Config.CacheBytes.
+//
+// For now it keeps the conversion run used to make inline, which wraps where
+// int is 64 bits for a count above 2^43 - 1 or below -2^43 (#61). ADR 0008 §3
+// specifies the conversion that replaces it.
+func cacheBytes(mib int) int64 {
 	return int64(mib) << 20
 }
 
