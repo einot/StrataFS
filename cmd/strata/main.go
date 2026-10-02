@@ -186,7 +186,7 @@ func maxDirtyBytes(mib int) int64 {
 // constant representable where int is 32 bits (ADR 0008 §2, §5).
 func chunkSizeBytes(kib int) (uint32, error) {
 	if kib < 0 || int64(kib) > math.MaxUint32>>10 {
-		return 0, fmt.Errorf("-chunk-size %d is out of range: a chunk size is from 4 to 4194303 KiB, or 0 for the default", kib)
+		return 0, fmt.Errorf("-chunk-size %d is out of range: it cannot be negative or more than 4194303 KiB", kib)
 	}
 	return uint32(kib) * 1024, nil
 }
