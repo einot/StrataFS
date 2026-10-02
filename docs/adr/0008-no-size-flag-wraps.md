@@ -84,11 +84,12 @@ func chunkSizeBytes(kib int) (uint32, error)
 - For `kib < 0`, or `kib > 4194303`, it returns 0 and a non-nil error.
   4194304 KiB is 2^32 bytes, one more than a `uint32` holds.
 - The error's text contains `-chunk-size` and the value as given, in decimal
-  as `strconv.Itoa` writes it. Nothing else about the text is pinned. For
-  example:
+  as `strconv.Itoa` writes it. It does not state the least chunk size `New`
+  accepts, which is `New`'s to state (Assumption 4). Nothing else about the
+  text is pinned. For example:
 
   ```text
-  -chunk-size 4194308 is out of range: a chunk size is from 4 to 4194303 KiB, or 0 for the default
+  -chunk-size 4194308 is out of range: it cannot be negative or more than 4194303 KiB
   ```
 
 `New` is unchanged, and does with the result what it does now: 0 selects the
@@ -245,7 +246,8 @@ approved say so (Assumption 13).
    put that number in two places, free to drift. The cost is today's: `New`'s
    error states bytes, `blobfs: chunk size 2048 is too small`, and it comes
    after `openStore`, which for a local bucket has already made the
-   directory. The repository owner approved it on 2026-10-02.
+   directory. The repository owner approved it on 2026-10-02. For the same
+   reason, the error text of §2 does not state that number either.
 5. **The upper bound is what a `uint32` holds,** 4194303 KiB, not a smaller
    cap. `New` accepts chunk sizes up to 2^32 − 1 bytes, and still does;
    whether it should is left open (*What this does not decide*). The
@@ -281,9 +283,10 @@ approved say so (Assumption 13).
 9. **The refusal comes before the store is opened,** so a bad `-chunk-size`
    is reported in every mode, `-check` included, which before ignored the
    flag. The repository owner approved it on 2026-10-02.
-10. **Only `-chunk-size` and the given value are pinned in the error's
-    text,** so that a test can show the message identifies the mistake
-    without freezing its wording.
+10. **The error's text is pinned only as far as a test and Assumption 4
+    need.** It contains `-chunk-size` and the given value, so that a test can
+    show the message identifies the mistake, and it does not state the least
+    chunk size `New` accepts. Its wording is otherwise free.
 11. **The help texts are unchanged.** Stating each flag's range there is left
     open.
 12. **The change is breaking,** under `CLAUDE.md`'s rule for `CHANGES`: a
