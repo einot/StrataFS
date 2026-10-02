@@ -1046,7 +1046,9 @@ func rcChangeWindow(t *testing.T, change string) {
 // The offsets TestReadRangeEndDoesNotWrap uses. The file's one written byte is
 // at rcHugeByte, which makes its size rcHugeByte+1 = 2^64 − 1, and the Read
 // asks for rcHugeCount bytes at rcHugeOff. Both offsets lie in the file's last
-// chunk index, 2^52 − 1.
+// chunk index, 2^52 − 1. Both are far past the MaxFileSize of ADR 0007 §1, so
+// the test's FS stands for a build before ADR 0007, which had no limit (ADR
+// 0007 §6, §7).
 const (
 	rcHugeByte  uint64 = 1<<64 - 2
 	rcHugeOff   uint64 = 1<<64 - 10
@@ -1055,10 +1057,9 @@ const (
 
 // TestReadRangeEndDoesNotWrap pins ADR 0005 §2's end of the range, "The end of
 // the range is off + min(count, size − off), computed once off < size is
-// known, so that it cannot wrap", and Assumption 9, "off + count can wrap for
-// an offset near 2^64, which a file can reach because nothing enforces the
-// advertised maximum file size (#55)"; with §2's "the reply is exactly as long
-// as the clamped range" and §1's "eof decided by that size".
+// known, so that it cannot wrap", and Assumption 9, that off + count can wrap
+// for an offset near 2^64; with §2's "the reply is exactly as long as the
+// clamped range" and §1's "eof decided by that size".
 //
 // One UNSTABLE Write of 1 byte at 2^64 − 2 to an empty file makes its size
 // 2^64 − 1. A Read of 100 bytes at 2^64 − 10 must then return the 9 bytes
@@ -1067,28 +1068,28 @@ const (
 // the end of the chunk list starts from zeros), and the written byte, with
 // eof. An end computed as off + count wraps round to 90, below off.
 //
-// It depends on that Write being accepted, which no document states as a rule.
-// Assumption 9 says a file can reach such an offset, and ADR 0003's "What this
-// does not decide" that nothing enforces FSINFO's maxfilesize of 2^62, so that
-// "one WRITE at a huge offset" makes "the next flush's namespace update append
-// a hole to the file's chunk list for every chunk index up to it" (#55). That
-// is why the file is never flushed: the Write is UNSTABLE, the budget is the
-// default, which one chunk does not reach, and nothing here Syncs, Commits or
-// remounts, so its chunk list never grows towards 2^52 entries. If #55 is
-// decided so that the Write is refused, the setup fails saying so, and the
-// setup is what must change.
+// Since ADR 0007 no Write puts a byte at or past MaxFileSize, 2^32 at this
+// test's 4 KiB chunks (§1, §3, §4), so a file this large is one that a build
+// before ADR 0007, which had no limit, left in the bucket; and such a file is
+// still read whole, at any offset below its size (§6). The test stands for
+// such a build as ADR 0007 §7 says: right after New, before first use, it sets
+// the FS's maxFileSize to math.MaxUint64, and the Write at 2^64 − 2 is then
+// accepted. The file is still never flushed, because a flush would append a
+// hole to its chunk list for every chunk index up to 2^52 − 1 (ADR 0007,
+// Context, route 2): the Write is UNSTABLE, the budget is the default, which
+// one chunk does not reach, and nothing here Syncs, Commits or remounts.
 func TestReadRangeEndDoesNotWrap(t *testing.T) {
 	fs := bpNew(t, bpLocal(t), 0, quietLog())
+	fs.maxFileSize = 1<<64 - 1 // math.MaxUint64
 	h, _ := bpCreate(t, fs, "huge.bin", 0)
 	b := []byte{0xa5}
 	w := bpWrite(t, fs, "the UNSTABLE Write of 1 byte at 2^64 − 2 of the empty huge.bin", h, rcHugeByte, b,
 		vfs.Unstable)
 	if w.err != nil || w.n != 1 {
 		t.Fatalf("setup: the UNSTABLE Write of 1 byte at 2^64 − 2 of the empty huge.bin = %v, want "+
-			"(1, UNSTABLE, nil). This test depends on that Write being accepted: ADR 0005 "+
-			"Assumption 9 says a file can reach an offset near 2^64 because nothing enforces the "+
-			"advertised maximum file size (#55). If #55 is decided so that it is refused, change "+
-			"this setup", w)
+			"(1, UNSTABLE, nil). This test stands for a build before ADR 0007, which had no limit: "+
+			"fs.maxFileSize is math.MaxUint64, so the Write is below MaxFileSize and ends within it "+
+			"(ADR 0007 §3, §4, §6, §7)", w)
 	}
 	if a := bpGetAttr(t, fs, h, "GetAttr of huge.bin after the Write"); a.Size != rcHugeByte+1 {
 		t.Fatalf("setup: huge.bin's size after 1 byte written at 2^64 − 2 is %d, want 2^64 − 1 = %d",

@@ -165,7 +165,22 @@ const (
 type FS interface {
 	Root() Handle
 
+	// MaxFileSize is the largest size, in bytes, that a regular file may
+	// reach, which the NFS server advertises as FSINFO's maxfilesize (RFC
+	// 1813 §3.3.19). It is fixed for the life of the FS value.
+	//
+	// No method writes a byte at an offset at or past MaxFileSize, or sets a
+	// size above it; SetAttr, Create and Write say what each does instead,
+	// and a method added later that can extend a file must say the same. A
+	// file already larger, left by a build that allowed more, can still be
+	// read whole, written below the limit, shrunk to it, renamed and removed.
+	MaxFileSize() uint64
+
 	GetAttr(ctx context.Context, h Handle) (Attr, error)
+
+	// SetAttr changes the attributes sa sets. If sa.Size is above
+	// MaxFileSize it fails with ErrFBig, whatever the file's current size,
+	// and applies none of sa.
 	SetAttr(ctx context.Context, c Caller, h Handle, sa SetAttr) (Attr, error)
 	Lookup(ctx context.Context, c Caller, dir Handle, name string) (Handle, Attr, error)
 	Access(ctx context.Context, c Caller, h Handle, want uint32) (uint32, error)
@@ -179,10 +194,20 @@ type FS interface {
 	// holding the reply is a legitimate way to slow a client down. A caller
 	// must therefore not impose its own per-call deadline on Write, and an
 	// implementation that delays must return promptly once ctx is done.
+	//
+	// Write never writes a byte at an offset at or past MaxFileSize. A write
+	// of at least one byte that starts there fails with ErrFBig and changes
+	// nothing. One that starts below MaxFileSize and would run past it
+	// writes only the bytes below MaxFileSize and returns how many that was:
+	// a short write, which RFC 1813 §3.3.7 permits, after which a client
+	// sends the rest in another WRITE and is refused. An empty write is not
+	// refused for its offset.
 	Write(ctx context.Context, c Caller, h Handle, off uint64, data []byte, how Stability) (uint32, Stability, error)
 
 	Commit(ctx context.Context, h Handle, off uint64, count uint32) error
 
+	// Create fails with ErrFBig, before it creates or changes anything and
+	// whether or not name exists, if sa.Size is set and above MaxFileSize.
 	Create(ctx context.Context, c Caller, dir Handle, name string, sa SetAttr, excl bool) (Handle, Attr, error)
 	Mkdir(ctx context.Context, c Caller, dir Handle, name string, sa SetAttr) (Handle, Attr, error)
 	Symlink(ctx context.Context, c Caller, dir Handle, name, target string, sa SetAttr) (Handle, Attr, error)

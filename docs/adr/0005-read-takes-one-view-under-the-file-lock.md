@@ -22,6 +22,12 @@ bullets say what a `Read` takes from each; §7 loses *What to avoid*; and *What
 this does not decide* says ADR 0006 decides what a pending trim means. The
 three steps and their locks, the other invariants, and everything else are
 unchanged.
+**Revised:** 2026-09-26 — cross-references only, for ADR 0007, which decides
+#55 and #66. Assumption 9 now ends by saying that ADR 0007 decides #55, and
+that a file an earlier build left larger than the limit can still reach an
+offset near 2^64, so the end of the range must still be computed so that it
+cannot wrap; the bullet on #55 under *What this does not decide* ends by
+saying that ADR 0007 decides it. Nothing else changed.
 **Issue:** #41, #49
 
 ## Context
@@ -329,7 +335,10 @@ required.
 9. **The overflow-safe end of the range is folded in** (§2). `off + count` can
    wrap for an offset near 2^64, which a file can reach because nothing
    enforces the advertised maximum file size (#55). The lines are rewritten
-   anyway; #55 itself is not decided here.
+   anyway; #55 itself is not decided here. ADR 0007 decides #55: a file this
+   build grows stays at or below `vfs.FS.MaxFileSize`, but a file an earlier
+   build left larger can still reach an offset near 2^64, so the end of the
+   range is still computed so that it cannot wrap.
 10. **The #41 test relies on a grace period** (§7). No hook is added to
     production code to mark the old `Read`'s window, which exists only in the
     code this ADR replaces.
@@ -407,7 +416,8 @@ required.
   age rule does not cover.
 - **`bufferWrite`'s whole-list copy.** `bufferWrite` still copies a file's whole
   chunk list on every call, the cost §4 removes from `Read`.
-- **#55,** beyond computing the range's end without wrapping.
+- **#55,** beyond computing the range's end without wrapping. ADR 0007 decides
+  it.
 
 ## Sources
 

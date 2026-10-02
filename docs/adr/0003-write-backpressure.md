@@ -208,6 +208,19 @@
   `newChunkCache`'s, by symbol; 18, 20 and 21 follow ADR 0006.
   ***What this does not decide*** — *Stale reads and resurrected truncated
   bytes* now ends by saying that ADR 0006 decides #40, together with #56.
+- **Revised:** 2026-09-26 — for ADR 0007, which decides #55 and #66:
+  `vfs.FS` gains `MaxFileSize`, and a size or a write past it is refused
+  before anything is touched. The decision, §4's algorithm, G1–G3, the five
+  sites' rules, every pinned name and signature, and all numbering are
+  unchanged, and no assumption is added. The earlier revisions' text is left
+  as the history it is. What changed:
+  **§4** — *Paths that never wait* gains a write of at least one byte at an
+  offset at or past `vfs.FS.MaxFileSize`, refused with `vfs.ErrFBig` before
+  the handle is resolved.
+  **§6** — what the bound does not cover says that ADR 0007 bounds one file's
+  chunk list to 2^20 references, but not all files' lists together.
+  ***What this does not decide*** — the bullet on enforcing the advertised
+  maximum file size ends by saying that ADR 0007 decides it.
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
 - **Affects:** `internal/blobfs`, `cmd/strata`, doc comment on `vfs.FS.Write`
 
@@ -574,6 +587,8 @@ budget holds:
   the filesystem has diverged (`fs.go:1050-1052`);
 - a zero-length write, which returns `(0, vfs.FileSync, nil)`
   (`fs.go:1053-1055`);
+- a write of at least one byte at an offset at or past `vfs.FS.MaxFileSize`,
+  `vfs.ErrFBig`, before the handle is resolved (ADR 0007 §4);
 - a bad or stale handle (`fs.go:1058-1062`);
 - a directory, `vfs.ErrIsDir` (`fs.go:1063-1066`);
 - `EACCES` (`fs.go:1067-1070`).
@@ -942,9 +957,10 @@ What the bound is a bound *on*: bytes of buffer capacity resident in the
 `openFile.dirty` maps. It does not cover the chunk cache (a separate pool — see
 *Consequences*), the snapshot body a commit encodes, the transient copy through
 which a flush applies a pending trim and the chunk it fetches for it (ADR 0006
-§5, §7), per-entry map and slice-header overhead, or the files' chunk lists,
-which one `SETATTR`, or one
-`WRITE` at a huge offset, can lengthen without bound (#55; *What this does not
+§5, §7), per-entry map and slice-header overhead, or the files' chunk lists.
+Until ADR 0007, one `SETATTR`, or one `WRITE` at a huge offset, could lengthen
+a file's list without bound (#55); ADR 0007 bounds one file's list to 2^20
+references, but not all files' lists together (its *What this does not
 decide*). Nor does it cover the `WRITE` payloads that backpressure
 itself holds. A stalled call keeps its decoded data across the wait: `Opaque`
 copies it out of the RPC record (`internal/xdr/xdr.go:139-140`, called at
@@ -1491,7 +1507,7 @@ to answer speculatively now.
   `truncate`, or the next flush's namespace update, append a hole to the file's
   chunk list for every chunk index up to it, while holding `FS.mu`. That list is
   namespace memory, which the budget neither counts nor bounds: it bounds buffer
-  capacity in the dirty maps (§6). #55 tracks the fix.
+  capacity in the dirty maps (§6). #55 tracks the fix. ADR 0007 decides it.
 
 ## References
 
