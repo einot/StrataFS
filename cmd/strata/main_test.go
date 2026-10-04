@@ -4,10 +4,16 @@ package main
 // Config.MaxDirtyBytes, written from docs/adr/0003-write-backpressure.md as
 // revised through 2026-09-24: §1 (maxDirtyBytes and its overflow rule) and
 // Assumptions 16 and 17.
+//
+// This file also holds clean-room tests of cmd/strata's conversion of
+// -chunk-size to Config.ChunkSize and of -cache to Config.CacheBytes, written
+// from docs/adr/0008-no-size-flag-wraps.md: §2 (chunkSizeBytes), §3
+// (cacheBytes) and §6 (the test surface).
 
 import (
 	"math"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -47,6 +53,123 @@ func TestMaxDirtyBytesConversion(t *testing.T) {
 	for _, tc := range cases {
 		if got := maxDirtyBytes(tc.mib); got != tc.want {
 			t.Errorf("maxDirtyBytes(%d) = %d, want %d: %s (ADR 0003 §1)", tc.mib, got, tc.want, tc.why)
+		}
+	}
+}
+
+// TestChunkSizeBytesConversion pins ADR 0008 §2: "For `0 <= kib <=
+// math.MaxUint32>>10`, which is 4194303, or 2^22 − 1, it returns
+// `uint32(kib) * 1024` and a nil error." "For `kib < 0`, or `kib > 4194303`,
+// it returns 0 and a non-nil error." "The error's text contains `-chunk-size`
+// and the value as given, in decimal as `strconv.Itoa` writes it." ADR 0008 §6:
+// a test may rely on "every row of §2's and §3's tables" and, "for
+// `chunkSizeBytes`, that the error is non-nil exactly where §2 refuses, that
+// the `uint32` is then 0, and that the error's text contains `-chunk-size` and
+// `strconv.Itoa(kib)`".
+//
+// A refused case whose error comes back nil is reported and skipped, so that an
+// implementation that does not refuse yields a list of failures rather than a
+// panic. The cases past 32 bits are built at run time from int64 values, never
+// from untyped constants, so that this file still compiles where int is 32
+// bits.
+func TestChunkSizeBytesConversion(t *testing.T) {
+	type testCase struct {
+		kib     int
+		want    uint32
+		refused bool
+		why     string
+	}
+	cases := []testCase{
+		{0, 0, false, "-chunk-size 0 is 0, which New takes as the default, 1 MiB (row 0)"},
+		{1, 1024, false, "1 KiB converts exactly, and is left to New to refuse (row 1 to 3)"},
+		{3, 3072, false, "3 KiB converts exactly, and is left to New to refuse (row 1 to 3)"},
+		{4, 4096, false, "4 KiB converts exactly (row 4)"},
+		{1024, 1048576, false, "the default, 1024 KiB, converts exactly (row 1024)"},
+		{4194303, 4294966272, false, "4194303 KiB, 2^22 − 1, is the largest a uint32 holds in bytes (row 4194303)"},
+		{-1, 0, true, "a negative -chunk-size is refused, not wrapped to 4 GiB less 1 KiB (row −1)"},
+		{math.MinInt, 0, true, "the most negative int is refused (row math.MinInt)"},
+		{math.MaxInt, 0, true, "the largest int is refused, not wrapped (row math.MaxInt)"},
+		{4194304, 0, true, "4194304 KiB is 2^32 bytes, one more than a uint32 holds, and is refused (row 4194304)"},
+		{4194308, 0, true, "4194308 KiB is refused, not wrapped to 4 KiB chunks (row 4194308)"},
+	}
+	if strconv.IntSize == 64 {
+		var two32 int64 = 1 << 32
+		cases = append(cases,
+			testCase{int(two32), 0, true, "2^32 KiB is refused, not wrapped to the default (row 2^32)"},
+			testCase{int(two32 + 4), 0, true, "2^32 + 4 KiB is refused, not wrapped to 4 KiB chunks (row 2^32 + 4)"},
+			testCase{int(two32 + 1024), 0, true, "2^32 + 1024 KiB is refused, not wrapped to 1 MiB chunks (row 2^32 + 1024)"},
+		)
+	} else {
+		t.Logf("int is %d bits, so the cases past 32 bits are not run", strconv.IntSize)
+	}
+	for _, tc := range cases {
+		got, err := chunkSizeBytes(tc.kib)
+		if !tc.refused {
+			if err != nil {
+				t.Errorf("chunkSizeBytes(%d) = %d, error %q; want %d and a nil error: %s (ADR 0008 §2)", tc.kib, got, err.Error(), tc.want, tc.why)
+			} else if got != tc.want {
+				t.Errorf("chunkSizeBytes(%d) = %d, want %d: %s (ADR 0008 §2)", tc.kib, got, tc.want, tc.why)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("chunkSizeBytes(%d) = %d and a nil error, want 0 and a non-nil error: %s (ADR 0008 §2)", tc.kib, got, tc.why)
+			continue
+		}
+		if got != 0 {
+			t.Errorf("chunkSizeBytes(%d) = %d with error %q, want 0 with the error: %s (ADR 0008 §2, §6)", tc.kib, got, err.Error(), tc.why)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "-chunk-size") {
+			t.Errorf("chunkSizeBytes(%d) error %q, want it to contain %q: %s (ADR 0008 §2, §6)", tc.kib, msg, "-chunk-size", tc.why)
+		}
+		if given := strconv.Itoa(tc.kib); !strings.Contains(msg, given) {
+			t.Errorf("chunkSizeBytes(%d) error %q, want it to contain the value as given, %q: %s (ADR 0008 §2, §6)", tc.kib, msg, given, tc.why)
+		}
+	}
+}
+
+// TestCacheBytesConversion pins ADR 0008 §3: "For `mib <= 0` it returns 0,
+// which selects the default, 256 MiB." "For `int64(mib) >
+// math.MaxInt64>>20`, which is 8796093022207, or 2^43 − 1, it returns
+// `math.MaxInt64`." "Otherwise it returns `int64(mib) << 20`." ADR 0008 §6: a
+// test may rely on "every row of §2's and §3's tables".
+//
+// The cases past 32 bits are built at run time from int64 values, never from
+// untyped constants, so that this file still compiles where int is 32 bits.
+func TestCacheBytesConversion(t *testing.T) {
+	type testCase struct {
+		mib  int
+		want int64
+		why  string
+	}
+	cases := []testCase{
+		{256, 256 << 20, "the default, 256 MiB, in bytes (row 256)"},
+		{1, 1 << 20, "1 MiB in bytes (row 1)"},
+		{0, 0, "-cache 0 is 0, which selects the default (row 0)"},
+		{-1, 0, "a negative -cache is 0, the default, not a negative byte count (row −1)"},
+		{-5, 0, "a negative -cache is 0, the default"},
+		{math.MinInt, 0, "the most negative int is 0, the default (row math.MinInt)"},
+	}
+	if strconv.IntSize == 64 {
+		var two43 int64 = 1 << 43
+		var two44 int64 = 1 << 44
+		var maxInt64 int64 = math.MaxInt64
+		var largestBound int64 = math.MaxInt64 - (1<<20 - 1) // 2^63 − 2^20
+		cases = append(cases,
+			testCase{int(two43 - 1), largestBound, "2^43 − 1 MiB, the largest whole number of MiB, converts exactly to 2^63 − 2^20 bytes (row 2^43 − 1)"},
+			testCase{int(two43), maxInt64, "2^43 MiB cannot be expressed in bytes, and is math.MaxInt64 rather than wrapping (row 2^43)"},
+			testCase{int(two44 + 1), maxInt64, "2^44 + 1 MiB is math.MaxInt64 rather than wrapping to 1 MiB (row 2^44 + 1)"},
+			testCase{int(maxInt64), maxInt64, "math.MaxInt MiB is math.MaxInt64 rather than wrapping (row math.MaxInt)"},
+			testCase{int(-two43 - 1), 0, "−2^43 − 1 MiB is 0, the default, rather than wrapping to an effectively unbounded cache (row −2^43 − 1)"},
+			testCase{int(-two44 + 1), 0, "−2^44 + 1 MiB is 0, the default, rather than wrapping to 1 MiB (row −2^44 + 1)"},
+		)
+	} else {
+		t.Logf("int is %d bits, so the cases past 32 bits are not run", strconv.IntSize)
+	}
+	for _, tc := range cases {
+		if got := cacheBytes(tc.mib); got != tc.want {
+			t.Errorf("cacheBytes(%d) = %d, want %d: %s (ADR 0008 §3)", tc.mib, got, tc.want, tc.why)
 		}
 	}
 }

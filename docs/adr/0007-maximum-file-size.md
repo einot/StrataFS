@@ -2,6 +2,9 @@
 
 **Status:** Accepted
 **Date:** 2026-09-26
+**Revised:** 2026-10-02 — cross-references only. The bullet *#61* under *What
+this does not decide* now ends by saying that ADR 0008 decides it. Nothing
+else changed.
 **Issue:** #55, #66
 
 ## Context
@@ -694,7 +697,9 @@ required, except where it says otherwise.
   and every `FSSTAT`.
 - **#61.** Converting `-chunk-size` can wrap. The chunk size now sets the
   maximum file size as well, so a wrapped value sets a surprising one too:
-  `-chunk-size 4194308` becomes 4 KiB chunks and a 4 GiB limit.
+  `-chunk-size 4194308` becomes 4 KiB chunks and a 4 GiB limit. ADR 0008
+  decides it: `cmd/strata` refuses a `-chunk-size` that no `uint32` byte
+  count can hold, before it opens the bucket.
 - **#64, #42 and #43.** The commit window (#64) is unchanged. The checks of §4
   run before `getOpen`, so they neither widen nor narrow #42, and before any
   lock, so a refused `vfs.FS` call never waits behind a commit that holds
