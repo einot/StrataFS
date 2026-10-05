@@ -27,8 +27,13 @@ type Config struct {
 	// chunks under one key prefix, the namespace under others.
 	Store store.Store
 
-	ChunkSize      uint32
-	CacheBytes     int64
+	ChunkSize  uint32
+	CacheBytes int64
+
+	// CommitInterval is how often the committer commits the namespace. Zero
+	// selects the default, 5 s; a positive value is used as given, however
+	// small. New refuses a negative one, since no ticker runs at it, so every
+	// FS it returns has a positive interval (ADR 0009 §1, §2).
 	CommitInterval time.Duration
 
 	// OwnerUID and OwnerGID own the root directory of a freshly created
@@ -183,6 +188,12 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 	}
 	if cfg.ChunkSize < 4096 {
 		return nil, fmt.Errorf("blobfs: chunk size %d is too small", cfg.ChunkSize)
+	}
+	// Refused here, ahead of any call on the store, so that a Config Run could
+	// not honour reads and writes nothing in the bucket and builds no FS (ADR
+	// 0009 §2).
+	if cfg.CommitInterval < 0 {
+		return nil, fmt.Errorf("blobfs: commit interval %v is negative", cfg.CommitInterval)
 	}
 	if cfg.CommitInterval == 0 {
 		cfg.CommitInterval = 5 * time.Second
