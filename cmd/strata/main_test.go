@@ -9,12 +9,17 @@ package main
 // -chunk-size to Config.ChunkSize and of -cache to Config.CacheBytes, written
 // from docs/adr/0008-no-size-flag-wraps.md: §2 (chunkSizeBytes), §3
 // (cacheBytes) and §6 (the test surface).
+//
+// It also holds clean-room tests of cmd/strata's check of -commit-interval,
+// written from docs/adr/0009-a-negative-commit-interval-is-refused.md: §3
+// (commitInterval) and §5 (the test surface).
 
 import (
 	"math"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestMaxDirtyBytesConversion (M1) pins ADR 0003 §1: "maxDirtyBytes returns -1
@@ -125,6 +130,63 @@ func TestChunkSizeBytesConversion(t *testing.T) {
 		}
 		if given := strconv.Itoa(tc.kib); !strings.Contains(msg, given) {
 			t.Errorf("chunkSizeBytes(%d) error %q, want it to contain the value as given, %q: %s (ADR 0008 §2, §6)", tc.kib, msg, given, tc.why)
+		}
+	}
+}
+
+// TestCommitIntervalFlag pins ADR 0009 §3: "For `d >= 0` it returns `d` and a
+// nil error. Zero passes through for `New` to take as the default." "For `d <
+// 0` it returns 0 and a non-nil error. The error's text contains
+// `-commit-interval` and `d.String()`." There is one case for each row of §3's
+// table. ADR 0009 §5: a test may rely on "every row of §3's table" and "that
+// the error is non-nil exactly where §3 refuses, that the `time.Duration` is
+// then 0, and that the error's text contains `-commit-interval` and
+// `d.String()`".
+//
+// A refused case whose error comes back nil is reported and skipped, so that an
+// implementation that does not refuse yields a list of failures rather than a
+// panic. A time.Duration is an int64 on every platform, so no case depends on
+// the width of int (§5).
+func TestCommitIntervalFlag(t *testing.T) {
+	type testCase struct {
+		d       time.Duration
+		refused bool
+		why     string
+	}
+	cases := []testCase{
+		{time.Duration(math.MinInt64), true, "the most negative duration is refused (row math.MinInt64)"},
+		{-5 * time.Second, true, "a negative interval is refused, not clamped or taken as the default (row −5 s)"},
+		{-time.Second, true, "a negative interval is refused (row −1 s)"},
+		{-time.Nanosecond, true, "the negative interval nearest zero is refused (row −1 ns)"},
+		{0, false, "0 passes through, for New to take as the default, 5 s (row 0)"},
+		{time.Nanosecond, false, "the smallest positive interval is used as given, with no floor (row 1 ns)"},
+		{5 * time.Second, false, "the default, 5 s, is used as given (row 5 s)"},
+		{time.Hour, false, "1 h is used as given (row 1 h)"},
+		{time.Duration(math.MaxInt64), false, "the largest duration is used as given, with no ceiling (row math.MaxInt64)"},
+	}
+	for _, tc := range cases {
+		got, err := commitInterval(tc.d)
+		if !tc.refused {
+			if err != nil {
+				t.Errorf("commitInterval(%v) = %v, error %q; want %v and a nil error: %s (ADR 0009 §3)", tc.d, got, err.Error(), tc.d, tc.why)
+			} else if got != tc.d {
+				t.Errorf("commitInterval(%v) = %v, want %v: %s (ADR 0009 §3)", tc.d, got, tc.d, tc.why)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("commitInterval(%v) = %v and a nil error, want 0 and a non-nil error: %s (ADR 0009 §3)", tc.d, got, tc.why)
+			continue
+		}
+		if got != 0 {
+			t.Errorf("commitInterval(%v) = %v with error %q, want 0 with the error: %s (ADR 0009 §3, §5)", tc.d, got, err.Error(), tc.why)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "-commit-interval") {
+			t.Errorf("commitInterval(%v) error %q, want it to contain %q: %s (ADR 0009 §3, §5)", tc.d, msg, "-commit-interval", tc.why)
+		}
+		if given := tc.d.String(); !strings.Contains(msg, given) {
+			t.Errorf("commitInterval(%v) error %q, want it to contain the value as time.Duration's String method writes it, %q: %s (ADR 0009 §3, §5)", tc.d, msg, given, tc.why)
 		}
 	}
 }
