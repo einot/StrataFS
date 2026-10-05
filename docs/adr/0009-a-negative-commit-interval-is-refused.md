@@ -307,11 +307,19 @@ approved say so (Assumption 11).
    `FS.maxFileSize` is one they may set (ADR 0007 §7, Assumption 13). Without
    it a test could see what `New` made of zero only by waiting 5 s for a
    commit.
-10. **The change is breaking,** under `CLAUDE.md`'s rule for `CHANGES`: a
+10. **The change is breaking,** under `CLAUDE.md`'s rule for `CHANGES`. A
     read-only deployment whose command line carries a negative
-    `-commit-interval` runs today and will not start, and must correct the
-    flag. A writable one never got past its first instant, so it only fails
-    sooner and more plainly. The repository owner approved it on 2026-10-05.
+    `-commit-interval` runs today and will not start. A `-check` run that
+    carries one, such as a script that probes an endpoint routinely, today
+    ignores the flag and probes, and exits with status 0 unless the endpoint
+    fails a check strata requires (`runCheck`, `cmd/strata/check.go`); it now
+    exits with status 1 before it probes anything (§3), as a bad
+    `-chunk-size` has done since ADR 0008 (Assumption 9). Both must correct
+    the flag. A writable mount never got past its first instant, so it only
+    fails sooner and more plainly. The repository owner approved the
+    breaking change on 2026-10-05, for the read-only case; the `-check` case
+    follows from the refusal in every mode that the owner approved with
+    Assumption 1.
 11. **Status is Accepted on creation.** This is not a judgement of mine: on
     2026-10-05 the repository owner answered the four questions that the
     planning pass behind this ADR put to them, choosing for each the option
@@ -361,8 +369,9 @@ approved say so (Assumption 11).
 - A negative `-commit-interval` is reported at once, as `strata: ` and an
   error, with status 1, before anything is created or contacted, in every
   mode.
-- A read-only command line that carries one must be corrected (Assumption
-  10).
+- A read-only command line that carries one must be corrected, and so must a
+  `-check` command line that carries one, which used to ignore it and probe
+  the endpoint, and now fails before it probes (Assumption 10).
 - A writable one no longer prints the mount instructions and then crashes,
   and no longer creates a filesystem in an empty bucket first.
 - A duration flag or `Config` field added later states, in its ADR, what zero
