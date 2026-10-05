@@ -73,9 +73,14 @@ func run() error {
 		return errors.New("-bucket is required")
 	}
 
-	// Judged before the store is opened, so that a refused -chunk-size creates
-	// and contacts nothing, -check included (ADR 0008 §5).
+	// Judged before the store is opened, so that a refused -chunk-size or
+	// -commit-interval creates and contacts nothing, -check and -read-only
+	// included (ADR 0008 §5, ADR 0009 §3).
 	chunkSize, err := chunkSizeBytes(*chunkKiB)
+	if err != nil {
+		return err
+	}
+	commitEvery, err := commitInterval(*interval)
 	if err != nil {
 		return err
 	}
@@ -110,7 +115,7 @@ func run() error {
 		Store:             bucket,
 		ChunkSize:         chunkSize,
 		CacheBytes:        cacheBytes(*cacheMiB),
-		CommitInterval:    *interval,
+		CommitInterval:    commitEvery,
 		OwnerUID:          uid,
 		OwnerGID:          gid,
 		ReadOnly:          *readOnly,
@@ -207,6 +212,20 @@ func cacheBytes(mib int) int64 {
 		return math.MaxInt64
 	}
 	return int64(mib) << 20
+}
+
+// commitInterval checks -commit-interval for Config.CommitInterval.
+//
+// A negative interval is refused rather than clamped or taken as the default:
+// no ticker runs at one, and any substitute would be a schedule the operator
+// did not ask for. Zero passes through for New to take as the default, and a
+// positive interval is used as given, however small, with no floor (ADR 0009
+// §3, §4).
+func commitInterval(d time.Duration) (time.Duration, error) {
+	if d < 0 {
+		return 0, fmt.Errorf("-commit-interval %v is negative: give a positive duration, or 0 for the default", d)
+	}
+	return d, nil
 }
 
 // openStore turns a bucket spec into a Store. A spec starting with s3:// is an
