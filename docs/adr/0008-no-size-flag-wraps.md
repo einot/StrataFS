@@ -5,6 +5,9 @@
 **Revised:** 2026-10-05 — cross-references only. The bullet *A negative
 `-commit-interval` (#73)* under *What this does not decide* now ends by saying
 that ADR 0009 decides it. Nothing else changed.
+**Revised:** 2026-10-05 — cross-references only, a second time. The bullet
+*`-uid` and `-gid` (#72)* under *What this does not decide* now ends by saying
+that ADR 0010 decides it. Nothing else changed.
 **Issue:** #61
 
 ## Context
@@ -367,7 +370,8 @@ approved say so (Assumption 13).
 - **`-uid` and `-gid` (#72).** `run` converts a value of 0 or more with
   `uint32(...)`, which keeps the low 32 bits, so `-uid 4294967296` makes
   uid 0 the owner of a new filesystem's root directory. The shape is #61's,
-  but neither is a size flag.
+  but neither is a size flag. ADR 0010 decides it: `cmd/strata` now refuses
+  such a value before it opens the store.
 - **A negative `-commit-interval` (#73).** `New` replaces only a zero
   interval, so a negative one reaches the committer that `FS.Run` starts on a
   writable mount, and `time.NewTicker` panics on a duration that is not

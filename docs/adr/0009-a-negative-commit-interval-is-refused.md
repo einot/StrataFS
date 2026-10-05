@@ -2,6 +2,9 @@
 
 **Status:** Accepted
 **Date:** 2026-10-05
+**Revised:** 2026-10-05 — cross-references only. The bullet *`-uid` and
+`-gid` (#72)* under *What this does not decide* now says that ADR 0010
+decides it. Nothing else changed.
 **Issue:** #73
 
 ## Context
@@ -391,7 +394,7 @@ approved say so (Assumption 11).
   (`internal/store/s3.go:58-60`), and `http.Client` sets no deadline for a
   timeout that is not positive (*Sources*), so a negative one means no
   timeout. No flag reaches it: `openStore` never sets it (`main.go:223-229`).
-- **`-uid` and `-gid` (#72).**
+- **`-uid` and `-gid` (#72).** ADR 0010 decides it.
 - **`-read-only` on an empty bucket (#68).** `New` still creates and commits
   a filesystem there, since `Config.ReadOnly` refuses changes at the VFS
   layer only. §2's refusal comes first, so a read-only mount with a negative
