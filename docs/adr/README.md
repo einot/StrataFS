@@ -81,3 +81,4 @@ URL, and what was taken from it.
 | [0006](0006-a-pending-trim-is-part-of-the-file.md) | A pending trim is part of the file, and is never buffered | Accepted |
 | [0007](0007-maximum-file-size.md) | A file is at most 2^20 chunks long, and no call takes it further | Accepted |
 | [0008](0008-no-size-flag-wraps.md) | No size flag wraps | Accepted |
+| [0009](0009-a-negative-commit-interval-is-refused.md) | A negative commit interval is refused before anything starts | Accepted |

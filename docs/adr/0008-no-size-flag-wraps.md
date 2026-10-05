@@ -2,6 +2,9 @@
 
 **Status:** Accepted
 **Date:** 2026-10-02
+**Revised:** 2026-10-05 — cross-references only. The bullet *A negative
+`-commit-interval` (#73)* under *What this does not decide* now ends by saying
+that ADR 0009 decides it. Nothing else changed.
 **Issue:** #61
 
 ## Context
@@ -370,7 +373,10 @@ approved say so (Assumption 13).
   writable mount, and `time.NewTicker` panics on a duration that is not
   positive (*Sources*). The panic, in the goroutine `run` starts for
   `FS.Run`, ends the process after it has opened its listener and printed
-  the mount instructions. It is not a conversion.
+  the mount instructions. It is not a conversion. ADR 0009 decides it:
+  `blobfs.New` refuses a negative `Config.CommitInterval` before it touches
+  the store, and `cmd/strata` refuses a negative `-commit-interval` before it
+  opens the store.
 
 ## Sources
 
