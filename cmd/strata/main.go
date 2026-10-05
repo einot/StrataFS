@@ -79,6 +79,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	commitEvery, err := commitInterval(*interval)
+	if err != nil {
+		return err
+	}
 
 	creds := store.Credentials{
 		AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
@@ -110,7 +114,7 @@ func run() error {
 		Store:             bucket,
 		ChunkSize:         chunkSize,
 		CacheBytes:        cacheBytes(*cacheMiB),
-		CommitInterval:    *interval,
+		CommitInterval:    commitEvery,
 		OwnerUID:          uid,
 		OwnerGID:          gid,
 		ReadOnly:          *readOnly,
@@ -207,6 +211,15 @@ func cacheBytes(mib int) int64 {
 		return math.MaxInt64
 	}
 	return int64(mib) << 20
+}
+
+// commitInterval passes -commit-interval through unchanged for
+// Config.CommitInterval.
+//
+// It is the place for the check ADR 0009 §3 specifies, which it does not make
+// yet: every d, negative included, is returned as given with a nil error.
+func commitInterval(d time.Duration) (time.Duration, error) {
+	return d, nil
 }
 
 // openStore turns a bucket spec into a Store. A spec starting with s3:// is an
