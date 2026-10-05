@@ -101,11 +101,13 @@ func run() error {
 	}
 
 	uid, gid := currentIDs()
-	if *uidFlag >= 0 {
-		uid = uint32(*uidFlag)
+	uid, err = ownerID("-uid", *uidFlag, uid)
+	if err != nil {
+		return err
 	}
-	if *gidFlag >= 0 {
-		gid = uint32(*gidFlag)
+	gid, err = ownerID("-gid", *gidFlag, gid)
+	if err != nil {
+		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -226,6 +228,19 @@ func commitInterval(d time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("-commit-interval %v is negative: give a positive duration, or 0 for the default", d)
 	}
 	return d, nil
+}
+
+// ownerID resolves -uid or -gid to Config.OwnerUID or Config.OwnerGID.
+//
+// ADR 0010 §3 pins the signature, but this body is the behaviour from before
+// that ADR, kept so the extract changes nothing: a value of 0 or more keeps
+// its low 32 bits, any negative value takes current, and it never errors.
+// ADR 0010 replaces it with a body that refuses what would wrap.
+func ownerID(flagName string, given int, current uint32) (uint32, error) {
+	if given >= 0 {
+		return uint32(given), nil
+	}
+	return current, nil
 }
 
 // openStore turns a bucket spec into a Store. A spec starting with s3:// is an
