@@ -2,6 +2,9 @@
 
 **Status:** Accepted
 **Date:** 2026-10-05
+**Revised:** 2026-10-07 — cross-references only. The bullet *`-read-only`
+on an empty bucket (#68)* under *What this does not decide* now ends by
+saying that ADR 0011 decides it. Nothing else changed.
 **Issue:** #72
 
 ## Context
@@ -485,7 +488,9 @@ approved say so (Assumption 17).
 - **macOS's `KAUTH_UID_NONE`,** `~(uid_t)0 - 100`, which is 4294967195. It is
   accepted: it is an ordinary id on Linux (*Sources*).
 - **`-read-only` on an empty bucket (#68).** `New` still creates and commits
-  a filesystem there, now with the owner this ADR resolves.
+  a filesystem there, now with the owner this ADR resolves. ADR 0011 decides
+  it: a read-only `New` no longer creates a filesystem, so `-uid` and `-gid`
+  reach one only through a writable mount.
 
 ## Sources
 

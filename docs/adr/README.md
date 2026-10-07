@@ -83,3 +83,4 @@ URL, and what was taken from it.
 | [0008](0008-no-size-flag-wraps.md) | No size flag wraps | Accepted |
 | [0009](0009-a-negative-commit-interval-is-refused.md) | A negative commit interval is refused before anything starts | Accepted |
 | [0010](0010-a-new-filesystem-is-never-owned-by-root-by-accident.md) | A new filesystem is never owned by root by accident | Accepted |
+| [0011](0011-a-read-only-fs-writes-nothing-to-its-bucket.md) | A read-only FS writes nothing to its bucket | Accepted |
