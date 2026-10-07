@@ -13,9 +13,14 @@ package main
 // It also holds clean-room tests of cmd/strata's check of -commit-interval,
 // written from docs/adr/0009-a-negative-commit-interval-is-refused.md: §3
 // (commitInterval) and §5 (the test surface).
+//
+// It also holds clean-room tests of cmd/strata's resolution of -uid and -gid,
+// written from docs/adr/0010-a-new-filesystem-is-never-owned-by-root-by-accident.md:
+// §3 (ownerID), §4 (currentIDs) and §7 (the test surface).
 
 import (
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -233,5 +238,102 @@ func TestCacheBytesConversion(t *testing.T) {
 		if got := cacheBytes(tc.mib); got != tc.want {
 			t.Errorf("cacheBytes(%d) = %d, want %d: %s (ADR 0008 §3)", tc.mib, got, tc.want, tc.why)
 		}
+	}
+}
+
+// TestOwnerIDConversion pins ADR 0010 §3: "For `0 <= given <= 4294967294`,
+// which is `math.MaxUint32 - 1`, it returns `uint32(given)` and a nil error.
+// It does not use `current`." "For `given == -1` it returns `current` and a nil
+// error, unless `current` is 4294967295, when it returns 0 and a non-nil
+// error." "For `given < -1`, or `given > 4294967294`, it returns 0 and a
+// non-nil error." "The error's text contains `flagName`, and `given` in
+// decimal as `strconv.Itoa` writes it." There is one case for each row of §3's
+// table. ADR 0010 §7: a test may rely on "every row of §3's table, for
+// `flagName` `"-uid"` and `"-gid"` alike" and "that the error is non-nil
+// exactly where §3 refuses, that the `uint32` is then 0, and that the error's
+// text contains `flagName` and `strconv.Itoa(given)`".
+//
+// A refused case whose error comes back nil is reported and skipped, so that an
+// implementation that does not refuse yields a list of failures rather than a
+// panic. The cases past 2^31 − 1 are built at run time from int64 values, never
+// from untyped constants, so that this file still compiles where int is 32
+// bits (§7).
+func TestOwnerIDConversion(t *testing.T) {
+	type testCase struct {
+		given   int
+		current uint32
+		want    uint32
+		refused bool
+		why     string
+	}
+	cases := []testCase{
+		{math.MinInt, 501, 0, true, "the most negative int is refused, not taken as the current id (row math.MinInt, 501)"},
+		{-2, 501, 0, true, "a negative value other than -1 is refused, not taken as the current id (row −2, 501)"},
+		{-2, 4294967295, 0, true, "a negative value other than -1 is refused, whatever the current id (row −2, 4294967295)"},
+		{-1, 501, 501, false, "the default, -1, is the current id (row −1, 501)"},
+		{-1, 0, 0, false, "the default, -1, is root when strata runs as root (row −1, 0)"},
+		{-1, 4294967294, 4294967294, false, "the default, -1, is the current id, up to 4294967294 (row −1, 4294967294)"},
+		{-1, 4294967295, 0, true, "the default, -1, is refused when the platform reports no id (row −1, 4294967295)"},
+		{0, 501, 0, false, "0, root, is accepted when asked for (row 0, 501)"},
+		{0, 4294967295, 0, false, "0 is accepted without using the current id (row 0, 4294967295)"},
+		{1, 501, 1, false, "1 is used as given (row 1, 501)"},
+		{501, 4294967295, 501, false, "a given id needs no current one (row 501, 4294967295)"},
+		{65534, 501, 65534, false, "65534 is used as given (row 65534, 501)"},
+		{2147483647, 501, 2147483647, false, "2^31 − 1 is accepted everywhere (row 2147483647, 501)"},
+	}
+	if strconv.IntSize == 64 {
+		var two32 int64 = 1 << 32
+		cases = append(cases,
+			testCase{int(two32 - 2), 501, 4294967294, false, "2^32 − 2 is the largest id accepted (row 4294967294, 501)"},
+			testCase{int(two32 - 1), 501, 0, true, "2^32 − 1 is (uid_t)-1, which no Linux client accepts, and is refused (row 4294967295, 501)"},
+			testCase{int(two32), 501, 0, true, "2^32 is refused, not wrapped to root (row 4294967296, 501)"},
+			testCase{int(two32 + 1), 501, 0, true, "2^32 + 1 is refused, not wrapped to 1 (row 4294967297, 501)"},
+			testCase{int(two32 + 501), 501, 0, true, "2^32 + 501 is refused, not wrapped to 501 by accident (row 4294967797, 501)"},
+			testCase{math.MaxInt, 501, 0, true, "math.MaxInt is refused, not wrapped to 4294967295 (row math.MaxInt, 501)"},
+		)
+	} else {
+		t.Logf("int is %d bits, so the cases past 2^31 − 1 are not run", strconv.IntSize)
+	}
+	for _, flagName := range []string{"-uid", "-gid"} {
+		for _, tc := range cases {
+			got, err := ownerID(flagName, tc.given, tc.current)
+			if !tc.refused {
+				if err != nil {
+					t.Errorf("ownerID(%q, %d, %d) = %d, error %q; want %d and a nil error: %s (ADR 0010 §3)", flagName, tc.given, tc.current, got, err.Error(), tc.want, tc.why)
+				} else if got != tc.want {
+					t.Errorf("ownerID(%q, %d, %d) = %d, want %d: %s (ADR 0010 §3)", flagName, tc.given, tc.current, got, tc.want, tc.why)
+				}
+				continue
+			}
+			if err == nil {
+				t.Errorf("ownerID(%q, %d, %d) = %d and a nil error, want 0 and a non-nil error: %s (ADR 0010 §3)", flagName, tc.given, tc.current, got, tc.why)
+				continue
+			}
+			if got != 0 {
+				t.Errorf("ownerID(%q, %d, %d) = %d with error %q, want 0 with the error: %s (ADR 0010 §3, §7)", flagName, tc.given, tc.current, got, err.Error(), tc.why)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, flagName) {
+				t.Errorf("ownerID(%q, %d, %d) error %q, want it to contain %q: %s (ADR 0010 §3, §7)", flagName, tc.given, tc.current, msg, flagName, tc.why)
+			}
+			if given := strconv.Itoa(tc.given); !strings.Contains(msg, given) {
+				t.Errorf("ownerID(%q, %d, %d) error %q, want it to contain the value as given, %q: %s (ADR 0010 §3, §7)", flagName, tc.given, tc.current, msg, given, tc.why)
+			}
+		}
+	}
+}
+
+// TestCurrentIDsAreTheProcessIDs pins ADR 0010 §4: "It returns
+// `uint32(os.Getuid())` and `uint32(os.Getgid())`, the real uid and gid of the
+// process." ADR 0010 §7: a test may rely on "that `currentIDs` returns
+// `uint32(os.Getuid())` and `uint32(os.Getgid())` on whatever host runs the
+// test".
+func TestCurrentIDsAreTheProcessIDs(t *testing.T) {
+	uid, gid := currentIDs()
+	if want := uint32(os.Getuid()); uid != want {
+		t.Errorf("currentIDs() uid = %d, want uint32(os.Getuid()) = %d (ADR 0010 §4, §7)", uid, want)
+	}
+	if want := uint32(os.Getgid()); gid != want {
+		t.Errorf("currentIDs() gid = %d, want uint32(os.Getgid()) = %d (ADR 0010 §4, §7)", gid, want)
 	}
 }

@@ -14,9 +14,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"os/user"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -73,14 +71,24 @@ func run() error {
 		return errors.New("-bucket is required")
 	}
 
-	// Judged before the store is opened, so that a refused -chunk-size or
-	// -commit-interval creates and contacts nothing, -check and -read-only
-	// included (ADR 0008 §5, ADR 0009 §3).
+	// Judged before the store is opened, so that a refused -chunk-size,
+	// -commit-interval, -uid or -gid creates and contacts nothing, -check and
+	// -read-only included, even for a bucket whose filesystem the owner flags
+	// would never touch (ADR 0008 §5, ADR 0009 §3, ADR 0010 §5).
 	chunkSize, err := chunkSizeBytes(*chunkKiB)
 	if err != nil {
 		return err
 	}
 	commitEvery, err := commitInterval(*interval)
+	if err != nil {
+		return err
+	}
+	uid, gid := currentIDs()
+	uid, err = ownerID("-uid", *uidFlag, uid)
+	if err != nil {
+		return err
+	}
+	gid, err = ownerID("-gid", *gidFlag, gid)
 	if err != nil {
 		return err
 	}
@@ -98,14 +106,6 @@ func run() error {
 
 	if *check {
 		return runCheck(context.Background(), bucket, os.Stdout)
-	}
-
-	uid, gid := currentIDs()
-	if *uidFlag >= 0 {
-		uid = uint32(*uidFlag)
-	}
-	if *gidFlag >= 0 {
-		gid = uint32(*gidFlag)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -228,6 +228,30 @@ func commitInterval(d time.Duration) (time.Duration, error) {
 	return d, nil
 }
 
+// ownerID resolves -uid or -gid to Config.OwnerUID or Config.OwnerGID.
+//
+// An id is refused rather than wrapped, since 2^32 wrapped is root, and
+// 4294967295 is refused too: it is (uid_t)-1, which nothing can give a file
+// and a Linux client rejects in any attributes. -1, the default, is the id
+// strata runs as, and is refused where the platform reports none, which
+// currentIDs spells as 4294967295. Every other negative value has no meaning
+// and is refused. Converting before comparing keeps the bound representable
+// where int is 32 bits (ADR 0010 §2, §3).
+func ownerID(flagName string, given int, current uint32) (uint32, error) {
+	// Typed, so that passing it to Errorf does not overflow a 32-bit int.
+	const maxID int64 = math.MaxUint32 - 1
+	switch g := int64(given); {
+	case g >= 0 && g <= maxID:
+		return uint32(g), nil
+	case g == -1 && current != math.MaxUint32:
+		return current, nil
+	case g == -1:
+		return 0, fmt.Errorf("%s -1 asks for the %s strata runs as, which this platform does not report: give %s an id from 0 to %d", flagName, strings.TrimPrefix(flagName, "-"), flagName, maxID)
+	default:
+		return 0, fmt.Errorf("%s %d is out of range: give an id from 0 to %d, or -1 for the id strata runs as", flagName, g, maxID)
+	}
+}
+
 // openStore turns a bucket spec into a Store. A spec starting with s3:// is an
 // S3 bucket; anything else is a local directory.
 func openStore(spec, endpoint, region string, creds store.Credentials, pathStyle bool) (store.Store, error) {
@@ -250,14 +274,16 @@ func openStore(spec, endpoint, region string, creds store.Credentials, pathStyle
 	return store.NewLocal(strings.TrimPrefix(spec, "file://"))
 }
 
-func currentIDs() (uint32, uint32) {
-	u, err := user.Current()
-	if err != nil {
-		return 0, 0
-	}
-	uid, _ := strconv.Atoi(u.Uid)
-	gid, _ := strconv.Atoi(u.Gid)
-	return uint32(uid), uint32(gid)
+// currentIDs returns the real uid and gid that strata runs as.
+//
+// It asks the kernel and nothing else: os/user fails under a uid the user
+// database does not list, or without cgo and $USER or $HOME, and every such
+// failure used to make root the owner. getuid and getgid cannot fail on Linux
+// or macOS. The conversion to uint32 restores an id of 2^31 or more where int
+// is 32 bits, and turns Windows's -1 into 4294967295, which ownerID reads as
+// no id (ADR 0010 §4).
+func currentIDs() (uid, gid uint32) {
+	return uint32(os.Getuid()), uint32(os.Getgid())
 }
 
 func printMountInstructions(host, port, export string, ro bool) {
