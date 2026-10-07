@@ -17,11 +17,22 @@ import (
 	"strata/internal/store"
 )
 
-// loadOrInit reads the current namespace from the bucket, creating an
-// empty filesystem if the bucket has no root pointer yet.
+// loadOrInit reads the current namespace from the bucket. A bucket with no
+// root pointer holds no filesystem: a writable mount creates an empty one
+// there, and a read-only mount refuses it, having written nothing (ADR 0011
+// §1, §2).
 func (f *FS) loadOrInit(ctx context.Context) error {
 	raw, err := f.store.Get(ctx, rootKey)
 	if errors.Is(err, store.ErrNotFound) {
+		if f.readOnly {
+			// Name the store as the embedder gave it, not New's wrapper, whose
+			// name only adds " (read-only)" to it.
+			name := f.store.Name()
+			if ro, ok := f.store.(store.ReadOnly); ok {
+				name = ro.Store.Name()
+			}
+			return fmt.Errorf("blobfs: %s holds no filesystem, and a read-only mount does not create one", name)
+		}
 		return f.initEmpty(ctx)
 	}
 	if err != nil {
@@ -76,7 +87,7 @@ func (f *FS) loadOrInit(ctx context.Context) error {
 
 // initEmpty creates a brand-new filesystem: a single root directory, committed
 // with If-None-Match so that two processes racing to initialize the same bucket
-// cannot both win.
+// cannot both win. Only a writable mount reaches it (ADR 0011 §2).
 func (f *FS) initEmpty(ctx context.Context) error {
 	now := time.Now()
 	root := &inode{

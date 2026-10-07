@@ -40,7 +40,13 @@ type Config struct {
 	// filesystem.
 	OwnerUID, OwnerGID uint32
 
-	// ReadOnly refuses every mutating operation at the VFS layer.
+	// ReadOnly makes the mount read-only all the way down to the bucket. New
+	// refuses a bucket that holds no filesystem rather than create one there,
+	// and puts Store behind store.ReadOnly, so that nothing the FS does writes
+	// to it. Every method that would change the filesystem answers
+	// vfs.ErrROFS, Access grants no modify, extend or delete, Run starts no
+	// committer, and Sync and Commit, with nothing to commit, return nil
+	// (ADR 0011).
 	ReadOnly bool
 
 	// SkipChunkVerification stops fetched chunks from being checked against
@@ -178,7 +184,9 @@ const defaultMaxDirtyBytes = 256 << 20
 // FS implements the full mountable filesystem contract.
 var _ vfs.FS = (*FS)(nil)
 
-// New opens or creates a filesystem in the bucket.
+// New opens the filesystem in the bucket. Only a writable mount creates one in
+// a bucket that holds none; a read-only New refuses such a bucket instead
+// (ADR 0011 §2).
 func New(ctx context.Context, cfg Config) (*FS, error) {
 	if cfg.Store == nil {
 		return nil, errors.New("blobfs: a store is required")
@@ -214,9 +222,18 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 		cfg.SnapshotRetention = 0 // keep everything
 	}
 
+	// A read-only FS reaches its bucket only through the wrapper, so the
+	// refusal sits below every write path, present or future, rather than
+	// resting on each one checking readOnly. Building it calls nothing on the
+	// store, so the checks above still come first (ADR 0011 §3, ADR 0009 §2).
+	st := cfg.Store
+	if cfg.ReadOnly {
+		st = store.ReadOnly{Store: cfg.Store}
+	}
+
 	host, _ := os.Hostname()
 	f := &FS{
-		store:          cfg.Store,
+		store:          st,
 		log:            cfg.Log,
 		chunkSize:      cfg.ChunkSize,
 		commitInterval: cfg.CommitInterval,
