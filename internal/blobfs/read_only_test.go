@@ -40,13 +40,19 @@ package blobfs
 //
 // ADR 0011 §7 says how a test stays safe against a build without it, and every
 // test here follows it:
-//   - every Config is ciConfig's, so SnapshotRetention is −1 and a commit
-//     starts no pruning goroutine;
+//   - every Config sets SnapshotRetention to −1, so that a commit starts no
+//     pruning goroutine: ciConfig's, or bpNew's when seeding through
+//     bpSeedFile;
 //   - nothing calls Run, Sync or any other method on an FS that New returned
 //     for a bucket with no root pointer, or with no snapshots; the case is
 //     reported failed instead;
 //   - every New and every FS call runs in bpGo, bpDo or a bp* helper, which
-//     recovers a panic, and is waited for under btHangBound; goroutines never
+//     recovers a panic, and is waited for under btHangBound, with one
+//     exception: seeding with bpSeedFile (in TestNewOverABucketWithNoRootPointer,
+//     TestReadOnlySyncWritesNothingEvenWhenDirty and
+//     TestNewNeverTreatsADamagedFilesystemAsEmpty) calls New directly, through
+//     bpNew, on a writable mount and before anything under test runs; that New
+//     is the one call not run under a panic-recovering bound. Goroutines never
 //     touch t, and nothing here is parallel;
 //   - ciStore's counts are read before the bucket is inspected, and the bucket
 //     is inspected through the *store.Local beneath ciStore, never through
@@ -327,7 +333,7 @@ func TestReadOnlyMountWritesNothing(t *testing.T) {
 	})
 
 	bg := context.Background()
-	root := fs.Root()
+	root := bpGo(func() vfs.Handle { return fs.Root() }).wait(t, "Root on the read-only mount")
 
 	// Reads.
 	h, attr := bpLookup(t, fs, file)
