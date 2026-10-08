@@ -148,6 +148,16 @@
   without line numbers. The assumption's conclusion, the decision and every
   behaviour of this ADR are unchanged. Assumption 7 and this entry are the
   whole of this revision. Status stays `Accepted`.
+- **Revised:** 2026-10-08 — **Assumption 7** follows ADR 0012: a
+  size-setting `SETATTR`, and an UNCHECKED `CREATE` that carries a size, can
+  also wait for the commit gate, both while a `Sync` is in its commit phase
+  and while one waits to begin it behind another size change that is waiting
+  for its own file's `openFile.mu`, and each such wait ends when store calls
+  do. The assumption gains a bullet saying so, and its closing paragraph
+  speaks of these waits where it spoke of both. Its conclusion, that dropping
+  an in-flight duplicate is acceptable on TCP, the decision and every
+  behaviour of this ADR are unchanged. Assumption 7 and this entry are the
+  whole of this revision. Status stays `Accepted`.
 - **Issue:** #2 — *Retransmitted requests are re-executed: no duplicate request cache*
 - **Affects:** `internal/sunrpc`, `internal/nfs`
 
@@ -832,8 +842,13 @@ push back on them individually.
      (`nfs3.go:341-345`), can also wait on the file's `openFile.mu`, which a
      flush holds while it uploads that file's chunks (`fs.go:1297`, uploads at
      `:1330`).
+   - Since ADR 0012, a size-setting `SETATTR`, and an UNCHECKED `CREATE` that
+     carries a size, can also wait for the commit gate, both while a `Sync` is
+     in its commit phase and while one waits to begin it behind another size
+     change that is waiting for its own file's `openFile.mu` (ADR 0012 §7).
+     Each such wait ends when store calls do.
 
-   ADR 0003's drains are commits, so they make both waits more frequent. Each
+   ADR 0003's drains are commits, so they make these waits more frequent. Each
    wait ends when the commits or flushes ahead of it do, it is a delay and not
    a leak, and §7 already accepts a slow call holding its marker, so the
    conclusion stands.

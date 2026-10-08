@@ -5,6 +5,9 @@
 **Revised:** 2026-10-02 — cross-references only. The bullet *#61* under *What
 this does not decide* now ends by saying that ADR 0008 decides it. Nothing
 else changed.
+**Revised:** 2026-10-08 — cross-references only. The bullet *#64, #42 and
+#43* under *What this does not decide* now ends by saying that ADR 0012
+decides #64. Nothing else changed.
 **Issue:** #55, #66
 
 ## Context
@@ -705,7 +708,7 @@ required, except where it says otherwise.
   lock, so a refused `vfs.FS` call never waits behind a commit that holds
   `FS.mu` (#43), though the NFS handler around it still does, when it reads
   attributes for its reply (§4); a commit still encodes every chunk list
-  holding it, one at the limit included.
+  holding it, one at the limit included. ADR 0012 decides #64.
 
 ## Sources
 

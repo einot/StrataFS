@@ -401,7 +401,10 @@ A consistency point is:
 1. **Seal.** Mark every dirty block `IN_CP`. New writes that would modify an
    `IN_CP` block are deferred; writes to anything else proceed. This is WAFL's
    `IN_SNAPSHOT` rule from §4.2, and it exists so the server never stops
-   answering while a consistency point is in flight.
+   answering while a consistency point is in flight. A size change is one
+   write for this rule: it changes the inode's size and the file tree that
+   size describes together, so a consistency point holds both or neither
+   ([ADR 0012](adr/0012-a-commit-stores-a-truncate-whole-or-not-at-all.md)).
 2. **Hash bottom-up.** Compute hashes leaves first, so each parent is hashed
    only once its children's names are final. This pass is pure computation and
    touches no network.
@@ -701,3 +704,4 @@ it is not this one.
 | [0009](adr/0009-a-negative-commit-interval-is-refused.md) | A negative commit interval is refused before anything starts: `blobfs.New` refuses a negative `Config.CommitInterval` before it touches the store, and `cmd/strata` a negative `-commit-interval` before it opens the store; zero still selects the default | none — it constrains `internal/blobfs` and `cmd/strata` only |
 | [0010](adr/0010-a-new-filesystem-is-never-owned-by-root-by-accident.md) | A new filesystem is never owned by root by accident: `cmd/strata` refuses a `-uid` or `-gid` that is neither −1 nor an id from 0 to 4294967294 before it opens the store, and −1 means the real uid or gid strata runs as, which it takes from `os.Getuid` and `os.Getgid` rather than the user database; no flag that `run` converts wraps | none — it constrains `cmd/strata` only |
 | [0011](adr/0011-a-read-only-fs-writes-nothing-to-its-bucket.md) | A read-only FS writes nothing to its bucket: `blobfs.New` with `Config.ReadOnly` refuses a bucket that holds no root pointer, after reading it and before any write, where it used to create a filesystem, and reaches the store only through `store.ReadOnly`, so nothing a read-only `FS` does writes to the bucket | none — it constrains `internal/blobfs` only |
+| [0012](adr/0012-a-commit-stores-a-truncate-whole-or-not-at-all.md) | A commit stores a truncate whole or not at all: a size change holds a commit gate for reading, and `Sync` holds it for writing while it flushes every file a truncate has cut into a stored chunk since that file's last flush, and then commits, so no commit pairs a truncate's size with bytes it removed | 5 — the rule on size changes in step 1; otherwise `internal/blobfs`, which section 14 replaces |

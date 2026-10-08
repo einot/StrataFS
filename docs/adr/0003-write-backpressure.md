@@ -221,6 +221,23 @@
   chunk list to 2^20 references, but not all files' lists together.
   ***What this does not decide*** — the bullet on enforcing the advertised
   maximum file size ends by saying that ADR 0007 decides it.
+- **Revised:** 2026-10-08 — for ADR 0012, which decides #64: a size change
+  holds a commit gate for reading, and a `Sync` holds it for writing across a
+  settle pass and its commit. The decision, §4's algorithm, G1–G3, the five
+  sites' rules, every pinned name and signature, and all numbering are
+  unchanged, and no assumption is added. The earlier revisions' text is left
+  as the history it is. What changed:
+  **§2** — the table's row for a `Sync` failing after `flushAll` succeeded
+  also covers a failed settle pass.
+  **§3** — the quoted rule's first paragraph starts from the commit gate, and
+  a paragraph after the rule records its earlier wording, says who holds the
+  gate, and says that nothing calls `Sync` holding it. The leaf rule is
+  unchanged.
+  **§4** — *One budget drain at a time* says that the commit phases of
+  overlapping `Sync`s take the gate one at a time; *Waking on cancellation*
+  says that `Sync` does not notice cancellation while it waits for the gate.
+  **Assumption 6** — `truncate` never waits on the budget, and since
+  ADR 0012 it can wait for the commit gate.
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
 - **Affects:** `internal/blobfs`, `cmd/strata`, doc comment on `vfs.FS.Write`
 
@@ -506,7 +523,7 @@ The change each operation makes, which is what tests assert against:
 | `flushOpen` failing while it fetches a pending trim's chunk, its inode still there | 0: a trim is never charged, and it stays pending (ADR 0006 §5) |
 | `flushOpen` failing during upload, its inode still there | unchanged; trims stay pending |
 | Either failure, once the file's inode has gone (removed from `FS.open` after `flushAll` listed it) | site 4 releases the file's whole remaining charge, so nothing stays charged to it |
-| `Sync` failing after `flushAll` succeeded — a commit error, divergence included (`internal/blobfs/commit.go:138-139`, `:180-189`) | the flushed files stay released |
+| `Sync` failing after `flushAll` succeeded — a commit error, divergence included (`internal/blobfs/commit.go:138-139`, `:180-189`), or, since ADR 0012, a failed settle pass (ADR 0012 §2) | the flushed files stay released; a settle-pass flush that fails changes its file as the `flushOpen` rows above say |
 | `truncate` deleting dirty indices (`fs.go:1227-1231`) | `−cap` of each |
 | `truncate` shortening a dirty tail in place (`fs.go:1232-1236`) | 0 |
 | `truncate` into a stored chunk that is not dirty, cached or not (ADR 0006 §3) | 0, now and at the next flush |
@@ -528,8 +545,9 @@ saying how a test reaches a cold chunk, a cached one and a hole:
 
 The existing rule stands and is extended by one line:
 
-> Lock ordering is `openFile.mu` before `FS.mu`. Nothing may acquire an
-> `openFile.mu` while holding `FS.mu`.
+> Lock ordering is the commit gate, then `openFile.mu`, then `FS.mu`. Nothing
+> may acquire the commit gate while holding an `openFile.mu` or `FS.mu`, and
+> nothing may acquire an `openFile.mu` while holding `FS.mu`.
 >
 > **The budget's mutex is a leaf: it may be taken while holding either of the
 > others, but no other lock may be acquired while it is held, and nothing may
@@ -537,6 +555,18 @@ The existing rule stands and is extended by one line:
 
 That single sentence is what makes the design deadlock-free, and it is the thing
 a reviewer should check first.
+
+Since ADR 0012 the rule starts from the commit gate, `FS.commitGate`, a
+`sync.RWMutex`; until then its first paragraph read "Lock ordering is
+`openFile.mu` before `FS.mu`. Nothing may acquire an `openFile.mu` while
+holding `FS.mu`." Two things take the gate, each holding no other lock when it
+does (ADR 0012 §2, §5): `truncate`, for reading, from after the checks it
+makes before `getOpen` until it returns; and `Sync`, for writing, from the end
+of its first pass until it returns, across its settle pass and its commit.
+Nothing calls `Sync` holding the gate: `truncate` never reaches `Sync`,
+`flushAll` or `flushOpen`, and `Sync`, whose settle pass flushes holding the
+gate, never calls `truncate`. Nothing waits on the budget holding the gate,
+and the budget's mutex stays a leaf below all three.
 
 Every lock the five accounting sites take follows that order. Sites 2 and 3
 take `FS.mu` while holding `openFile.mu`, as `bufferWrite`'s tail block and
@@ -793,7 +823,10 @@ stalled writer calling `Sync` — produces one redundant namespace snapshot per
 stalled writer, precisely when the bucket is already the bottleneck. `Sync`s
 started elsewhere — the ticker, `COMMIT`, a stable write, shutdown — are
 independent of it: they can overlap it and each other, as they already do, and
-the budget neither waits for them nor counts them as its drain.
+the budget neither waits for them nor counts them as its drain. Since ADR 0012
+the commit phases of overlapping `Sync`s take the commit gate one at a time, as
+their commits already took `FS.mu` one at a time; their first passes still
+overlap (ADR 0012 §7).
 
 **Admission while a drain runs.** `release` broadcasts, so a parked call also
 wakes when the ticker, a `COMMIT`, a stable write, a `truncate` that drops
@@ -818,7 +851,8 @@ parked call, not just the cancelled one; the others go round the loop and park
 again, which is why each wake-up is followed by the full check order. The
 drainer is not parked. It returns when `drain` returns, and `FS.Sync` notices
 cancellation in its store calls but not while it waits for `FS.mu`, or for an
-`openFile.mu`, that another commit or flush holds (#43).
+`openFile.mu`, that another commit or flush holds (#43), nor, since ADR 0012,
+while it waits for the commit gate (ADR 0012 §2).
 
 #### What `Write` returns when the wait fails
 
@@ -1132,10 +1166,12 @@ Recorded because the issue did not specify them.
 5. **The drain is a full `Sync`**, not a partial flush of the largest buffers.
    `Sync` is what exists, it is what `COMMIT` already does, and a partial drain
    would need a policy for which files to flush.
-6. **`truncate` never waits, and since ADR 0006 it never charges.** It holds
-   both locks, so it cannot wait. Note also that shrinking a file does not
-   necessarily lower the charge: a tail chunk shortened in place is a reslice,
-   and the backing array stays resident (§2, site 3).
+6. **`truncate` never waits on the budget, and since ADR 0006 it never
+   charges.** It holds both locks, so it cannot wait on the budget. Since
+   ADR 0012 it can wait for the commit gate, which it takes before either lock
+   (ADR 0012 §7). Note also that shrinking a file does not necessarily lower
+   the charge: a tail chunk shortened in place is a reslice, and the backing
+   array stays resident (§2, site 3).
 
    Until ADR 0006 `truncate` and the `pendingTrim` path did charge, without
    waiting, and could therefore push the charge above the limit, and nothing
