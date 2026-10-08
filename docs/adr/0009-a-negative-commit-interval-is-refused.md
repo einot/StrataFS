@@ -5,6 +5,9 @@
 **Revised:** 2026-10-05 — cross-references only. The bullet *`-uid` and
 `-gid` (#72)* under *What this does not decide* now says that ADR 0010
 decides it. Nothing else changed.
+**Revised:** 2026-10-07 — cross-references only. The bullet *`-read-only`
+on an empty bucket (#68)* under *What this does not decide* now ends by
+saying that ADR 0011 decides it. Nothing else changed.
 **Issue:** #73
 
 ## Context
@@ -398,7 +401,10 @@ approved say so (Assumption 11).
 - **`-read-only` on an empty bucket (#68).** `New` still creates and commits
   a filesystem there, since `Config.ReadOnly` refuses changes at the VFS
   layer only. §2's refusal comes first, so a read-only mount with a negative
-  interval no longer writes, but nothing else about #68 changes.
+  interval no longer writes, but nothing else about #68 changes. ADR 0011
+  decides it: a read-only `New` now refuses a bucket that holds no root
+  pointer, after reading it and before any write, and reaches the store only
+  through `store.ReadOnly`. §2's refusal still comes first.
 
 ## Sources
 
