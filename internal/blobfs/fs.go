@@ -88,18 +88,30 @@ type FS struct {
 	// stand for a build with another limit (ADR 0007 §7).
 	maxFileSize uint64
 
+	// commitGate orders size changes against commits, so that a commit holds a
+	// truncate whole or not at all (ADR 0012 §1, Rule D; §2). truncate holds it
+	// for reading, from after the checks it makes before getOpen until it
+	// returns. Sync holds it for writing from the end of its first pass until
+	// it returns, across its settle pass and its commit: its commit phase.
+	// Nothing else takes it. Both take it holding no other lock, and neither
+	// reaches the other while holding it: truncate never flushes or syncs, and
+	// Sync never truncates (§5).
+	commitGate sync.RWMutex
+
 	// mu guards the namespace: the inode table, the allocator, the epoch and
 	// the dirty flags.
 	//
-	// Lock ordering is openFile.mu before mu. Nothing may acquire an
-	// openFile.mu while holding mu, which is why committing flushes file data
-	// before taking mu rather than underneath it.
+	// Lock ordering is the commit gate, then openFile.mu, then mu. Nothing may
+	// acquire the commit gate while holding an openFile.mu or mu, and nothing
+	// may acquire an openFile.mu while holding mu, which is why committing
+	// flushes file data before taking mu rather than underneath it (ADR 0003
+	// §3, ADR 0012 §5).
 	//
-	// The budget's mutex is a leaf: it may be taken while holding either of
-	// the others, but no other lock may be acquired while it is held, and
-	// nothing may wait on its condition variable while holding either of the
-	// others (ADR 0003 §3). Write's wait for the budget therefore happens
-	// before it takes any of them.
+	// The budget's mutex is a leaf: it may be taken while holding any of the
+	// others, but no other lock may be acquired while it is held, and nothing
+	// may wait on its condition variable while holding any of the others
+	// (ADR 0003 §3). Write's wait for the budget therefore happens before it
+	// takes any of them.
 	mu         sync.RWMutex
 	inodes     map[uint64]*inode
 	nextIno    uint64
@@ -164,6 +176,14 @@ type openFile struct {
 	// releases it under FS.mu alone, where taking mu would invert the lock
 	// order.
 	bytes atomic.Int64
+
+	// unsettled marks a file a truncate has cut into a stored chunk since its
+	// last successful flush, so that a commit could name bytes the cut removed
+	// (ADR 0012 §1, §3). Only truncate sets it and only a successful flush
+	// clears it, so it outlives any write that grows the file meanwhile. It is
+	// written only holding mu and FS.mu for writing, so it may be read holding
+	// either.
+	unsettled bool
 }
 
 const defaultChunkSize = 1 << 20
@@ -1558,7 +1578,15 @@ func (f *FS) syncFileAndNamespace(ctx context.Context, id uint64) error {
 // truncate changes a file's length, dropping or extending chunks as needed.
 // It holds of.mu and then mu for writing across the whole change, and so never
 // fetches: a cut into a stored chunk it cannot shorten becomes a pending trim
-// (ADR 0006 §3). It makes no store call, charges nothing and never waits.
+// (ADR 0006 §3). It makes no store call, charges nothing and never waits on
+// the budget.
+//
+// It holds the commit gate for reading from after the checks that can refuse
+// it holding no lock until it returns, so a Sync's commit phase begins either
+// after the change, and settles it, or before it, and leaves it out whole
+// (ADR 0012 §1, Rule D; §2). That is the one wait it has: while a commit phase
+// runs, or a Sync waits to begin one (§7). A cut into a stored chunk marks the
+// file unsettled for that settle pass to find (§3).
 func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint64) error {
 	// A size above the limit is refused before anything is looked up or
 	// locked, even one that would shrink a file an earlier build left larger;
@@ -1584,6 +1612,12 @@ func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint
 	}
 	id := n.ID
 	f.mu.RUnlock()
+
+	// Taken after the checks above, so a refused size change never waits for
+	// it, and before getOpen, so that no lock is held while waiting (ADR 0012
+	// §2, §5). Deferred first, it is released last, after mu and of.mu.
+	f.commitGate.RLock()
+	defer f.commitGate.RUnlock()
 
 	of := f.getOpen(id)
 	of.mu.Lock()
@@ -1659,6 +1693,15 @@ func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint
 			}
 		}
 	}
+	// The stored chunk at the new end still names bytes past it, hidden only by
+	// the trim or the shortened dirty tail above, which only a flush stores.
+	// The mark is never cleared here, so no later size change can hide a cut
+	// that is still unflushed (ADR 0012 §1, §3; Assumption 9).
+	if tail != 0 && uint64(len(n.Chunks)) == lastIdx+1 {
+		if ref := n.Chunks[lastIdx]; !ref.isHole() && uint64(ref.Size) > tail {
+			of.unsettled = true
+		}
+	}
 
 	if size > n.Size {
 		// Growing a file creates a hole; no data is stored for it.
@@ -1694,11 +1737,24 @@ func (f *FS) commitFile(ctx context.Context, id uint64) error {
 // trims. It takes the per-file lock and then briefly the namespace lock, never
 // the other way around, and holds the per-file lock throughout, so nothing
 // changes of.dirty or of.pendingTrim underneath it.
+//
+// A flush that succeeds clears the file's unsettled mark, including one that
+// returns early with nothing to apply; one that fails leaves it set (ADR 0012
+// §3; ADR 0006 §5).
 func (f *FS) flushOpen(ctx context.Context, id uint64, of *openFile) error {
 	of.mu.Lock()
 	defer of.mu.Unlock()
 
 	if len(of.dirty) == 0 && len(of.pendingTrim) == 0 {
+		// Every marking cut leaves a trim or a dirty buffer at its index, and
+		// only a flush or a cut that drops the stale chunk removes it, so a
+		// file with neither names no removed byte (ADR 0012 §3, "Why the
+		// early return may clear it").
+		if of.unsettled {
+			f.mu.Lock()
+			of.unsettled = false
+			f.mu.Unlock()
+		}
 		return nil
 	}
 
@@ -1757,6 +1813,10 @@ func (f *FS) flushOpen(ctx context.Context, id uint64, of *openFile) error {
 		}
 		f.dirty = true
 	}
+	// Cleared in the same hold as the repointing, whether or not the inode is
+	// still there, so no commit can find the mark clear before the chunk list
+	// is settled (ADR 0012 §3).
+	of.unsettled = false
 	f.mu.Unlock()
 
 	of.dirty = make(map[uint64][]byte)
@@ -1816,6 +1876,34 @@ func (f *FS) flushAll(ctx context.Context) error {
 	for id, of := range f.open {
 		ids = append(ids, id)
 		files = append(files, of)
+	}
+	f.mu.RUnlock()
+
+	for i, of := range files {
+		if err := f.flushOpen(ctx, ids[i], of); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// settleAll is Sync's settle pass: it flushes every file whose unsettled mark
+// is set, and returns the first error (ADR 0012 §2). It lists them holding mu
+// for reading, which excludes the mark's writers, and flushes holding no mu.
+// Its caller must hold the commit gate for writing and no other lock, so that
+// no truncate can mark a file once the list is taken, and a pass that succeeds
+// leaves none marked (§3, §5).
+func (f *FS) settleAll(ctx context.Context) error {
+	var (
+		ids   []uint64
+		files []*openFile
+	)
+	f.mu.RLock()
+	for id, of := range f.open {
+		if of.unsettled {
+			ids = append(ids, id)
+			files = append(files, of)
+		}
 	}
 	f.mu.RUnlock()
 
