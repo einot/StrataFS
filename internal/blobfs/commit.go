@@ -172,7 +172,7 @@ func (f *FS) Sync(ctx context.Context) error {
 // changed a chunk list without the commit gate, and is logged as the bug it is
 // rather than committed as a silent exposure of removed bytes.
 func (f *FS) commitLocked(ctx context.Context) error {
-	if f.diverged {
+	if f.diverged.Load() {
 		return errors.New("filesystem diverged: another writer committed to this bucket; remount to continue")
 	}
 	for id, of := range f.open {
@@ -227,7 +227,7 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		// Someone else moved the root pointer. Our in-memory tree is built on a
 		// namespace that is no longer current, so continuing would discard
 		// their work. Refuse to write any further rather than corrupt.
-		f.diverged = true
+		f.diverged.Store(true)
 		f.log.Error("commit conflict: another writer owns this bucket",
 			"our_epoch", f.epoch, "attempted", epoch)
 		return errors.New("commit conflict: another writer owns this bucket; remount to continue")
