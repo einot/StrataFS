@@ -285,9 +285,21 @@ table's second row).
   waits for the readers already in (*Sources*). A size change that holds the
   gate waits, as it always did, for its own file's `openFile.mu`. A flush of
   that file (any `Sync`'s first pass, or `Commit`'s or a stable write's
-  flush), or a write fetching one of its chunks, can hold that lock across a
-  store call. So one such store call can hold up every size change on the
-  server for as long as it lasts. For example:
+  flush, through `commitFile`), or a write fetching one of its chunks, can
+  hold that lock across store calls. So the whole flush of that file can hold
+  up every size change on the server: `flushOpen` holds the file's
+  `openFile.mu` across all of its store calls, the fetch, probe and upload
+  that apply a pending trim and a probe and an upload for each dirty chunk.
+  Its dirty chunks fit within the budget's bound on the dirty pool,
+  `MaxDirtyBytes` (256 MiB by default) plus ADR 0003 §6's overshoot, which is
+  up to 128 MiB per connection at the defaults and has no bound in total
+  (ADR 0003 Assumption 19). With the budget disabled nothing bounds them: a
+  negative `MaxDirtyBytes`, which `-max-dirty` 0 or less gives, makes `await`
+  admit every write. At the defaults, `defaultChunkSize` and
+  `defaultMaxDirtyBytes`, a file whose dirty chunks fill the budget has 256
+  of 1 MiB, and its flush makes up to 256 probes and 256 uploads. A write
+  holds the lock across at most two fetches, of the chunks at its two ends.
+  For example:
   1. `Sync` S2's first pass flushes A early.
   2. A gets dirty data, and a `COMMIT` of A uploads it, holding A's
      `openFile.mu`.
@@ -301,12 +313,32 @@ table's second row).
   writes each run a `Sync` (#44), so overlapping `Sync`s make the wider wait
   routine.
 - It is a delay, never a deadlock: no holder of an `openFile.mu` or of
-  `FS.mu` waits for the gate. A client can lengthen it, since each cut made
-  during a first pass adds a fetch, a probe and an upload to the settle pass.
-  But every part of it is bounded by store calls: the same kind of delay as
-  #43, inside the loopback trust boundary of ADR 0003 Assumption 19. A stream
-  of size changes cannot starve commits, because a waiting writer excludes new
-  readers.
+  `FS.mu` waits for the gate. A client can lengthen it, and repeat it. Each
+  file cut during a first pass adds its whole flush to the settle pass, its
+  dirty set included, because the settle pass, `settleAll`, flushes whole
+  files with `flushOpen` (Assumption 8), and writes made to such a file after
+  the cut, until the settle pass takes its `openFile.mu`, are uploaded under
+  the gate too. When the pass reaches a file, the file holds at most the
+  dirty pool's bound in dirty chunks and at most one pending trim
+  (ADR 0006 §7). The files of one pass can hold more together, since each
+  flush frees room that writes to the files after it can take. But every part
+  of it is bounded by store calls, each capped by the S3 client's timeout and
+  retries: the same kind of delay as #43, inside the loopback trust boundary
+  of ADR 0003 Assumption 19. A stream of size changes cannot starve commits,
+  because a waiting writer excludes new readers.
+- The S3 client caps each request, not each store call. `NewS3` gives its
+  `http.Client` a `Timeout` of 30 s unless `S3Config.Timeout` sets another,
+  and `cmd/strata` sets none; the timeout includes connecting, any redirects
+  and reading the response body (*Sources*). `S3.do` sends up to
+  `maxRetries` + 1, four, requests for every call but `PutIfMatch`, 200, 400
+  and 800 ms apart, so one store call can last about two minutes, and every
+  call a flush makes is retried so. A local-directory store, `store.Local`,
+  sets no timeout of its own.
+- What is new since `48aa23a` is that size changes of other files wait for a
+  file's whole flush. Commits already did, since every first pass,
+  `flushAll`, takes each open file's `openFile.mu` to flush it; a size change
+  waited only for its own file's lock and for `FS.mu` (#43). #85 tracks
+  reducing that stall.
 - The commit phases of overlapping `Sync`s take the gate one at a time, as
   their commits already took `FS.mu` one at a time; their first passes still
   overlap.
@@ -466,8 +498,13 @@ architect's recommendation, and say so: Assumptions 1 to 6.
    earlier builds committed; #43; #44 (*What this does not decide*). The
    owner delegated this to the architect's recommendation on 2026-10-08.
 4. **A size change may now wait for the commit gate:** while a `Sync` is in
-   its commit phase, and while one waits to begin it behind a size change
-   that is itself waiting for its own file's `openFile.mu` (§7). ADR 0006
+   its commit phase, whose settle pass flushes every marked file whole, and
+   while one waits to begin it behind a size change that is itself waiting
+   for its own file's `openFile.mu`, which a flush holds across all of that
+   file's store calls (§7). Either wait can last through whole-file flushes,
+   each of up to the dirty pool's worth of uploads, or of any size with the
+   budget disabled, so one client can make every size change on the server
+   wait that long, and repeat it to keep them waiting (§7; #85). ADR 0006
    §3(d) said a truncate never waits; it still never waits on the budget. The
    owner delegated this to the architect's recommendation on 2026-10-08.
 5. **Not breaking under `CLAUDE.md`'s rule for `CHANGES`.** No deployment
@@ -480,7 +517,9 @@ architect's recommendation, and say so: Assumptions 1 to 6.
 7. **Two passes rather than one gate across the whole `Sync`,** so that a size
    change does not wait for the files flushed in a first pass.
 8. **The settle pass flushes the whole file with `flushOpen`,** not only the
-   cut index.
+   cut index. Its cost is that each marked file's whole dirty set, writes
+   made after the cut included, is uploaded holding the gate, so every size
+   change on the server waits for those uploads (§7; #85).
 9. **The mark is sticky:** set at the cut, and cleared only by a successful
    flush. It is not computed at the settle pass or the commit from the size
    and the chunk list. A computed check misses route 5 and route 3's
@@ -602,7 +641,10 @@ architect's recommendation, and say so: Assumptions 1 to 6.
 - **An unlocked pre-settle pass:** before taking the gate, flush the marked
   files once, and leave the gate only what was marked meanwhile. It would cut
   the store calls made under the gate to almost none, and §9 already allows
-  it. A later refinement, not a fix.
+  it. A later refinement, not a fix. #85 tracks reducing the stall of size
+  changes that §7 describes; this pass would shrink only the settle pass's
+  share of it, not the wait behind a size change held up by its own file's
+  lock.
 - **A test of the committer's tick or of `cmd/strata`'s shutdown,** which
   review covers by checking that both go through `Sync`.
 
@@ -677,3 +719,18 @@ second fetch of a URL inside that window may have come from its cache.
 
   **Honesty note:** fetched once; the tool removed the page's hyperlink markup
   and returned these in segments. I did not read the page end to end.
+- Go standard library, `net/http`, `Client`:
+  <https://pkg.go.dev/net/http#Client>, fetched on 2026-10-10 through the
+  same tool. The `Timeout` field's doc comment: "Timeout specifies a time
+  limit for requests made by this Client." "The timeout includes connection
+  time, any redirects, and reading the response body." "The timer remains
+  running after Get, Head, Post, or Do return and will interrupt reading of
+  the Response.Body." (§7)
+
+  **Honesty note:** fetched once. The tool read the first 100,000 of the
+  page's 234,315 characters, which hold the `Client` type. Asked for any
+  sentence in the type's or `Client.Do`'s doc comment saying whether the
+  limit applies to each call of `Do`, it found none. That each request
+  `S3.do` sends gets a limit of its own is my reading of "requests made by
+  this Client", since `S3.do` builds a new request for each attempt and sends
+  it with `Client.Do`.
