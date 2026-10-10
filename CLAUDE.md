@@ -130,6 +130,28 @@ when a running deployment needs action to keep working. If you are unsure
 whether a change qualifies, it does not — say so in your report rather
 than writing a speculative entry.
 
+## Issue labels
+
+Every issue is labelled when it is created, in the same `gh issue create`
+call (`--label`), never left for later. Use the repository's existing
+labels; adding a new label is the repo owner's decision.
+
+Give each issue at least one kind label, and every area label that applies:
+- **Kind:** `bug` (something that exists is wrong), `enhancement` (something
+  new), `design` (an architectural decision, from `docs/DESIGN.md` or an
+  ADR), `documentation`, or `question` (something to measure or find out).
+- **Area:** `correctness` (wrong behaviour under conditions the code already
+  reaches), `security` (access control, trust boundaries, exposure of data
+  that should be gone or hidden, or anything a client can use to exhaust
+  or stall the server), `ops` (running it in production: tooling, CI,
+  observability).
+
+When an agent drafts an issue's text, its brief asks for proposed labels
+too. The session checks them against these definitions before filing.
+After filing, confirm that no issue is unlabelled:
+`gh issue list --state all --json number,labels --jq '[.[] | select((.labels|length)==0)] | map(.number)'`
+must print `[]`.
+
 ## Disabled CI coverage
 
 Anything switched off in CI is recorded here together with the condition
