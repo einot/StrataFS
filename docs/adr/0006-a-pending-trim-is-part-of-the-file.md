@@ -19,6 +19,15 @@ while many can still exhaust memory. The bullet on #42, #43 and #55 says that
 a `SETATTR` above the maximum file size is refused before any lock, so a
 truncate appends at most 2^20 holes. The revision above is left as the history
 it is, and the decision and everything else are unchanged.
+**Revised:** 2026-10-08 — for ADR 0012, which decides #64. §3(d) now says
+that a truncate never waits on the budget, and that since ADR 0012 it holds
+the commit gate for reading and can wait for it. §5 says that a flush that
+succeeds, one that returns early with nothing to apply included, clears the
+file's unsettled mark. The bullet *`truncate` waits on the budget* under
+*Alternatives considered* says what a size change can wait for since
+ADR 0012, and the bullet *The commit window* (#64) under *What this does not
+decide* ends by saying that ADR 0012 decides it. The revisions above are left
+as the history they are, and the decision and everything else are unchanged.
 **Issue:** #40, #56
 
 ## Context
@@ -152,9 +161,13 @@ new size's chunk index and its offset within that chunk:
   between the two lengths read as zeros.
 - **(c)** A hole takes no entry. Its bytes read as zeros past any length.
 - **(d)** It never reads the chunk cache, never stages a buffer in `of.dirty`,
-  never charges the budget and never waits. It still releases the dirty
-  buffers it deletes (ADR 0003 §2, site 3), and still shortens a dirty tail in
-  place, by a reslice.
+  never charges the budget and never waits on the budget. It still releases
+  the dirty buffers it deletes (ADR 0003 §2, site 3), and still shortens a
+  dirty tail in place, by a reslice. Since ADR 0012 a truncate holds the
+  commit gate for reading from after the checks it makes before `getOpen`
+  until it returns. So it can wait while a `Sync` is in its commit phase, and
+  while a `Sync` waits to begin one behind another size change, which can last
+  as long as a flush or fetch of that other size change's file (ADR 0012 §7).
 
 ### 4. `Write`
 
@@ -181,7 +194,9 @@ buffer never enters `of.dirty` and is never charged, and nothing of it is kept
 once it is uploaded. The flush uploads the dirty chunks as today, and repoints
 `n.Chunks` at the trimmed chunks and at the dirty ones in the same hold of
 `FS.mu`, or at nothing if the inode has gone, as today. When it succeeds it
-resets both `of.dirty` and `of.pendingTrim`.
+resets both `of.dirty` and `of.pendingTrim`. Since ADR 0012 a flush that
+succeeds, including one that returns early with nothing to apply, clears the
+file's unsettled mark (ADR 0012 §3).
 
 A fetch or an upload that fails repoints nothing, and leaves `of.dirty` and
 `of.pendingTrim` as they were, so the file's next flush applies the trims
@@ -367,7 +382,9 @@ required, except where it says otherwise.
   does. After this ADR there is nothing for it to bound, and it would hold
   every size-setting `SETATTR` behind a drain, including one that shrinks a
   file and frees memory. ADR 0003 Assumption 6 records why it was not chosen
-  before.
+  before. Since ADR 0012 a size change can wait for the commit phase of any
+  `Sync`, a budget drain's included, and while a `Sync` waits to begin one
+  (ADR 0012 §7); it still never waits on the budget.
 - **Charge a trim when it is queued.** The charge would count memory not yet
   held, which breaks ADR 0003 §2's invariant that `of.bytes` is the capacity in
   `of.dirty`, and `truncate` could not wait for it anyway.
@@ -439,7 +456,7 @@ required, except where it says otherwise.
   procedures that are synchronous. The options are a gate that orders a commit
   against the files' `openFile.mu`, a committed trim length (a format version;
   *Alternatives considered*), stopping dispatch before the final `Sync`, or
-  accepting it.
+  accepting it. ADR 0012 decides it.
 - **#42, #43 and #55.** `getOpen` can recreate an entry for an inode that has
   already gone, but `truncate` resolves the handle again under both locks
   before it touches the map, so such an entry never gets a trim (#42). A commit

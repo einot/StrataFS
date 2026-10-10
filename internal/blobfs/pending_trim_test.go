@@ -55,7 +55,8 @@ package blobfs
 // than find it in the cache (§7: "none if this FS's cache holds it").
 //
 // Not covered, on purpose:
-//   - The commit window (#64), which ADR 0006 leaves open.
+//   - The commit window (#64), which commit_window_test.go covers, from
+//     ADR 0012.
 //   - §7's memory figures, which are arithmetic, not behaviour.
 //   - Site 4's check with the inode gone: backpressure_test.go's bpSite4Gone
 //     covers it.

@@ -2,6 +2,9 @@
 
 **Status:** Accepted
 **Date:** 2026-10-07
+**Revised:** 2026-10-08 — cross-references only. The bullet on #64, the commit
+window, under *What this does not decide* now ends by saying that ADR 0012
+decides it. Nothing else changed.
 **Issue:** #68
 
 ## Context
@@ -442,7 +445,7 @@ say so: Assumptions 1, 5, 10, 11 and 12.
 - **`store.ReadOnly` without `Config.ReadOnly`,** whose behaviour §5 leaves
   as it is.
 - **#64, the commit window** (ADR 0006), which needs a truncate, and a
-  read-only mount refuses truncates.
+  read-only mount refuses truncates. ADR 0012 decides it.
 
 ## Sources
 

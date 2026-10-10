@@ -129,12 +129,30 @@ func fsidFor(name string) uint64 {
 // snapshot is written before the root pointer moves. A crash at any point
 // leaves unreferenced objects behind, never a root pointer that names data
 // which does not exist. Readers only ever see the old tree or the new one.
+//
+// It runs in three steps (ADR 0012 §2): a first pass, flushAll, holding no
+// gate; then, holding the commit gate for writing, a settle pass that flushes
+// every file a truncate left unsettled, and the commit itself. The gate is
+// held from the end of the first pass until Sync returns, its commit phase,
+// so a truncate is in the commit whole if it returned before the phase began
+// and not at all otherwise (§1, Rule D). An error from either pass commits
+// nothing.
 func (f *FS) Sync(ctx context.Context) error {
 	// Buffered file data must be stored before the namespace that
 	// references it. This happens before mu is taken because flushing acquires
-	// per-file locks, which must never be taken while holding mu.
+	// per-file locks, which must never be taken while holding mu. It happens
+	// before the gate is taken so that size changes do not wait for it
+	// (ADR 0012 Assumption 7).
 	if err := f.flushAll(ctx); err != nil {
 		return fmt.Errorf("flush pending writes: %w", err)
+	}
+
+	// Taken holding no lock, as the lock order requires (ADR 0012 §5), and
+	// released after mu, since its defer runs last.
+	f.commitGate.Lock()
+	defer f.commitGate.Unlock()
+	if err := f.settleAll(ctx); err != nil {
+		return fmt.Errorf("settle truncated files: %w", err)
 	}
 
 	f.mu.Lock()
@@ -145,9 +163,24 @@ func (f *FS) Sync(ctx context.Context) error {
 	return f.commitLocked(ctx)
 }
 
+// commitLocked writes the namespace as it stands and swaps the root pointer to
+// it. Caller must hold mu for writing, except initEmpty, which runs before the
+// FS is shared.
+//
+// It refuses, storing nothing, while any file is unsettled (ADR 0012 §1, Rule
+// C; §4). Sync's settle pass makes that impossible, so a refusal means a path
+// changed a chunk list without the commit gate, and is logged as the bug it is
+// rather than committed as a silent exposure of removed bytes.
 func (f *FS) commitLocked(ctx context.Context) error {
 	if f.diverged {
 		return errors.New("filesystem diverged: another writer committed to this bucket; remount to continue")
+	}
+	for id, of := range f.open {
+		if of.unsettled {
+			f.log.Error("commit refused: a truncated file is unsettled",
+				"inode", id, "epoch", f.epoch)
+			return fmt.Errorf("commit refused: inode %d is unsettled since a truncate, so the snapshot could name bytes it removed", id)
+		}
 	}
 
 	epoch := f.epoch + 1
