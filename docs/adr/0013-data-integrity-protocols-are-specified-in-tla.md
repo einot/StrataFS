@@ -11,8 +11,9 @@
 Everything concerning data integrity or security." #109 is a tracking issue
 for the owner's instruction (one per instruction, as the architect
 recommended; the owner delegated this on 2026-10-10). Every statement about
-the code in this ADR was checked against `3deecf1`, and code is cited by
-symbol.
+the code in this ADR was checked against `3deecf1`, except those about
+`FS.diverged` in §4 and Assumption 9, which were checked against `f3a8d10`
+(Assumption 24). Code is cited by symbol.
 
 **Defects found by reading, after the code existed.** Six defects in how this
 filesystem keeps its data were found by reading code that had already been
@@ -194,7 +195,8 @@ change them.
   why folding it into the next critical section changes no property the spec
   checks. Today that read is `mutable()`, which `Write`, `SetAttr` and the
   namespace operations call before they take `FS.mu`, and which reads
-  `FS.diverged`, which `commitLocked` writes holding `FS.mu`.
+  `FS.diverged`, which `commitLocked` writes holding `FS.mu`; the read and the
+  write are atomic (#48).
 - **A spec may split an action further.** A finer split adds interleavings,
   so an invariant that holds of it holds of the coarser one; a liveness
   property then needs fairness on each part.
@@ -446,11 +448,14 @@ when TLC runs in §10, and the issue in *Context*.
    names depends on that, since `commitLocked` checks `FS.diverged` again
    under `FS.mu` before it writes anything, and that is the kind of reason §4
    asks a spec to give; whether a namespace operation acknowledged then is
-   durable is NfsDurability's question (§1). Separately,
-   `mutable()` reads `FS.diverged` while `commitLocked` may be writing it,
-   which the Go memory model defines as a data race (as ADR 0005's *Sources*
-   quote it). `FS.mode`, read without a lock (`docs/vocabulary.md`, V1), is
-   ADR 0014's.
+   durable is NfsDurability's question (§1). Since #48's fix, `FS.diverged` is
+   an `atomic.Bool`, which `mutable()` reads with `Load` and `commitLocked`
+   sets with `Store`, so the read is no longer a data race under the Go memory
+   model, whose definition exempts accesses that are all atomic (as ADR 0005's
+   *Sources* quote it). Atomicity does not make the read part of the critical
+   section after it, so a commit can still diverge between the two, as this
+   assumption's first sentence says. `FS.mode`, read without a lock
+   (`docs/vocabulary.md`, V1), is ADR 0014's.
 10. **A finer split** (§4). It lets a spec keep apart a step the vocabulary
     names, such as `StartPrune` after a swap, where the rule would let it
     merge, at the price of more states.
@@ -494,9 +499,10 @@ when TLC runs in §10, and the issue in *Context*.
     the runner fails when the tools are missing; read together, a PR that
     changes `docs/tla/` before the runner exists is not gated, and has no
     spec to check.
-20. **Issues cited by number.** #5, #11, #21, #30, #31, #82 and #83 are cited
-    as the session gave them. Their text is not in the repository, I could not
-    read it, and nothing here depends on more than which area each belongs to.
+20. **Issues cited by number.** #5, #11, #21, #30, #31, #48, #82 and #83 are
+    cited as the session gave them. Their text is not in the repository, I
+    could not read it, and nothing here depends on more than which area each
+    belongs to.
 21. **ADRs cited before they exist.** ADR 0014, the lifecycle ADR, the ADR for
     #5 and the load-race ADR are planned, not written. ADR 0014 is cited by
     the number the session's plan gives it; if that number goes to another
@@ -506,9 +512,12 @@ when TLC runs in §10, and the issue in *Context*.
     `CHANGES`).
 23. **Status is Accepted on creation.** The owner delegated this to the
     architect's recommendation on 2026-10-10.
-24. **Read, not run.** The code was read at `3deecf1`, nothing was run, and no
-    spec exists yet. The tooling state is the session's report, checked
-    against its sources as far as they allow.
+24. **Read, not run.** The code was read at `3deecf1`, and again at `f3a8d10`
+    for the statements about `FS.diverged` in §4 and Assumption 9. By the
+    session's account, which nothing here could check, the only code change
+    between the two is #48's fix, `bdc7b58`. Nothing was run, and no spec
+    exists yet. The tooling state is the session's report, checked against its
+    sources as far as they allow.
 
 ## Alternatives considered
 
