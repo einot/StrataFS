@@ -119,8 +119,12 @@ type FS struct {
 	fsid       uint64
 	rootETag   string
 	dirty      bool
-	diverged   bool
 	lastCommit time.Time
+
+	// diverged is read without a lock, by mutable() ahead of every change, so
+	// it is atomic rather than guarded by mu. commitLocked sets it once, on
+	// store.ErrPrecondition, and nothing clears it (ADR 0003 §5).
+	diverged atomic.Bool
 
 	// retention is how many namespace snapshots to keep behind the current
 	// one; pruning guards against a busy mount filling the bucket.
@@ -418,7 +422,7 @@ func (f *FS) mutable() error {
 	if f.readOnly {
 		return vfs.ErrROFS
 	}
-	if f.diverged {
+	if f.diverged.Load() {
 		return vfs.ErrStale
 	}
 	return nil
