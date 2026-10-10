@@ -1584,9 +1584,12 @@ func (f *FS) syncFileAndNamespace(ctx context.Context, id uint64) error {
 // It holds the commit gate for reading from after the checks that can refuse
 // it holding no lock until it returns, so a Sync's commit phase begins either
 // after the change, and settles it, or before it, and leaves it out whole
-// (ADR 0012 §1, Rule D; §2). That is the one wait it has: while a commit phase
-// runs, or a Sync waits to begin one (§7). A cut into a stored chunk marks the
-// file unsettled for that settle pass to find (§3).
+// (ADR 0012 §1, Rule D; §2). The gate is the wait ADR 0012 adds: while a
+// commit phase runs, or while a Sync waits to begin one. As before, it also
+// waits for its own file's of.mu, which a flush of that file or a write
+// fetching one of its chunks can hold across store calls, and for mu, which a
+// commit holds across its store calls (#43; ADR 0012 §7). A cut into a stored
+// chunk marks the file unsettled for a Sync's settle pass to find (§3).
 func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint64) error {
 	// A size above the limit is refused before anything is looked up or
 	// locked, even one that would shrink a file an earlier build left larger;
