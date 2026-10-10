@@ -506,12 +506,16 @@ architect's recommendation, and say so: Assumptions 1 to 6.
    budget disabled, so one client can make every size change on the server
    wait that long, and repeat it to keep them waiting (§7; #85). ADR 0006
    §3(d) said a truncate never waits; it still never waits on the budget. The
-   owner delegated this to the architect's recommendation on 2026-10-08.
+   owner delegated this to the architect's recommendation on 2026-10-08, when
+   §7 said that one store call could hold up every size change on the server.
+   On 2026-10-10, after §7 was corrected to say that a file's whole flush can,
+   the owner accepted the corrected cost and asked that it be returned to if
+   it turns out to be problematic, which #85 tracks.
 5. **Not breaking under `CLAUDE.md`'s rule for `CHANGES`.** No deployment
    needs to act: the format, the flags and the protocol are unchanged, and
    what a size change gains is a wait (§7). The owner delegated this to the
    architect's recommendation on 2026-10-08.
-6. **Status Accepted on creation,** on the delegation recorded in
+6. **Status Accepted on creation,** on the decisions recorded in
    Assumptions 1 to 5. The owner delegated this to the architect's
    recommendation on 2026-10-08.
 7. **Two passes rather than one gate across the whole `Sync`,** so that a size
