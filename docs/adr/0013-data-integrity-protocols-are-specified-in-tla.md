@@ -132,11 +132,14 @@ other areas go to the tools §1 names.
    contract G1 to G3, and ADR 0003 §2's two statements about the whole
    budget: the charge is never below the sum of the files' `of.bytes`, which
    is never below zero, and equals the sum over `FS.open` whenever no
-   accounting step is in flight, so that no charge outlives its file. It is
-   specified for availability, not for data integrity: a drain left
-   unsettled, or a wake-up lost, parks every writer over the limit for good,
-   and a charge that outlives its file holds the budget at its limit with
-   nothing able to drain it (ADR 0003 §2, §4).
+   accounting step is in flight, so that no charge outlives its file. A site
+   is in flight from its first access to the charge or to `of.bytes` until
+   its last, and a `bufferWrite` is in flight from its charge (site 1) until
+   its tail block (site 2) ends, since ADR 0003 §2 nets the two against each
+   other. It is specified for availability, not for data integrity: a drain
+   left unsettled, or a wake-up lost, parks every writer over the limit for
+   good, and a charge that outlives its file holds the budget at its limit
+   with nothing able to drain it (ADR 0003 §2, §4).
 
 **The redesign.** The consistency point and the sweeper (`docs/DESIGN.md` §5,
 §8; phases 4 and 6 of §14) are specified before their code. The sweeper's
@@ -228,26 +231,38 @@ change them.
   then moves later, releasing it earlier, and each protected access either
   way, until the hold's steps meet at the one access left over. A hold that
   passes none of these is split at its accesses outside the protection,
-  unless the spec argues the first test for it directly. `dropOpen` is such a
-  hold today: it calls `of.bytes.Swap` and then `budget.release` holding only
-  `FS.mu`, and neither commutes with every step another process can take
-  meanwhile, since `flushOpen` swaps, and `bufferWrite` adds to, the same
-  `of.bytes` holding only `openFile.mu`, and `await` reads the charge.
-  Arguing the test directly, with each process's steps kept in their order,
-  passes it against `flushOpen` and `bufferWrite`: their steps between the
-  two move after the hold. A `Swap` or an `Add` of `of.bytes` leaves the
-  charge alone, and so commutes with the `release`; and `budget.release`
-  calls commute with each other, and with `budget.add`, since each only adds
-  to or takes from the charge, and a release wakes the same parked calls
-  whichever comes first. A read of the charge between the two that depends
-  on none of their steps moves before the hold, since it leaves `of.bytes`
-  alone. The argument fails in one case. When `flushOpen`'s `Swap` falls
-  between the two, it cannot move before `dropOpen`'s, so its `release`
-  stays after it too; a call in `await` that this `release` wakes can then
-  read the charge before `dropOpen`'s `release`, and that read can move
-  neither before its wake-up nor past the `release` it does not commute
-  with. So a spec with `flushOpen`'s tail and `await`, as Budget has (§1),
-  makes `dropOpen`'s `Swap` and its `release` two actions.
+  unless the spec argues the first test for it directly. Three accounting
+  runs are such today, each making two accesses outside its hold's
+  protection: `dropOpen`, which calls `of.bytes.Swap` and then
+  `budget.release` holding only `FS.mu`; the tail of `flushOpen`, which does
+  the same after it releases `FS.mu`, holding only `openFile.mu`; and
+  `bufferWrite`'s charge, `budget.add` and then `of.bytes.Add`, holding only
+  `openFile.mu`. Neither lock keeps out the other's holders, and `await`
+  reads the charge. The direct argument, which keeps each process's steps in
+  their order, rests on three facts. A `Swap` or an `Add` of `of.bytes`
+  leaves the charge alone, and a read of the charge, or a call parking on
+  it, leaves `of.bytes` alone. `budget.release` calls commute with each
+  other, and with `budget.add`, since each only adds to or takes from the
+  charge, and a release wakes the same parked calls whichever comes first.
+  And two calls on one `of.bytes` do not commute. So in `bufferWrite`'s
+  charge, a `Swap` that falls between its two steps moves before both, a
+  read of the charge after both, and a `release` to whichever side keeps its
+  order with such a read, and that run passes. In `dropOpen` and in
+  `flushOpen`'s tail, a read of the charge between the two moves before the
+  run, with every step between them that it depends on, and every other step
+  moves after it.
+  That fails for each of the two in one case: the other's `Swap` falls
+  between its steps, and the `release` that follows it wakes a call in
+  `await`, which reads the charge before this run's own `release`. The read
+  cannot move past this run's `release`, and it cannot move before the run
+  with the `release` it depends on, because that `release` follows the
+  other's `Swap`, which cannot move before this run's: the two `Swap`s
+  returned different values. So a spec with `dropOpen`, `flushOpen` and
+  `await`, as Budget has (§1), makes each one's `Swap` and its `release` two
+  actions. The decreases in `bufferWrite`'s tail block, in `truncate` and in
+  `dropIfGone` pass the test as stated: they hold the file's `openFile.mu`
+  and `FS.mu`, which keep out every other access to its `of.bytes`, so each
+  makes one access outside the protection, its `release`.
 - **Store calls made holding a lock.** A store call reaches the bucket, which
   no lock of the mount protects. `commitLocked` holds `FS.mu` across its
   snapshot `Put`, its root-pointer swap and, after `store.ErrUnsupported`, an
@@ -507,8 +522,12 @@ when TLC runs in §10, and the issue in *Context*.
    only add states for TLC to explore wherever §4's test passes. Judging a
    hold by reduction is mine too, and so is the form §4 gives the test for
    holds, which is sufficient and not necessary: the `Store` joined to a swap
-   that diverges passes only by arguing the test directly, and `dropOpen`
-   passes that way against some steps and fails against others (§4).
+   that diverges, and `bufferWrite`'s charge, pass only by arguing the test
+   directly, and `dropOpen` and `flushOpen`'s tail each pass that way against
+   most steps and fail against each other with `await`. So a spec with
+   `dropOpen`, `flushOpen` and `await` makes `dropOpen`'s `Swap` and its
+   `release` two actions, and `flushOpen`'s tail `Swap` and its `release`
+   two actions too (§4).
    Lock order enters only through the test's second condition. The stronger
    statement, that nothing takes a lock under `FS.mu`, would be false: the
    budget's mutex is taken under it by design (ADR 0003 §3), and so is

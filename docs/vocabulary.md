@@ -286,7 +286,9 @@ are named by the Budget spec's PR.
 0003 §2's two statements about the whole budget, `ChargeCoversBytes` (the
 charge is never below the sum of every file's `of.bytes`, which is never
 below zero) and `ChargeMatchesOpen` (with no accounting step in flight, the
-charge equals that sum over the files `FS.open` holds).
+charge equals that sum over the files `FS.open` holds; a site is in flight
+from its first access to the charge or to `of.bytes` until its last, and a
+`bufferWrite` from its charge, site 1, until its tail block, site 2, ends).
 
 **Fixes.** Named by the Budget spec's PR; none yet.
 
