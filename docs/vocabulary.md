@@ -309,12 +309,12 @@ from its first access to the charge or to `of.bytes` until its last, and a
   `store.ReadOnly`, exists (ADR 0011 §3).
 - Exists, `internal/policy/policy.go`, added with ADR 0014:
   - `Permits` = `policy.Permits(c, o, want)`;
+  - `UnixAllows(r)` = `policy.Unix().Check(r) == nil`;
   - `AccessBits` = `policy.AccessBits`;
   - `OpRead`, `OpWrite`, `OpTruncate`, `OpChmod`, `OpChown`, `OpChgrp`,
     `OpSetTimes`, `OpLookup`, `OpReadDir`, `OpAddEntry`, `OpRemoveEntry`,
     `OpRename`;
   - `PermExec`, `PermWrite`, `PermRead`.
-- `UnixAllows(r)` = `policy.Unix().Check(r) == nil`; reserved, ADR 0014.
 
   `UnixAllows` stands (ADR 0014 §10). Rule 4 gives the spec a Go predicate's
   own name. This predicate is `policy.Unix().Check(r) == nil`: the `Check`

@@ -440,9 +440,12 @@ Every rule below is normative:
   - With no policies, it allows everything.
   - It keeps its own copy of `ps`, so changing the caller's slice afterwards
     changes nothing.
-  - It panics if any of `ps` is nil, or is a `Func` whose value is nil. A nil
-    policy is a programming error; caught at construction, it cannot surface
-    as a panic inside a lock at request time.
+  - It panics if any of `ps` is nil, or is a `Func` whose value is nil. The
+    first means a nil interface value: a non-nil `Policy` that holds a nil
+    pointer is not caught, since catching it would need `reflect`, and a typed
+    nil `*T` whose `Check` never dereferences it is a legitimate policy
+    (Assumption 16). A nil policy is a programming error; caught at
+    construction, it cannot surface as a panic inside a lock at request time.
 - `AccessBits(c, o)` is the OR of:
   - `vfs.AccessRead`, if `Permits(c, o, PermRead)`;
   - `vfs.AccessLookup`, if `o` is a directory and either
@@ -919,7 +922,11 @@ says how it bears on this ADR.
       `All(All(), p)` decides as `p` does;
     - the first refusal wins;
     - it copies its arguments;
-    - it panics on a nil policy.
+    - it panics on a nil policy: a nil interface value, or a nil `Func`, which
+      a type assertion finds. It does not catch a non-nil `Policy` that holds
+      a nil pointer. Only `reflect` could tell such a value apart for a type
+      `policy` does not know, and a typed nil `*T` whose `Check` never
+      dereferences it is a legitimate policy, which `All` would then refuse.
 
     `blobfs` never builds an empty `All`; `New` installs `Unix()`.
 17. **`Unix()` is a function, and `policy` exports no variable.** An exported
@@ -1064,8 +1071,8 @@ none is cited from an earlier fetch.
 
 - **RFC 1813**, from the RFC Editor:
   <https://www.rfc-editor.org/rfc/rfc1813.txt>. The tool gave the text as
-  229,793 characters. Characters 0 to 100,000 were read, twice, and 170,000 to
-  the end once; 100,000 to 170,000 were not read.
+  229,793 characters. Characters 0 to 100,000 were read twice, and 170,000 to
+  the end twice; 100,000 to 170,000 were not read.
   - §2.6: `NFS3ERR_PERM = 1`, "Not owner. The operation was not allowed
     because the caller is either not a privileged user (root) or not the owner
     of the target of the operation."; `NFS3ERR_ACCES = 13`, "Permission
