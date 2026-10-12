@@ -58,8 +58,9 @@ lock, a function's locals, the bucket's objects or a ghost, appears in a log
 as a state, and the tables below give the Go symbol each one traces to. Kept
 for every variable, the rule would have needed ten of V3's and V4's variables
 as exceptions, about half of those that trace to Go, and more as specs add
-variables (ADR 0013, Assumption 13). So `pruning[m]`'s three strings, which refine the
-bool `FS.pruning`, are no machine's states, and its row records them.
+variables (ADR 0013, Assumption 13). So `pruning[m]`'s three strings, which
+refine the bool `FS.pruning`, are no machine's states, and its row records
+them.
 
 ## V1. Mount mode
 
@@ -163,8 +164,9 @@ does is the CommitProtocol spec's to define.
 
 ## V4. Sync and file data
 
-`docs/tla/FileData.tla`; not Go machines. The Go column is indicative
-(rule 7); every site is in `internal/blobfs/fs.go` but `Sync` and
+`docs/tla/FileData.tla`; one file of one mount, with no prune goroutine and
+no removal of the file (ADR 0013 §1); not Go machines. The Go column is
+indicative (rule 7); every site is in `internal/blobfs/fs.go` but `Sync` and
 `commitLocked`, which are in `internal/blobfs/commit.go`.
 
 **Actions.** All reserved, ADR 0013. ADR 0013 §4 says why `SyncCommit`,
@@ -256,12 +258,14 @@ by the lifecycle ADR.
 
 ## V6. Write budget
 
-`docs/tla/Budget.tla`; not a Go machine; ADR 0003 §4.
+`docs/tla/Budget.tla`; not a Go machine; ADR 0003 §4's wait, and ADR 0003
+§2's five accounting sites with a file removed under them (ADR 0013 §1).
 
 **Variables.** `charge`, `parked`, `draining`, `ended`, `failure`, `failedAt`,
 the fields of `budget` in `internal/blobfs/budget.go`, which exist; and per
 writer `start`, `await`'s local, which exists, and `pc` and `ret`, reserved,
-ADR 0013.
+ADR 0013. The accounting sites' variables, such as a file's `of.bytes` and
+whether `FS.open` holds it, are named by the Budget spec's PR.
 
 **Settle outcomes.** All reserved, ADR 0013, under the names ADR 0003 §4
 gives them: `Succeeded`, `Failed`, `Abandoned`, `Panicked`, with the actions
@@ -274,10 +278,15 @@ gives them: `Succeeded`, `Failed`, `Abandoned`, `Panicked`, with the actions
 `"PanicError"`, `"CtxError"`}.
 
 **Actions.** All reserved, ADR 0013: `Enter`, `Park`, `Wake`,
-`BecomeDrainer`, `Release`, `Add`, `Cancel`.
+`BecomeDrainer`, `Release`, `Add`, `Cancel`. The accounting sites' actions
+are named by the Budget spec's PR.
 
 **Properties.** All reserved, ADR 0013: `AtMostOneDrain`, `NoStrandedDrain`,
-`G1`, `G2`, `G3` (ADR 0003 §4's failure contract), `NoLostWakeup`.
+`G1`, `G2`, `G3` (ADR 0003 §4's failure contract), `NoLostWakeup`; and ADR
+0003 §2's two statements about the whole budget, `ChargeCoversBytes` (the
+charge is never below the sum of every file's `of.bytes`, which is never
+below zero) and `ChargeMatchesOpen` (with no accounting step in flight, the
+charge equals that sum over the files `FS.open` holds).
 
 **Fixes.** Named by the Budget spec's PR; none yet.
 

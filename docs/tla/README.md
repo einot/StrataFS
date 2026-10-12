@@ -16,10 +16,12 @@ Only this file. No module, configuration, table or runner exists yet.
   1. `CommitProtocol.tla`: reading the root pointer, committing, pruning and
      divergence, against other mounts, failing store calls and crashes.
   2. `FileData.tla`: one file's bytes through writes, truncates, reads,
-     flushes and commits (ADR 0005, ADR 0006, ADR 0012).
+     flushes and commits (ADR 0005, ADR 0006, ADR 0012), for one mount, with
+     no prune goroutine and no removal of the file.
   3. `NfsDurability.tla`: the write verifier, unstable and `FILE_SYNC`
      writes, `COMMIT`, the synchronous procedures and shutdown.
-  4. `Budget.tla`: ADR 0003 §4's write budget, specified for availability.
+  4. `Budget.tla`: ADR 0003's write budget, specified for availability: its
+     wait (§4), and its accounting (§2), with a file removed under it.
 
   The redesign's consistency point and sweeper (`docs/DESIGN.md` §5, §8)
   follow, each before its code. Every module is plain TLA+ in ASCII, with no

@@ -12,7 +12,8 @@ Everything concerning data integrity or security." #109 is a tracking issue
 for the owner's instruction (one per instruction, as the architect
 recommended; the owner delegated this on 2026-10-10). Every statement about
 the code in this ADR, and about the guards in `.claude/`, was checked against
-`f102570` (Assumption 24). Code is cited by symbol.
+`f102570`, or against `ce24e1b`, whose code and guards are the same by the
+session's account (Assumption 24). Code is cited by symbol.
 
 **Defects found after the code existed.** Six defects in how this filesystem
 keeps its data were found in code that had already been written, and each is
@@ -114,17 +115,28 @@ other areas go to the tools §1 names.
    one view, a pending trim is part of the file, and a commit stores a
    truncate whole or not at all. Go: `Read` and `readBuffered`, `Write` and
    `bufferWrite`, `truncate`, `flushOpen`, `flushAll`, `settleAll`, `Sync` and
-   `commitLocked`. It models one file (Assumption 11).
+   `commitLocked`. It models one file of one mount, with no prune goroutine
+   and no removal of the file, by an unlink or a rename over it
+   (Assumptions 11 and 29).
 3. **NfsDurability**: the write verifier, `UNSTABLE` and `FILE_SYNC` writes,
    `COMMIT`, the procedures RFC 1813 §1.6 lists as synchronous (as ADR 0012's
    *Sources* quote it), and shutdown; #44, #82 and #83. Its names are reserved
    for the lifecycle ADR (`docs/vocabulary.md`, V5).
 4. **Budget**: ADR 0003 §4's `await`, with `settle`, `add` and `release`, in
-   `internal/blobfs/budget.go`: at most one budget drain at a time, every
-   drain settled, no lost wake-up, and the failure contract G1 to G3. It is
+   `internal/blobfs/budget.go`; and ADR 0003 §2's five accounting sites, with
+   a file removed under them: the charge `bufferWrite` adds and its tail
+   releases (sites 1 and 2), the releases of `truncate`, `flushOpen` and
+   `dropIfGone` (sites 3 and 4), and `dropOpen`'s (site 5), in
+   `internal/blobfs/fs.go` (Assumption 30). It must show at most one budget
+   drain at a time, every drain settled, no lost wake-up, the failure
+   contract G1 to G3, and ADR 0003 §2's two statements about the whole
+   budget: the charge is never below the sum of the files' `of.bytes`, which
+   is never below zero, and equals the sum over `FS.open` whenever no
+   accounting step is in flight, so that no charge outlives its file. It is
    specified for availability, not for data integrity: a drain left
-   unsettled, or a wake-up lost, parks every writer over the limit for good
-   (ADR 0003 §4).
+   unsettled, or a wake-up lost, parks every writer over the limit for good,
+   and a charge that outlives its file holds the budget at its limit with
+   nothing able to drain it (ADR 0003 §2, §4).
 
 **The redesign.** The consistency point and the sweeper (`docs/DESIGN.md` §5,
 §8; phases 4 and 6 of §14) are specified before their code. The sweeper's
@@ -180,23 +192,32 @@ change them.
   Lipton named (*Sources*). One process's run of steps may be one action of a
   spec when three things hold. Every step another process can take in the
   middle of the run can be moved out of it, before it or after it, by
-  swapping it with steps of the run that it commutes with, so that each
-  behaviour of the code has a behaviour of the model with the same states
-  between actions. The run, once begun, reaches its end, waiting for nothing
-  that waits for it. And a crash in the middle of it leaves a state that no
-  property of the spec tells from a crash just before it or just after it.
-  Lock order gives the second for a hold of `FS.mu`: nothing acquires the
-  commit gate or an `openFile.mu` while holding `FS.mu` (the `FS.mu` doc
-  comment in `internal/blobfs/fs.go`; ADR 0003 §3; ADR 0012 §5), and the locks
-  taken under it are leaves, which wait for nothing that waits for `FS.mu`:
-  the budget's mutex, which `dropOpen`, `truncate`, `dropIfGone` and
+  swapping adjacent steps of two processes that commute, which keeps each
+  process's steps in their order, so that each behaviour of the code has a
+  behaviour of the model with the same states between actions. The run,
+  once begun, reaches its end, waiting for nothing that waits for it. And a
+  crash in the middle of it leaves a state that no property of the spec
+  tells from a crash just before it or just after it. Lock order gives the
+  second for a hold of `FS.mu` or of an `openFile.mu`. The order is the
+  commit gate, then `openFile.mu`, then `FS.mu`: nothing acquires the gate
+  while holding an `openFile.mu` or `FS.mu`, and nothing acquires an
+  `openFile.mu` while holding `FS.mu` (the `FS.mu` doc comment in
+  `internal/blobfs/fs.go`; ADR 0003 §3; ADR 0012 §5). The locks taken under
+  `FS.mu` are leaves, which wait for nothing that waits for `FS.mu`: the
+  budget's mutex, which `dropOpen`, `truncate`, `dropIfGone` and
   `bufferWrite`'s tail block take to release a charge (ADR 0003 §3), and
   whatever a store call or a log call locks inside itself, as
-  `Local.PutIfMatch` locks `Local.mu` when `commitLocked` calls it. Lock order
-  does not give the first: it shows that a hold ends, not that nothing
-  interleaves with it. A step that touches only state a spec leaves out, and
-  decides nothing it models, as the budget's `add` and `release` are in
-  FileData, is no step of that spec.
+  `Local.PutIfMatch` locks `Local.mu` when `commitLocked` calls it. What is
+  taken under an `openFile.mu` is `FS.mu`, whose holders by that order wait
+  for no `openFile.mu`, or a leaf: the budget's mutex, `knownMu`, the chunk
+  cache's mutex (ADR 0004 §3), or what a store call or a log call locks
+  inside itself. And no code holds two `openFile.mu` at once: `readBuffered`,
+  `bufferWrite`, `truncate` and `flushOpen` each take one, and `flushAll` and
+  `settleAll` flush one file at a time. Lock order does not give the first:
+  it shows that a hold ends, not that nothing interleaves with it. A step
+  that touches only state a spec leaves out, and decides nothing it models,
+  as the budget's `add` and `release` are in FileData, is no step of that
+  spec.
 - **A hold of a lock passes the first test** when everything it touches is
   state that the locks it holds protect; or when it makes at most one access
   to state outside that protection; or when all such accesses but one commute
@@ -211,9 +232,22 @@ change them.
   hold today: it calls `of.bytes.Swap` and then `budget.release` holding only
   `FS.mu`, and neither commutes with every step another process can take
   meanwhile, since `flushOpen` swaps, and `bufferWrite` adds to, the same
-  `of.bytes` holding only `openFile.mu`, and `await` reads the charge. It
-  passes only by the direct argument: each step that can fall between the two
-  commutes with one of them, and moves out of the hold past that one.
+  `of.bytes` holding only `openFile.mu`, and `await` reads the charge.
+  Arguing the test directly, with each process's steps kept in their order,
+  passes it against `flushOpen` and `bufferWrite`: their steps between the
+  two move after the hold. A `Swap` or an `Add` of `of.bytes` leaves the
+  charge alone, and so commutes with the `release`; and `budget.release`
+  calls commute with each other, and with `budget.add`, since each only adds
+  to or takes from the charge, and a release wakes the same parked calls
+  whichever comes first. A read of the charge between the two that depends
+  on none of their steps moves before the hold, since it leaves `of.bytes`
+  alone. The argument fails in one case. When `flushOpen`'s `Swap` falls
+  between the two, it cannot move before `dropOpen`'s, so its `release`
+  stays after it too; a call in `await` that this `release` wakes can then
+  read the charge before `dropOpen`'s `release`, and that read can move
+  neither before its wake-up nor past the `release` it does not commute
+  with. So a spec with `flushOpen`'s tail and `await`, as Budget has (§1),
+  makes `dropOpen`'s `Swap` and its `release` two actions.
 - **Store calls made holding a lock.** A store call reaches the bucket, which
   no lock of the mount protects. `commitLocked` holds `FS.mu` across its
   snapshot `Put`, its root-pointer swap and, after `store.ErrUnsupported`, an
@@ -226,11 +260,12 @@ change them.
   first test directly: `mutable()`'s read commutes with the swap, and every
   other step that can fall between the two commutes with the `Store`.
 - **FileData folds three runs**, each on the ground of the first test. It has
-  one mount and no prune or unlink (§1), and nothing in the code deletes a
-  chunk. A chunk's key is the hash of its bytes, so every `Put` of it stores
-  the same bytes, and a fetch reads only a chunk that some chunk list has
-  named, which was stored before it was named. So a chunk's uploads and
-  probes commute with every fetch.
+  one mount, no prune goroutine and no removal of the file (§1,
+  Assumption 29), and nothing in the code deletes a chunk. A chunk's key is
+  the hash of its bytes, so every `Put` of it stores the same bytes, and a
+  fetch reads only a chunk that some chunk list has named, which was stored
+  before it was named. So a chunk's uploads and probes commute with every
+  fetch.
   - `SyncCommit`, all of `commitLocked`, touches state `FS.mu` protects, and
     the snapshot keys and the root pointer, which no other step of FileData
     reaches; calls on different keys commute. A crash between its calls
@@ -396,7 +431,8 @@ Go names in one PR.
 - The owner delegated this to the architect's recommendation on 2026-10-10:
   the TLA+ tools are a development tool, not a dependency under CLAUDE.md's
   rule, because nothing in go.mod or the binary changes. ADR 0013 records
-  them as the project's one non-Go development tool. Adding another is also
+  them as a development tool outside Go, alongside the bash and jq the hooks
+  already need. Adding another is also
   the owner's decision.
 
 ### 10. When TLC runs
@@ -470,14 +506,19 @@ when TLC runs in §10, and the issue in *Context*.
    coarser grain would hide interleavings the code has, and a finer one would
    only add states for TLC to explore wherever §4's test passes. Judging a
    hold by reduction is mine too, and so is the form §4 gives the test for
-   holds, which is sufficient and not necessary: `dropOpen`, and the `Store`
-   joined to a swap that diverges, pass only by arguing the test directly.
+   holds, which is sufficient and not necessary: the `Store` joined to a swap
+   that diverges passes only by arguing the test directly, and `dropOpen`
+   passes that way against some steps and fails against others (§4).
    Lock order enters only through the test's second condition. The stronger
    statement, that nothing takes a lock under `FS.mu`, would be false: the
    budget's mutex is taken under it by design (ADR 0003 §3), and so is
    `Local.mu`, inside `commitLocked`'s swap. What the condition needs is the
    weaker one, which holds: nothing taken under `FS.mu` waits for anything
-   that waits for `FS.mu`. That a step touching only state a spec leaves out
+   that waits for `FS.mu`, and nothing taken under an `openFile.mu` waits for
+   anything that waits for that `openFile.mu`. That no code holds two
+   `openFile.mu` at once is a fact of today's code, not a rule the lock
+   order states, so a change that took a second one would need an order
+   between them first. That a step touching only state a spec leaves out
    is no step of that spec is mine as well, and each spec says what it
    leaves out. FileData's three foldings rest on chunks never being deleted,
    which the sweeper will end (`docs/DESIGN.md` §8).
@@ -683,9 +724,11 @@ when TLC runs in §10, and the issue in *Context*.
 23. **Status is Accepted on creation.** The owner delegated this to the
     architect's recommendation on 2026-10-10.
 24. **Read, not run.** Every statement about the code and the guards was
-    checked by reading them at `f102570`, the commit the session gave.
-    Nothing was run, and no spec exists yet. The tooling state is the
-    session's report, checked against its sources as far as they allow.
+    checked by reading them at `f102570`, the commit the session gave, or at
+    `ce24e1b`, which by the session's account changes only this ADR and the
+    documents beside it. Nothing was run, and no spec exists yet. The tooling
+    state is the session's report, checked against its sources as far as
+    they allow.
 25. **How the six defects were found** (*Context*). The ADRs say how one was
     found only for #64: ADR 0012 that no test reproduces it, and ADR 0006's
     first revision that an audit found its preconditions in the code. Of #41,
@@ -721,6 +764,42 @@ when TLC runs in §10, and the issue in *Context*.
     writes cannot copy the code's mistake. The session pastes the trace into
     its brief because that guard and §9 leave no file both can reach; a copy
     put in the tree for it would be a file that a run leaves behind.
+29. **FileData's scope** (§1). FileData has one mount, no prune goroutine and
+    no removal of the file, and §4's three foldings rest on all three.
+    Another mount reaches this one only through the bucket: through the root
+    pointer and the snapshots, which CommitProtocol models, and through
+    chunks, which it can write only with the bytes their keys name. The
+    prune goroutine that `commitLocked`'s `schedulePrune` starts lists and
+    deletes snapshot keys alone, which no property of FileData reads, and
+    what it can delete is CommitProtocol's (Assumption 8). A removed file has
+    no bytes left to keep right: once its inode has gone, a `Read` that has
+    not yet taken its view answers `vfs.ErrStale`, and `bufferWrite` takes a
+    write that raced the removal as having landed just before it (ADR 0003
+    §4, *If the inode goes away*). What a removal does to the budget is
+    Budget's (Assumption 30), and what it does to the tree, the namespace
+    tree's tests' (§1's table). A spec that adds any of the three argues §4's
+    foldings again, or splits them: with removal, `dropIfGone`'s hold writes,
+    and the inode that `WriteBody`'s first hold reads can be taken away; with
+    the prune goroutine, another step reaches the snapshot keys during
+    `SyncCommit`.
+30. **Budget covers the accounting as files go** (§1). The interplay of a
+    removal with writes and flushes, `bufferWrite`'s gone branches,
+    `dropIfGone`'s release and `dropOpen`'s (ADR 0003 §2, sites 2, 4 and 5),
+    falls outside FileData by Assumption 29, and I give it to Budget rather
+    than to §1's table. Interleavings decide it, which is what every area in
+    the table does without: `dropOpen` runs under `FS.mu` alone while the
+    other sites run under `openFile.mu`, and ADR 0003 §2's rules, a charge
+    before the check for a gone inode and an increase reaching the budget
+    before `of.bytes`, exist for those interleavings. Its harm is the one
+    Budget is specified for: a charge that outlives its file holds the budget
+    at its limit for good (ADR 0003 §2, site 5). And what must hold is ADR
+    0003 §2's statements about `charge`, which is Budget's own variable.
+    FileData would be the wrong home, since it leaves the budget out (§4) and
+    a removal there would undo its foldings (Assumption 29). The cost is
+    per-file state and the five sites' steps in Budget, whose configurations
+    can check the accounting and the wait apart. This widens Budget past the
+    scope first written for it; the list and the order the owner delegated
+    stand.
 
 ## Alternatives considered
 
@@ -757,8 +836,9 @@ when TLC runs in §10, and the issue in *Context*.
 - **TLAPS**, which "mechanically checks TLA+ proofs" through backend verifiers
   its page does not name (*Sources*). A proof holds without bounds, which §11
   says a model check does not, but every proof step is written by hand, and
-  the verifiers are tools beyond the one §9 records. If a property ever has to
-  hold past every bound TLC can reach, a later ADR can take it up.
+  the verifiers would be tools beyond the TLA+ tools §9 records. If a
+  property ever has to hold past every bound TLC can reach, a later ADR can
+  take it up.
 - **Vendoring `tla2tools.jar`.** A 2,274,532-byte binary in git. The pin in
   `tools.tsv`, with its size and checksums, makes a run reproducible without
   it.
