@@ -86,3 +86,4 @@ URL, and what was taken from it.
 | [0011](0011-a-read-only-fs-writes-nothing-to-its-bucket.md) | A read-only FS writes nothing to its bucket | Accepted |
 | [0012](0012-a-commit-stores-a-truncate-whole-or-not-at-all.md) | A commit stores a truncate whole or not at all | Accepted |
 | [0013](0013-data-integrity-protocols-are-specified-in-tla.md) | Data-integrity protocols are specified in TLA+ and checked by TLC | Accepted |
+| [0014](0014-state-machines-are-tables-and-permission-checks-are-policies.md) | State machines are explicit tables, and permission checks are policies | Accepted |
