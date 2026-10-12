@@ -11,13 +11,16 @@
 Everything concerning data integrity or security." #109 is a tracking issue
 for the owner's instruction (one per instruction, as the architect
 recommended; the owner delegated this on 2026-10-10). Every statement about
-the code in this ADR was checked against `3deecf1`, except those about
-`FS.diverged` in §4 and Assumption 9, which were checked against `f3a8d10`
-(Assumption 24). Code is cited by symbol.
+the code in this ADR, and about the guards in `.claude/`, was checked against
+`f102570` (Assumption 24). Code is cited by symbol.
 
-**Defects found by reading, after the code existed.** Six defects in how this
-filesystem keeps its data were found by reading code that had already been
-written. Each is recorded in the ADR that decided its fix:
+**Defects found after the code existed.** Six defects in how this filesystem
+keeps its data were found in code that had already been written, and each is
+recorded in the ADR that decided its fix. How one was found is recorded only
+for #64: no test reproduces it (ADR 0012), and an audit found its
+preconditions in the code (ADR 0006's first revision). That the other five
+were found by reading too, and not by a test, is an inference
+(Assumption 25):
 
 - **#37** (ADR 0005 *Context*; ADR 0006 Assumption 7; the trace is
   ADR 0003 §4's): `Write` copied a file's chunk list before it took the
@@ -34,10 +37,9 @@ written. Each is recorded in the ADR that decided its fix:
 - **#64** (ADR 0012): a commit could store a truncate's new size together with
   bytes the truncate removed, with or without a crash.
 
-Each needed one interleaving or one sequence of calls that no test had tried,
-and the test that reaches each came after it was found: ADR 0003 §4 names
-#37's, and ADR 0004 §7, ADR 0005 §7, ADR 0006 §8 and ADR 0012 §9 specify the
-others.
+Each needed one interleaving or one sequence of calls, and the test that
+reaches each came after it was found: ADR 0003 §4 names #37's, and ADR 0004
+§7, ADR 0005 §7, ADR 0006 §8 and ADR 0012 §9 specify the others.
 
 **What only review can show.** The latest ADRs close their test surfaces with
 what tests cannot show. ADR 0012 §9: that the commit gate is held across the
@@ -81,12 +83,13 @@ test passed are the session's report, which nothing here could check.
 read-only inspection tools (`.claude/settings.json`). The session runs every
 command, so TLC runs only where the session runs it.
 
-**What this constrains.** `docs/tla/`, which this ADR creates; the doc
-comments of the Go functions a spec traces, and the review of changes to
-them; and the redesign's consistency point and sweeper (`docs/DESIGN.md` §5,
-§8), which get specs before their code. CLAUDE.md's rule that the project uses
-nothing outside the Go standard library, and that adding a module is the
-owner's decision, bears on the tools (§9).
+**What this constrains.** `docs/tla/` and `docs/vocabulary.md`, which this
+ADR creates; the doc comments of the Go functions a spec traces, and the
+review of changes to them; and the redesign's consistency point and sweeper
+(`docs/DESIGN.md` §5, §8; phases 4 and 6 of §14), which get specs before their
+code. CLAUDE.md's rule that the project uses nothing outside the Go standard
+library, and that adding a module is the owner's decision, bears on the tools
+(§9).
 
 ## Decision
 
@@ -142,7 +145,7 @@ it:
 | Chunk-cache ownership (ADR 0004) | tests under `-race` | a rule about who may write a buffer, not a protocol between processes |
 | Chunk verification and deduplication (#30, #31) | Go tests with store fakes | each compares one object's bytes with its key inside one call (Assumption 12) |
 | Size and flag arithmetic (ADR 0007 to ADR 0010) | boundary tests, as those ADRs specify them | functions of their inputs (Assumption 12) |
-| The namespace tree | model-based tests | `FS.mu` serialises every namespace operation, so each is one critical section |
+| The namespace tree | model-based tests | `Create`, `Mkdir`, `Symlink`, `Remove`, `Rmdir`, `Rename` and `SetAttr` each make their change to the namespace in one hold of `FS.mu`, so the tree's behaviours are orders of whole holds, which tests enumerate. What falls outside that hold is in a model: the `mutable()` read before it, in CommitProtocol and NfsDurability (§4, Assumption 9), and the truncate that `SetAttr` with a size makes first, in holds of its own, in FileData |
 
 ### 2. Where specs live, and who writes them
 
@@ -171,26 +174,84 @@ change them.
 ### 4. What one action is, and what the model assumes
 
 - **An action is one critical section or one store call**: one hold of one
-  lock, or one call of a `store.Store` method.
-- **`FS.mu` sections are atomic.** Nothing acquires the commit gate or an
-  `openFile.mu` while holding `FS.mu` (the `FS.mu` doc comment in
-  `internal/blobfs/fs.go`; ADR 0003 §3; ADR 0012 §5). The locks taken under it
-  are leaves: the budget's mutex, which `dropOpen`, `truncate`, `dropIfGone`
-  and `bufferWrite`'s tail block take to release a charge (ADR 0003 §3), and
+  lock, or one call of a `store.Store` method. A hold stays one action only
+  as the next two rules allow; otherwise it is split.
+- **A run of steps is one action only where reduction allows it**, the method
+  Lipton named (*Sources*). One process's run of steps may be one action of a
+  spec when three things hold. Every step another process can take in the
+  middle of the run can be moved out of it, before it or after it, by
+  swapping it with steps of the run that it commutes with, so that each
+  behaviour of the code has a behaviour of the model with the same states
+  between actions. The run, once begun, reaches its end, waiting for nothing
+  that waits for it. And a crash in the middle of it leaves a state that no
+  property of the spec tells from a crash just before it or just after it.
+  Lock order gives the second for a hold of `FS.mu`: nothing acquires the
+  commit gate or an `openFile.mu` while holding `FS.mu` (the `FS.mu` doc
+  comment in `internal/blobfs/fs.go`; ADR 0003 §3; ADR 0012 §5), and the locks
+  taken under it are leaves, which wait for nothing that waits for `FS.mu`:
+  the budget's mutex, which `dropOpen`, `truncate`, `dropIfGone` and
+  `bufferWrite`'s tail block take to release a charge (ADR 0003 §3), and
   whatever a store call or a log call locks inside itself, as
-  `Local.PutIfMatch` locks `Local.mu` when `commitLocked` calls it. A leaf
-  waits for nothing that waits for `FS.mu`, so a hold of `FS.mu` that makes no
-  store call is one action, however much it does.
-- **A store call made holding a lock splits the hold only where another
-  process interleaves.** `commitLocked` holds `FS.mu` across its snapshot
-  `Put`, its root-pointer swap and, after `store.ErrUnsupported`, an
+  `Local.PutIfMatch` locks `Local.mu` when `commitLocked` calls it. Lock order
+  does not give the first: it shows that a hold ends, not that nothing
+  interleaves with it. A step that touches only state a spec leaves out, and
+  decides nothing it models, as the budget's `add` and `release` are in
+  FileData, is no step of that spec.
+- **A hold of a lock passes the first test** when everything it touches is
+  state that the locks it holds protect; or when it makes at most one access
+  to state outside that protection; or when all such accesses but one commute
+  with every step another process can take while it lasts. State is protected
+  by a lock when no other process can write it while the lock is held, nor
+  read it while the hold writes it, and a hold of another lock inside the
+  hold counts as one access, once it passes this test itself. Taking the lock
+  then moves later, releasing it earlier, and each protected access either
+  way, until the hold's steps meet at the one access left over. A hold that
+  passes none of these is split at its accesses outside the protection,
+  unless the spec argues the first test for it directly. `dropOpen` is such a
+  hold today: it calls `of.bytes.Swap` and then `budget.release` holding only
+  `FS.mu`, and neither commutes with every step another process can take
+  meanwhile, since `flushOpen` swaps, and `bufferWrite` adds to, the same
+  `of.bytes` holding only `openFile.mu`, and `await` reads the charge. It
+  passes only by the direct argument: each step that can fall between the two
+  commutes with one of them, and moves out of the hold past that one.
+- **Store calls made holding a lock.** A store call reaches the bucket, which
+  no lock of the mount protects. `commitLocked` holds `FS.mu` across its
+  snapshot `Put`, its root-pointer swap and, after `store.ErrUnsupported`, an
   unconditional `Put` and a `Head` (#43). In CommitProtocol other mounts, and
-  this mount's prune goroutine, reach the bucket while it does, so each of
-  those calls is an action, and the work between them joins the call before
-  or after it, since no other process of the mount can observe it. In
-  FileData, which has one mount and chunks that nothing deletes, nothing
-  interleaves with a commit's or a flush's store calls, so a commit is one
-  action (`SyncCommit`) and so is the body of a flush (`FlushBody`).
+  this mount's prune goroutine, reach the snapshot keys and the root pointer
+  while it does, so each of those calls is an action, and the work between
+  them joins the call before or after it. That work touches only state
+  `FS.mu` protects, but for `FS.diverged`, which `mutable()` reads holding no
+  lock. Joining the `Store` of it to the failed swap before it passes the
+  first test directly: `mutable()`'s read commutes with the swap, and every
+  other step that can fall between the two commutes with the `Store`.
+- **FileData folds three runs**, each on the ground of the first test. It has
+  one mount and no prune or unlink (§1), and nothing in the code deletes a
+  chunk. A chunk's key is the hash of its bytes, so every `Put` of it stores
+  the same bytes, and a fetch reads only a chunk that some chunk list has
+  named, which was stored before it was named. So a chunk's uploads and
+  probes commute with every fetch.
+  - `SyncCommit`, all of `commitLocked`, touches state `FS.mu` protects, and
+    the snapshot keys and the root pointer, which no other step of FileData
+    reaches; calls on different keys commute. A crash between its calls
+    leaves the bucket as a crash before it or after it would, but for a
+    snapshot that no root names.
+  - `FlushBody`, `flushOpen`'s work under `openFile.mu`, makes its store
+    calls on chunk keys, and its hold of `FS.mu` that changes the namespace,
+    repointing the chunk list `SyncCommit` encodes or clearing the file's
+    mark, is its one access that does not commute; `dropIfGone`'s hold, on
+    a failure, only reads. A crash before that hold leaves the bucket as a
+    crash before the run would, but for chunks that nothing names.
+  - `WriteBody`, `bufferWrite`'s work under `openFile.mu`, first reads the
+    file's inode and chunk list holding `FS.mu`, which in FileData only steps
+    holding the same `openFile.mu` change, and fetches a chunk that list
+    names; its second hold of `FS.mu`, which sets the size `SyncCommit`
+    encodes, is its one access that does not commute. It writes nothing to
+    the bucket.
+
+  Once anything deletes chunks, as the sweeper will (§1), these arguments
+  fail, and a spec that models deletion splits these runs at their store
+  calls or argues them again.
 - **A read made holding no lock is a step of its own**, unless the spec says
   why folding it into the next critical section changes no property the spec
   checks. Today that read is `mutable()`, which `Write`, `SetAttr` and the
@@ -201,12 +262,18 @@ change them.
   so an invariant that holds of it holds of the coarser one; a liveness
   property then needs fairness on each part.
 - **The bucket is a set of per-key linearizable objects.** A store call on one
-  key takes effect at one instant between its call and its return, retries
-  included, and nothing is atomic across keys. A listing, every page of it,
-  is one step.
-- **ETags and nonces are fresh.** A write gives its object an ETag that no
-  earlier write of that object had, and a commit attempt writes its snapshot
-  under a key no earlier attempt used.
+  key takes effect at one instant between its call and its return, and
+  nothing is atomic across keys, so calls on different keys commute. A
+  listing, every page of it, is one step. `S3.do` sends every call but
+  `PutIfMatch` again after a transport error, a 5xx or a 429, so one `Put` or
+  `Delete` can take effect once per attempt, which the model does not show
+  (Assumption 5).
+- **Root-pointer ETags and snapshot keys are fresh.** A write of the root
+  pointer gives it an ETag that no earlier write of it had, and a commit
+  attempt writes its snapshot under a key no earlier attempt used. Nothing is
+  assumed of any other object's ETag, and nothing compares one: a chunk's can
+  repeat, since on `Local`, and on S3 for a single PUT under neither SSE-C nor
+  SSE-KMS, it is the MD5 of the chunk's bytes (Assumption 6).
 - **Ghost variables hold the promised state.** What a caller was told, that a
   commit or a write was done or what a read returned, is held in variables
   only the model has, so that a property can compare the bucket and the
@@ -217,7 +284,7 @@ change them.
   read.
 
 How far each of these rests on evidence, and where it does not hold, is in
-Assumptions 4 to 10.
+Assumptions 4 to 10 and 26.
 
 ### 5. One vocabulary
 
@@ -230,10 +297,11 @@ policies and specs share. Its rules are part of this decision:
 2. Go constants are the machine's lowerCamel prefix plus the bare name;
    `String()` returns the bare name, so log from/to/event values are the
    spec's names.
-3. TLA+ holds a state as the string of its bare name in a variable named after
-   the Go field (exceptions: `nsDirty` = `FS.dirty`; `bucketRoot` = the object
-   at `rootKey`); actions and modelled events are operators with the bare
-   name.
+3. TLA+ holds a machine's state as the string of its bare name, in a variable
+   named after the Go field that holds it; actions and modelled events are
+   operators with the bare name. A machine is a set of states with Go
+   constants under rule 2. Any other variable is named as
+   `docs/vocabulary.md` gives, with the Go symbol it traces to, if any.
 4. A Go predicate a spec uses keeps its name with the first letter
    upper-cased.
 5. States may repeat across machines; events and actions are unique within a
@@ -243,10 +311,14 @@ policies and specs share. Its rules are part of this decision:
 7. For actions the Go column is indicative; `trace.tsv` is authoritative once
    it exists.
 
-An entry is marked *exists*, in the code now, or *reserved*, introduced by the
-ADR named. A later ADR that adds a machine adds its names to
-`docs/vocabulary.md`. A rename changes that file, the specs and the Go names
-in one PR.
+Every entry has a status. It is *exists* when its Go name is in the code now,
+or, for a `Fixes` member, when the fix it names is; and *reserved*, with the
+ADR named, when it is not and that ADR introduces it. A name only the specs
+use, with no Go name, is reserved by ADR 0013, which introduces it, unless its
+entry names the ADR it is reserved for. Rule 3 covers machine states only,
+not every variable (Assumption 13). A later ADR that adds a machine adds its
+names to `docs/vocabulary.md`. A rename changes that file, the specs and the
+Go names in one PR.
 
 ### 6. The trace from model to code
 
@@ -265,8 +337,9 @@ in one PR.
   `Spec:`, because a spec is a model: `docs/DESIGN.md` outranks the ADRs and
   the ADRs outrank the specs, and where a spec disagrees with either, the
   disagreement is a bug in one of them.
-- **The tripwire.** An optional Go test, using only the standard library,
-  fails when a symbol `trace.tsv` names is no longer in the file it names. It
+- **The tripwire.** A Go test, using only the standard library, fails when a
+  symbol `trace.tsv` names is no longer in the file it names. It arrives with
+  `trace.tsv`, and `go test` runs it as it runs every other test (§10). It
   shows that the trace points at something, not that the code does what the
   action says; that stays review's (§8, §11).
 
@@ -303,7 +376,10 @@ in one PR.
   locks.
 - **A defect's counterexample becomes its Go regression test**, which
   test-author writes from the counterexample and the spec, never from the
-  code.
+  code. TLC writes its trace outside the tree (§9), and test-author's read
+  guard refuses every path outside the tree it works in
+  (`.claude/hooks/path-guard.sh`), so the session pastes the trace into
+  test-author's brief.
 
 ### 9. The tools
 
@@ -376,26 +452,41 @@ when TLC runs in §10, and the issue in *Context*.
    make some specs shorter. Its translator decided it: the TLA+ that TLC
    checks would be text nobody wrote by hand, which the architect could not
    regenerate.
-3. **Four standard modules** (§3). They are the tlaplus repository's own, and
-   TLC implements `Naturals`' operators in Java (that module's own comment,
-   *Sources*), so a module that extends only them needs nothing more
-   downloaded or pinned. Each module is self-contained: none extends another
-   of this repository's. A spec that needs another standard module, such as
-   `Integers` or `Bags`, adds it by revising this ADR.
-4. **`FS.mu` sections are atomic, and why** (§4). The reason is the lock
-   order: `FS.mu` is last in it but for leaves, and a leaf waits for nothing.
-   The stronger statement, that nothing takes a lock under `FS.mu`, would be
-   false: the budget's mutex is taken under it by design (ADR 0003 §3), and so
-   is `Local.mu`, inside `commitLocked`'s swap. What atomicity needs is the
+3. **Four standard modules, and §3's other rules** (§3). They are the tlaplus
+   repository's own, and TLC implements `Naturals`' operators in Java (that
+   module's own comment, *Sources*), so a module that extends only them needs
+   nothing more downloaded or pinned. Each module is self-contained: none
+   extends another of this repository's. A spec that needs another standard
+   module, such as `Integers` or `Bags`, adds it by revising this ADR. The
+   other three rules are mine too. ASCII, so that a module reads the same in
+   every editor, diff and tool. One kind of value per variable, absence
+   included, so that `TypeOK` says exactly what each variable may hold and no
+   comparison rests on how TLC compares values of two kinds. No definition
+   named as a standard operator, so that adding a module to `EXTENDS` never
+   forces a rename, at the cost of a few names no spec may use.
+4. **What one action is** (§4). The grain, one critical section or one store
+   call, is mine: a hold is where the code already keeps other processes out,
+   and a store call is what the bucket makes atomic (Assumption 5), so a
+   coarser grain would hide interleavings the code has, and a finer one would
+   only add states for TLC to explore wherever §4's test passes. Judging a
+   hold by reduction is mine too, and so is the form §4 gives the test for
+   holds, which is sufficient and not necessary: `dropOpen`, and the `Store`
+   joined to a swap that diverges, pass only by arguing the test directly.
+   Lock order enters only through the test's second condition. The stronger
+   statement, that nothing takes a lock under `FS.mu`, would be false: the
+   budget's mutex is taken under it by design (ADR 0003 §3), and so is
+   `Local.mu`, inside `commitLocked`'s swap. What the condition needs is the
    weaker one, which holds: nothing taken under `FS.mu` waits for anything
-   that waits for `FS.mu`. The hold that makes store calls, `commitLocked`'s,
-   is split at them (§4).
+   that waits for `FS.mu`. That a step touching only state a spec leaves out
+   is no step of that spec is mine as well, and each spec says what it
+   leaves out. FileData's three foldings rest on chunks never being deleted,
+   which the sweeper will end (`docs/DESIGN.md` §8).
 5. **Per-key linearizability** (§4). AWS documents strong read-after-write
    consistency for PUT and DELETE, atomic updates to a single key, a listing
    begun after a successful PUT that shows it, and no atomic update across
    keys (*Sources*). That is close to linearizability, but AWS does not call
    it that; reading it as linearizability per key is the judgement. It has
-   four limits:
+   five limits:
    - **ECS**, only as far as `-check` shows. Its ten probes (`runCheck`, in
      `cmd/strata/check.go`) passed on one cluster (`docs/DESIGN.md` §2), but
      each is one client's sequence of calls: round trips, a ranged read, an
@@ -413,16 +504,42 @@ when TLC runs in §10, and the issue in *Context*.
      CommitProtocol spec models that answer, or says why it leaves it out.
    - **A request that takes effect after its call has returned**, as a timed-out
      request can, is outside the model.
-6. **Fresh ETags and nonces** (§4). The nonce is six bytes from `crypto/rand`
-   in each snapshot key (`commitLocked`), which the model takes as never
-   repeating. No two writes of the root pointer have the same body, since
-   each names a snapshot key with its nonce and carries its writer and the
-   nanosecond it was written (`rootPointer`). `Local`'s ETag is the MD5 of the
-   body (`Local.etag`, `Local.PutIfMatch`), so two bodies' ETags differ unless
-   MD5 collides, and AWS calls an ETag "unique to the object" and says it
-   "reflects a change to the object's content" (*Sources*). Without
-   freshness, a root pointer written back to an earlier body would match a
-   stale ETag, and a stale swap could win.
+   - **A retried call.** `S3.do` sends every call but `PutIfMatch` again after
+     a transport error, a 5xx or a 429, up to three more times
+     (`S3.maxRetries`). A `Put` or a `Delete` whose attempt took effect but
+     answered with an error, or not at all, then takes effect again, with
+     other calls in between. For a chunk or a snapshot, the second effect
+     writes the same bytes to the same key, or deletes the same key again. Of
+     the root pointer's writes, only the unconditional `Put` after
+     `store.ErrUnsupported` is retried, on a branch where concurrent mounts are
+     unsafe already (`commitLocked`'s warning). The model gives each call one
+     effect.
+6. **Fresh root-pointer ETags and snapshot keys** (§4). The nonce is six
+   bytes from `crypto/rand` in each snapshot key (`commitLocked`), which the
+   model takes as never repeating. No two writes of the root pointer have the
+   same body, since each names a snapshot key with its nonce and carries its
+   writer and the nanosecond it was written (`rootPointer`). `Local`'s ETag is
+   the MD5 of the body (`Local.etag`, `Local.PutIfMatch`), and so is S3's for
+   an object written by a single PUT, unencrypted or under SSE-S3; under
+   SSE-C or SSE-KMS it is a hash of the object that is not its MD5, and
+   "reflects changes only to the contents of an object" (*Sources*). So two
+   bodies' ETags differ unless the hash collides. AWS's guide also calls an
+   ETag "unique to the object" and says it "reflects a change to the object's
+   content" (*Sources*), which its API reference shows is not uniqueness
+   across writes of one body. Without freshness, a root pointer written back
+   to an earlier body would match a stale ETag, and a stale swap could win.
+   It is assumed of nothing else, and has three limits:
+   - **Other objects.** A chunk is written under the hash of its bytes, so
+     every write of its key has the same body and, on `Local` and for those
+     S3 writes, the same ETag: `putChunk` writes one again when its `Head` of
+     it fails, and two mounts can write one each. A snapshot that a retried
+     `Put` writes twice (Assumption 5) has one ETag twice. Nothing in
+     `internal/blobfs` compares a chunk's or a snapshot's ETag.
+   - **The unconditional fallback.** A retried `Put` of the root pointer after
+     `store.ErrUnsupported` writes one body twice (Assumption 5), and so gives
+     one ETag twice; nothing on that branch compares against it.
+   - **ECS**, only as far as `-check` shows: its stale-update probe found an
+     `If-Match` on a superseded ETag refused, on one cluster (Assumption 5).
 7. **The crash model** (§4). Everything a mount holds in memory goes,
    including the prune goroutine, whose context `schedulePrune` derives from
    `context.Background`. Every store call that took effect stays, and a call
@@ -435,12 +552,18 @@ when TLC runs in §10, and the issue in *Context*.
 8. **Atomic listings** (§4). `S3.List` reads pages, `pruneSnapshots` reads
    1,000 keys a page, and `Local.List` walks a directory; none is one
    instant's view, and AWS promises only that a listing begun after a
-   write's success shows it. The judgement is that this changes which old
-   snapshots a pass deletes, and not whether it can delete the one the root
-   pointer names: `pruneSnapshots` keeps the newest keys it saw, skips every
-   key of the epoch it was started for, and deletes nothing it did not list.
-   A spec that finds a property resting on the listing being atomic splits
-   `PruneList` per page.
+   write's success shows it. The judgement is that one step loses less than
+   it saves, and a spec that finds a property resting on the listing being
+   atomic splits `PruneList` per page. It is no reason to think the snapshot
+   the root pointer names safe from a pass, and the doc comment of
+   `pruneSnapshots` that calls it safe "by construction" is wrong once commits
+   overlap a pass. `pruneSnapshots` deletes every listed key but the newest
+   `retention`, and skips only the keys of the epoch it was started for. Once
+   a commit, another mount's or this mount's own, has moved the root past that
+   epoch while the pass runs, the snapshot the root names is deleted whenever
+   `retention` listed keys sort after it, such as a losing or an unfinished
+   attempt's, however the listing is read. #88 tracks a pass deleting the
+   snapshot another mount's root names.
 9. **A read made holding no lock** (§4). Folding `mutable()` into the critical
    section after it would hide that a commit can diverge between the two, so
    that a namespace operation is accepted, and acknowledged, after the
@@ -475,25 +598,70 @@ when TLC runs in §10, and the issue in *Context*.
     the logs, so that a log line, a row of `trace.tsv` and a step of a
     counterexample read the same. Rule 1's exclusions keep a name usable in
     both languages and in every module a spec may extend. The cost is that a
-    rename touches three places, and log values (rule 2).
+    rename touches three places, and log values (rule 2). Rule 3 was narrowed
+    to machine states rather than kept for every variable with a list of
+    exceptions. A machine's state is what a log line carries (rule 2), and
+    the rule exists so that it reads the same there. No other variable, a
+    bool such as `FS.dirty`, a lock, a function's locals, the bucket's objects
+    or a ghost, appears in a log as a state, and `docs/vocabulary.md` gives
+    the Go symbol each one traces to. Kept for every variable, the rule would
+    have needed ten of V3's and V4's as exceptions (`nsDirty`, `bucketRoot`,
+    `snapshots`, `chunks`, `pruneCurrent`, `pruneDoomed`, `gateR`, `gateW`,
+    `gateQ`, `ofMu`), about half of those that trace to Go, and more as specs
+    add variables.
+    `pruning[m]`'s three strings refine the bool `FS.pruning`; they are no
+    machine's states, and its row records them. The statuses are mine as
+    well: *exists* says that the Go side is in the code, which a reader can
+    check, and a name only the specs use is reserved by ADR 0013, which
+    introduces it, unless its entry names another ADR.
 14. **An action that is an event's occurrence shares its operator** (§5).
     `SwapOK` is an event of the root-pointer knowledge machine and an action
     of CommitProtocol (`docs/vocabulary.md`, V2 and V3). It is one operator,
     since the action is the event happening. Rule 5's uniqueness is read as no
     two different operators sharing a name, not as forbidding that.
-15. **The `TLA+:` prefix** (§6). A line of its own, so that a search finds
-    every traced function, and so that nobody takes a model for a `Spec:`
-    citation, which names normative text.
-16. **Configurations are append-only, and a flip edits one** (§7). The flip
-    is the only change an existing configuration takes: its expectation, and
-    the fix added to its `Fixes`. What each fix was shown to be needed for is
-    never lost.
+15. **The trace** (§6). `trace.tsv`'s columns are what a reviewer needs to
+    check a function against its rows (§8): the spec and the action, where in
+    the Go code, under which locks, and the ADR section that decides the
+    behaviour. It has one row per action and symbol, since an action can span
+    functions and a function perform several actions. Module headers follow
+    ADR headers, so that a module's scope, the commit its trace was last
+    checked against and its history are where a reader of an ADR looks for
+    them. The `TLA+:` line is a line of its own, so that a search finds every
+    traced function, and so that nobody takes a model for a `Spec:` citation,
+    which names normative text; the PR that first traces a function, or
+    changes one, adds or updates the line, so that it stays true. That the
+    specs rank below the ADRs, as the ADRs rank below `docs/DESIGN.md`
+    (`docs/adr/README.md`), is mine: a spec models what an ADR decides, and
+    can be wrong about it. That the tripwire runs in `go test` is the owner's
+    (§10); that it checks only that each symbol is still in its file is mine,
+    since presence can be checked from the source with the standard library
+    alone, and whether a function does what its action says is review's
+    (§8).
+16. **Configurations** (§7). A MustFail configuration checks `TypeOK` and
+    exactly one other property, so that a violation it reports is either the
+    one it was written for or a type error, and never another property
+    failing first. Every fix in the code gets one that removes it, so that
+    each fix is shown to be needed and a model in which a fix changes nothing
+    is caught; every open defect gets one, so that the gate is green while
+    the defect is open, and the manifest lists it (*Consequences*).
+    Configurations are append-only, and a flip edits one: the flip is the
+    only change an existing configuration takes, its expectation and the fix
+    added to its `Fixes`, so what each fix was shown to be needed for is never
+    lost. The exit statuses and log texts wait for the session, the only
+    layer that can run TLC and see what this version prints.
 17. **Pins in `docs/tla/tools.tsv`** (§9). Versions, sources, sizes and
     checksums live there, not here, so a new pin changes a data file and does
     not revise an ADR. The values in *Context* are a record of 2026-10-10.
+    `tools.tsv` and `scripts/tla.sh` arrive with the first spec, since before
+    it there is nothing for them to pin or run.
 18. **The session runs TLC** (§9). It is the only layer that runs commands.
     Giving an agent a shell for it would be agent configuration, which changes
-    only on the owner's direct instruction (CLAUDE.md).
+    only on the owner's direct instruction (CLAUDE.md). That TLC writes
+    nothing in the tree is mine: the session collects `git status
+    --porcelain` and `git diff` after a dispatch, for `supervisor`
+    (CLAUDE.md), and a run that left files behind would put them in that
+    evidence, or in a commit. How the runner keeps TLC's files out of the
+    tree arrives with it.
 19. **The gate begins with the runner** (§10). The rule's own last sentence
     has the session record it in CLAUDE.md when `scripts/tla.sh` lands, and
     the runner fails when the tools are missing; read together, a PR that
@@ -502,7 +670,9 @@ when TLC runs in §10, and the issue in *Context*.
 20. **Issues cited by number.** #5, #11, #21, #30, #31, #48, #82 and #83 are
     cited as the session gave them. Their text is not in the repository, I
     could not read it, and nothing here depends on more than which area each
-    belongs to.
+    belongs to. #88 is cited as the session described it, a prune pass
+    deleting the snapshot another mount's root pointer names, and Assumption 8
+    depends on no more than that.
 21. **ADRs cited before they exist.** ADR 0014, the lifecycle ADR, the ADR for
     #5 and the load-race ADR are planned, not written. ADR 0014 is cited by
     the number the session's plan gives it; if that number goes to another
@@ -512,12 +682,45 @@ when TLC runs in §10, and the issue in *Context*.
     `CHANGES`).
 23. **Status is Accepted on creation.** The owner delegated this to the
     architect's recommendation on 2026-10-10.
-24. **Read, not run.** The code was read at `3deecf1`, and again at `f3a8d10`
-    for the statements about `FS.diverged` in §4 and Assumption 9. By the
-    session's account, which nothing here could check, the only code change
-    between the two is #48's fix, `bdc7b58`. Nothing was run, and no spec
-    exists yet. The tooling state is the session's report, checked against its
-    sources as far as they allow.
+24. **Read, not run.** Every statement about the code and the guards was
+    checked by reading them at `f102570`, the commit the session gave.
+    Nothing was run, and no spec exists yet. The tooling state is the
+    session's report, checked against its sources as far as they allow.
+25. **How the six defects were found** (*Context*). The ADRs say how one was
+    found only for #64: ADR 0012 that no test reproduces it, and ADR 0006's
+    first revision that an audit found its preconditions in the code. Of #41,
+    ADR 0005 §7 says only that no store fake can mark its window, so that its
+    test relies on a grace period. For #37, #40, #46 and #56 the ADRs describe
+    each defect from the code, and specify or name its test after it, but say
+    nothing of how it was first found. That those five were found by reading,
+    and not by a test that failed, is my inference from that silence. So is
+    the claim in *Alternatives considered* that all six passed the tests that
+    existed: each was in merged code, and the merge bar admits code only with
+    the suite passing (CLAUDE.md).
+26. **Ghost variables** (§4). Each property §1 names compares the bucket, or
+    a reply, with what a caller was told, and the code keeps no record of
+    most of what it tells: nothing in memory says which writes a client was
+    told were stable, or what a read returned. A ghost holds it. That a ghost
+    traces to no Go symbol is what keeps a reader from taking it for state
+    the code has.
+27. **`docs/tla/`** (§2). Any directory under `docs/` would have had the
+    owners §2 needs, since every guard scopes `docs/*` alike. One of its own
+    keeps the modules, their configurations and the tables of §6, §7 and §9
+    together and apart from prose. One module per protocol is mine too, so
+    that a configuration checks one protocol and a counterexample is about
+    one.
+28. **How a change is made** (§8). Spec first, so that a counterexample comes
+    before code is written against the old model, which is the order whose
+    absence *Context* records. The refactor rule keeps a refactor, which
+    changes no behaviour, from changing a model. The review rule is the one
+    check that a traced function still does what its rows say, since the
+    tripwire checks only that it is there (§6). That test-author writes a
+    regression test from the counterexample and the spec, and never from the
+    code, follows its role: its read guard admits no Go file but tests and
+    `internal/vfs`, the interface (`.claude/settings.json`), so a test it
+    writes cannot copy the code's mistake. The session pastes the trace into
+    its brief because that guard and §9 leave no file both can reach; a copy
+    put in the tree for it would be a file that a run leaves behind.
 
 ## Alternatives considered
 
@@ -540,10 +743,11 @@ when TLC runs in §10, and the issue in *Context*.
 - **Specs beside the Go code**, such as `internal/blobfs/CommitProtocol.tla`.
   That is outside the architect's write scope (`docs/* README.md CHANGES
   internal/vfs/*`), inside coder's, whose guard denies nothing under
-  `internal/` but `internal/vfs/*`, and unreadable by test-author, whose read
-  guard admits only `*_test.go`, `internal/vfs`, `docs`, `README.md`,
-  `CLAUDE.md` and `go.mod`, and what lies under `internal/vfs` and `docs`
-  (`.claude/settings.json`). Changing those scopes is agent configuration.
+  `internal/` but `internal/vfs/*` and test files (`*_test.go`), and
+  unreadable by test-author, whose read guard admits only `*_test.go`,
+  `internal/vfs`, `docs`, `README.md`, `CLAUDE.md` and `go.mod`, and what lies
+  under `internal/vfs` and `docs` (`.claude/settings.json`). Changing those
+  scopes is agent configuration.
 - **Quint, or P.** Quint is installed with npm, Homebrew, Nix or a binary;
   "The model checker requires Java Development Kit >= 17", and `quint verify`
   runs Apalache, "automatically downloaded", or TLC as an alternative backend.
@@ -554,8 +758,7 @@ when TLC runs in §10, and the issue in *Context*.
   its page does not name (*Sources*). A proof holds without bounds, which §11
   says a model check does not, but every proof step is written by hand, and
   the verifiers are tools beyond the one §9 records. If a property ever has to
-  hold past every
-  bound TLC can reach, a later ADR can take it up.
+  hold past every bound TLC can reach, a later ADR can take it up.
 - **Vendoring `tla2tools.jar`.** A 2,274,532-byte binary in git. The pin in
   `tools.tsv`, with its size and checksums, makes a run reproducible without
   it.
@@ -573,8 +776,12 @@ when TLC runs in §10, and the issue in *Context*.
   traced protocol is specified and checked before it is coded, on one branch
   (§8). Each such change costs more, and the ordering is the one whose absence
   let *Context*'s defects reach code first.
-- **The project has its first non-Go tool**: a JRE and a jar, outside the
-  tree, which §9 records as a development tool and not a dependency.
+- **The merge bar gains tools outside Go**: a JRE and a jar, outside the
+  tree, which §9 records as a development tool and not a dependency, run by a
+  bash script. The merge bar's commands have been Go's (CLAUDE.md), but these
+  are not the project's first tools outside Go: the guards in
+  `.claude/hooks/` already need bash and jq, and `scripts/` holds bash
+  scripts.
 - **Open defects stay visible.** An open defect's MustFail configuration stays
   MustFail, and the gate stays green, until its fix lands and flips it (§7),
   so the manifest lists every defect the models show.
@@ -610,11 +817,11 @@ when TLC runs in §10, and the issue in *Context*.
 
 ## Sources
 
-Fetched on 2026-10-10 through a tool that summarises what it fetches, and
-quoted as it returned them when asked for verbatim text. It reads a long page
-100,000 characters at a time, and for some files it declined to quote more
-than 125 characters at once. Each URL below was fetched while this ADR was
-written; none is cited from an earlier fetch.
+Fetched on 2026-10-10, or on 2026-10-12 where an entry says so, through a tool
+that summarises what it fetches, and quoted as it returned them when asked for
+verbatim text. It reads a long page 100,000 characters at a time, and for some
+files it declined to quote more than 125 characters at once. Each URL below
+was fetched while this ADR was written; none is cited from an earlier fetch.
 
 - The tlaplus README:
   <https://raw.githubusercontent.com/tlaplus/tlaplus/master/README.md>. Under
@@ -688,6 +895,16 @@ written; none is cited from an earlier fetch.
   412 Precondition Failed response." and "You can also receive a 409
   Conflict response in the case of concurrent requests." (Assumptions 5
   and 6)
+- AWS, *Amazon S3 API Reference*, the `Object` data type:
+  <https://docs.aws.amazon.com/AmazonS3/latest/API/API_Object.html>, fetched on
+  2026-10-12. Of `ETag`: "The entity tag is a hash of the object. The ETag
+  reflects changes only to the contents of an object, not its metadata. The
+  ETag may or may not be an MD5 digest of the object data." Objects created by
+  a PUT "and are encrypted by SSE-S3 or plaintext, have ETags that are an MD5
+  digest of their object data"; under SSE-C or SSE-KMS they "have ETags that
+  are not an MD5 digest of their object data"; and for a multipart upload "the
+  ETag is not an MD5 digest, regardless of the method of encryption." (§4;
+  Assumption 6)
 - The Apalache README:
   <https://raw.githubusercontent.com/apalache-mc/apalache/main/README.md>.
   "A symbolic model checker for TLA+" and "Apalache translates TLA+ into the
@@ -714,6 +931,29 @@ written; none is cited from an earlier fetch.
 - *The PlusCal Translator*, from the TLA+ Toolbox's documentation:
   <https://nightly.tlapl.us/doc/pluscal/pluscal.html>. "The PlusCal translator
   writes the TLA+ translation of the algorithm into the module." (§3)
+- Leslie Lamport's list of his writings, with his notes on each:
+  <https://lamport.azurewebsites.net/pubs/pubs.html>, fetched on 2026-10-12
+  and read in three parts, from characters 0, 100,000 and 200,000 of its
+  341,552. Of *Pretending Atomicity* (with Fred Schneider, SRC Research Report
+  44, May 1989): "Reasoning about concurrent systems is simpler if they have
+  fewer separate atomic actions." and "This process is called reduction." Of
+  *Reduction in TLA* (with Ernie Cohen, CONCUR'98, Lecture Notes in Computer
+  Science 1466, 317-331): "The term reduction was coined by Richard Lipton,
+  who published the first paper on the topic." (§4; Assumption 4)
+- R. J. Lipton, "Reduction: a method of proving properties of parallel
+  programs", *Communications of the ACM* 18(12), December 1975, 717-721, as a
+  bibliography gives it:
+  <https://research.cs.wisc.edu/trans-memory/biblio/bibhtml/lipton_reduction_cacm_1975.html>,
+  fetched on 2026-10-12. (§4) **Honesty note:** the paper itself was not read.
+  ACM's pages for it, <https://dl.acm.org/doi/10.1145/361227.361234>,
+  <https://cacm.acm.org/?p=13901> and
+  <https://cacmb4.acm.org/magazines/1975/12/11508-reduction>, refused the
+  fetch, and the copy at
+  <https://www.cis.upenn.edu/~lee/04cis700/papers/Lip75.pdf> is a scan with no
+  text the tool could read. Nor could it read the PDF of *Pretending
+  Atomicity* at <https://www.cs.cornell.edu/fbs/publications/pretendingAtom.pdf>.
+  §4's test, and its account of which steps move, are my statement of
+  reduction, not quoted from either paper.
 
 Cited as earlier ADRs quote them, and not fetched for this ADR: RFC 1813
 §1.6's list of synchronous procedures (ADR 0012's *Sources*), and the Go

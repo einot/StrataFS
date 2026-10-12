@@ -82,12 +82,21 @@ added to its `Fixes`, and a MustFail configuration that removes the fix is
 added. Configurations are never deleted or renamed, and the flip is the only
 change an existing one takes (ADR 0013 §7).
 
+## Counterexamples
+
+A defect's counterexample becomes its Go regression test, which test-author
+writes from the trace and the spec, never from the code. TLC writes nothing in
+this directory or anywhere else in the tree, and test-author's read guard
+refuses every path outside the tree it works in, so test-author cannot read
+the trace where TLC left it. The session pastes the trace into test-author's
+brief (ADR 0013 §8, §9).
+
 ## Names
 
-Every state, event, action, predicate, property and `Fixes` member in these
-modules is named in [`docs/vocabulary.md`](../vocabulary.md), which also gives
-the Go constants and fields that share each name. A name that is not there yet
-goes there first, by the rules ADR 0013 §5 sets.
+Every state, event, action, predicate, variable, property and `Fixes` member
+in these modules is named in [`docs/vocabulary.md`](../vocabulary.md), which
+also gives the Go constants and fields that share each name. A name that is
+not there yet goes there first, by the rules ADR 0013 §5 sets.
 
 ## Running
 

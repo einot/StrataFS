@@ -10,10 +10,21 @@ two disagree, the ADR wins and the disagreement is a bug in one of them. A
 later ADR that adds a machine adds its names here. A rename changes this file,
 the specs and the Go names in one PR.
 
-Every entry is marked **exists**, in the code now, or **reserved**,
-introduced by the ADR named. Every entry marked exists was confirmed in the
-code at `3deecf1`. ADR 0014, the lifecycle ADR, the load-race ADR and the ADR
-for #5 are not yet written; their entries hold the names those ADRs will use.
+Every entry has a status (ADR 0013 §5):
+
+- **exists**: its Go name is in the code now, or, for a `Fixes` member, the fix
+  it names is. Every entry marked exists was confirmed in the code at
+  `f102570`.
+- **reserved**, with the ADR named: it is not in the code, and that ADR
+  introduces it. A name only the specs use, with no Go name, such as an
+  action, a ghost, a property or a string a variable holds, is reserved by
+  ADR 0013, which introduces it, unless its entry names another ADR.
+
+A status given to a group, a list or a section holds for every entry in it.
+ADR 0014, the lifecycle ADR, the load-race ADR and the ADR for #5 are not yet
+written; their entries hold the names those ADRs will use. The operators of
+the standard modules, listed at the end, are not entries: they are the names
+rule 1 rules out.
 
 ## Rules
 
@@ -23,10 +34,11 @@ for #5 are not yet written; their entries hold the names those ADRs will use.
 2. Go constants are the machine's lowerCamel prefix plus the bare name;
    `String()` returns the bare name, so log from/to/event values are the
    spec's names.
-3. TLA+ holds a state as the string of its bare name in a variable named after
-   the Go field (exceptions: `nsDirty` = `FS.dirty`; `bucketRoot` = the object
-   at `rootKey`); actions and modelled events are operators with the bare
-   name.
+3. TLA+ holds a machine's state as the string of its bare name, in a variable
+   named after the Go field that holds it; actions and modelled events are
+   operators with the bare name. A machine is a set of states with Go
+   constants under rule 2. Any other variable is named as this file gives,
+   with the Go symbol it traces to, if any.
 4. A Go predicate a spec uses keeps its name with the first letter
    upper-cased.
 5. States may repeat across machines; events and actions are unique within a
@@ -36,6 +48,18 @@ for #5 are not yet written; their entries hold the names those ADRs will use.
    goes in the config comment.
 7. For actions the Go column is indicative; `trace.tsv` is authoritative once
    it exists.
+
+**Why rule 3 covers only machine states.** The machines are V1, V2 and V5's
+server and connection, whose states have Go constants. Rule 3 was narrowed to
+them, rather than kept for every variable with a list of exceptions. A
+machine's state is what a log line carries (rule 2), and the rule exists so
+that it reads the same there. No other variable, a bool such as `FS.dirty`, a
+lock, a function's locals, the bucket's objects or a ghost, appears in a log
+as a state, and the tables below give the Go symbol each one traces to. Kept
+for every variable, the rule would have needed ten of V3's and V4's variables
+as exceptions, about half of those that trace to Go, and more as specs add
+variables (ADR 0013, Assumption 13). So `pruning[m]`'s three strings, which refine the
+bool `FS.pruning`, are no machine's states, and its row records them.
 
 ## V1. Mount mode
 
@@ -74,7 +98,8 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 `internal/blobfs/commit.go`, and `flushAll`, `settleAll` and `putChunk` in
 `internal/blobfs/fs.go`.
 
-**Actions.** The Go column is indicative (rule 7).
+**Actions.** All reserved, ADR 0013: an action's name is the spec's, whatever
+Go performs it. The Go column is indicative (rule 7).
 
 | Action | Go | Meaning |
 |---|---|---|
@@ -98,41 +123,42 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 | `PruneDelete` | `pruneSnapshots`' `Delete` loop | |
 | `Crash` | none | process death, or any exit skipping the final commit |
 
-**Variables.**
+**Variables.** Named as rule 3 says: `mode[m]` and `rootKnowledge[m]` hold
+machine states, and the rest are named here.
 
-| Variable | Go | Meaning |
-|---|---|---|
-| `bucketRoot` | the object at `rootKey` | `[key, etag, writer]`: `rootPointer.Snapshot`, its ETag, `rootPointer.Writer` |
-| `snapshots` | the objects under `snapshotPrefix` | |
-| `chunks` | the objects under `chunkPrefix` | |
-| `pc[m]` | none | |
-| `mode[m]` | `FS.mode` (V1) | |
-| `rootKnowledge[m]` | `FS.rootKnowledge` (V2) | |
-| `rootETag[m]` | `FS.rootETag` | |
-| `epoch[m]` | `FS.epoch` | |
-| `nsDirty[m]` | `FS.dirty` | |
-| `attempt[m]` | none | the key the current attempt wrote |
-| `pruning[m]` | `FS.pruning` | in {`"Idle"`, `"Listing"`, `"Deleting"`}; `FS.pruning` is true unless `"Idle"` |
-| `pruneCurrent[m]`, `pruneDoomed[m]` | `pruneSnapshots`' `current` and `doomed` | |
-| `acked`, `used` | none | ghosts |
+| Variable | Go | Meaning | Status |
+|---|---|---|---|
+| `bucketRoot` | the object at `rootKey` | `[key, etag, writer]`: `rootPointer.Snapshot`, its ETag, `rootPointer.Writer` | exists |
+| `snapshots` | the objects under `snapshotPrefix` | | exists |
+| `chunks` | the objects under `chunkPrefix` | | exists |
+| `pc[m]` | none | | reserved, ADR 0013 |
+| `mode[m]` | `FS.mode` (V1) | | reserved, ADR 0014 |
+| `rootKnowledge[m]` | `FS.rootKnowledge` (V2) | | reserved, the ADR for #5 |
+| `rootETag[m]` | `FS.rootETag` | | exists |
+| `epoch[m]` | `FS.epoch` | | exists |
+| `nsDirty[m]` | `FS.dirty` | | exists |
+| `attempt[m]` | none | the key the current attempt wrote | reserved, ADR 0013 |
+| `pruning[m]` | `FS.pruning` | in {`"Idle"`, `"Listing"`, `"Deleting"`}, which refine the bool: `FS.pruning` is true unless `"Idle"`. The three strings are reserved, ADR 0013 | exists |
+| `pruneCurrent[m]`, `pruneDoomed[m]` | `pruneSnapshots`' `current` and `doomed` | | exists |
+| `acked`, `used` | none | ghosts | reserved, ADR 0013 |
 
-**Constant.** `Capability` in {`"Conditional"`, `"Unconditional"`,
-`"Flaky"`}: what the backend does with a conditional write. `Conditional` and
-`Unconditional` are `commitLocked`'s two branches, the swap and the fallback
-after `store.ErrUnsupported`. What `Flaky` does is the CommitProtocol spec's to
-define.
+**Constant.** Reserved, ADR 0013, with its values. `Capability` in
+{`"Conditional"`, `"Unconditional"`, `"Flaky"`}: what the backend does with a
+conditional write. `Conditional` and `Unconditional` are `commitLocked`'s two
+branches, the swap and the fallback after `store.ErrUnsupported`. What `Flaky`
+does is the CommitProtocol spec's to define.
 
-**Properties.** `TypeOK`, `RootSnapshotExists`, `NoLostAck`,
-`ChunksBeforeRoot`, `ReadOnlyNeverWrites`, `NoSelfDivergence`.
+**Properties.** All reserved, ADR 0013: `TypeOK`, `RootSnapshotExists`,
+`NoLostAck`, `ChunksBeforeRoot`, `ReadOnlyNeverWrites`, `NoSelfDivergence`.
 
 **Fixes.** Later ones are named by each fix's ADR.
 
 | Member | What the fix does | Status |
 |---|---|---|
-| `IfNoneMatchInit` | `initEmpty` commits with an empty `rootETag`, so its swap is If-None-Match and two first mounts cannot both create a filesystem | in the code |
-| `Nonce` | `commitLocked` puts six random bytes in every snapshot key, so two writers committing one epoch cannot overwrite each other's snapshot | in the code |
-| `ChunksFirst` | `Sync` stores every chunk before the snapshot that names it, and the snapshot before the swap | in the code |
-| `ReadOnlyFence` | `New` puts a read-only mount's store behind `store.ReadOnly` (ADR 0011 §3) | in the code |
+| `IfNoneMatchInit` | `initEmpty` commits with an empty `rootETag`, so its swap is If-None-Match and two first mounts cannot both create a filesystem | exists |
+| `Nonce` | `commitLocked` puts six random bytes in every snapshot key, so two writers committing one epoch cannot overwrite each other's snapshot | exists |
+| `ChunksFirst` | `Sync` stores every chunk before the snapshot that names it, and the snapshot before the swap | exists |
+| `ReadOnlyFence` | `New` puts a read-only mount's store behind `store.ReadOnly` (ADR 0011 §3) | exists |
 | `AtomicLoad` | the load-race fix: one read of the root pointer's body and its ETag | reserved, the load-race ADR |
 
 ## V4. Sync and file data
@@ -141,24 +167,25 @@ define.
 (rule 7); every site is in `internal/blobfs/fs.go` but `Sync` and
 `commitLocked`, which are in `internal/blobfs/commit.go`.
 
-**Actions.**
+**Actions.** All reserved, ADR 0013. ADR 0013 §4 says why `SyncCommit`,
+`FlushBody` and `WriteBody` may each be one action.
 
 | Action | Go | Meaning |
 |---|---|---|
 | `SyncList` | `flushAll`'s listing | |
 | `FlushLock` | `flushOpen` taking the file's `openFile.mu` | |
-| `FlushBody` | `flushOpen`'s work under it | its outcomes are `FlushEarly`, `FlushOK` and `FlushFail` |
+| `FlushBody` | `flushOpen`'s work under it | one action (ADR 0013 §4); its outcomes are `FlushEarly`, `FlushOK` and `FlushFail` |
 | `FlushEarly` | `flushOpen`'s early return | nothing to apply |
 | `FlushOK` | `flushOpen` succeeding | |
 | `FlushFail` | `flushOpen` failing in a fetch or an upload | |
 | `SyncGateWait` | `Sync`'s `commitGate.Lock`, waiting | |
 | `SyncGateTake` | `Sync`'s `commitGate.Lock`, held | |
 | `SyncSettleList` | `settleAll`'s listing | |
-| `SyncCommit` | `commitLocked` | one action |
+| `SyncCommit` | `commitLocked` | one action (ADR 0013 §4) |
 | `SyncRelease` | `Sync` releasing what it holds | |
 | `WriteGetOpen` | `Write`'s `getOpen` | |
 | `WriteLock` | `bufferWrite` taking `openFile.mu` | |
-| `WriteBody` | `bufferWrite`'s work under it | |
+| `WriteBody` | `bufferWrite`'s work under it | one action (ADR 0013 §4) |
 | `WriteCopyList` | `Write` copying the chunk list before it takes the lock | only without `ListUnderLock` |
 | `TruncateGate` | `truncate`'s `commitGate.RLock` | |
 | `TruncateGetOpen` | `truncate`'s `getOpen` | |
@@ -170,40 +197,42 @@ define.
 | `ReadFetch` | `Read`'s step 3, its fetches | |
 | `Crash` | none | |
 
-**Variables.**
+**Variables.** None holds a machine's state, so all are named here (rule 3).
 
-| Variable | Go |
-|---|---|
-| `size`, `chunks` | `inode.Size`, `inode.Chunks` |
-| `open` | `FS.open` |
-| `dirty` | `openFile.dirty` |
-| `pendingTrim` | `openFile.pendingTrim` |
-| `unsettled` | `openFile.unsettled` |
-| `nsDirty` | `FS.dirty` |
-| `committed` | none |
-| `gateR`, `gateW`, `gateQ` | `FS.commitGate`'s readers, writer and waiting writers |
-| `ofMu` | `openFile.mu` |
-| `pc` | none |
-| `ideal`, `removed`, `removedCommitted`, `rHist`, `reply`, `leaked`, `refused` | none: ghosts |
+| Variable | Go | Status |
+|---|---|---|
+| `size`, `chunks` | `inode.Size`, `inode.Chunks` | exists |
+| `open` | `FS.open` | exists |
+| `dirty` | `openFile.dirty` | exists |
+| `pendingTrim` | `openFile.pendingTrim` | exists |
+| `unsettled` | `openFile.unsettled` | exists |
+| `nsDirty` | `FS.dirty` | exists |
+| `committed` | none | reserved, ADR 0013 |
+| `gateR`, `gateW`, `gateQ` | `FS.commitGate`'s readers, writer and waiting writers | exists |
+| `ofMu` | `openFile.mu` | exists |
+| `pc` | none | reserved, ADR 0013 |
+| `ideal`, `removed`, `removedCommitted`, `rHist`, `reply`, `leaked`, `refused` | none: ghosts | reserved, ADR 0013 |
 
-**Properties.** `TypeOK`, `ViewIsIdeal`, `NoCommitLeak`, `NoRefusedCommit`,
-`UnsettledIsMarked`, `GateExclusive`, `I1`, `I2`, `I3`, `I4` (ADR 0006 §2's
-invariants), `ReadIsLinearizable`, `SyncReturns`, `TruncReturns`.
+**Properties.** All reserved, ADR 0013: `TypeOK`, `ViewIsIdeal`,
+`NoCommitLeak`, `NoRefusedCommit`, `UnsettledIsMarked`, `GateExclusive`, `I1`,
+`I2`, `I3`, `I4` (ADR 0006 §2's invariants), `ReadIsLinearizable`,
+`SyncReturns`, `TruncReturns`.
 
-**Fixes.** All in the code.
+**Fixes.**
 
-| Member | Source |
-|---|---|
-| `ReadOneView` | ADR 0005 |
-| `TrimHonoured` | ADR 0006 |
-| `TrimKeepsMinimum` | ADR 0006's smallest length |
-| `CommitGate` | ADR 0012 |
-| `StickyMark` | ADR 0012 Assumption 9 |
-| `ListUnderLock` | `5479fe2` |
+| Member | Source | Status |
+|---|---|---|
+| `ReadOneView` | ADR 0005 | exists |
+| `TrimHonoured` | ADR 0006 | exists |
+| `TrimKeepsMinimum` | ADR 0006's smallest length | exists |
+| `CommitGate` | ADR 0012 | exists |
+| `StickyMark` | ADR 0012 Assumption 9 | exists |
+| `ListUnderLock` | `5479fe2` | exists |
 
 ## V5. Lifecycle
 
-Reserved, by the lifecycle ADR; `docs/tla/NfsDurability.tla`.
+`docs/tla/NfsDurability.tla`. Every entry is reserved, by the lifecycle ADR,
+but `FreshVerifier`, which exists.
 
 **Server states.** `Serving`, `Draining`, `Stopped`; Go `serverServing`,
 `serverDraining`, `serverStopped`; TLA+ `server`.
@@ -222,40 +251,41 @@ by the lifecycle ADR.
 **Properties.** `StableWritesDurable`, `SyncOpsDurable`,
 `ShutdownLosesNothing`.
 
-**Fixes.** `FreshVerifier`. The fix is in the code: `New` fills
-`FS.writeVerf` from `crypto/rand` on every start (`docs/DESIGN.md` §9).
+**Fixes.** `FreshVerifier`, which exists: `New` fills `FS.writeVerf` from
+`crypto/rand` on every start (`docs/DESIGN.md` §9).
 
 ## V6. Write budget
 
 `docs/tla/Budget.tla`; not a Go machine; ADR 0003 §4.
 
 **Variables.** `charge`, `parked`, `draining`, `ended`, `failure`, `failedAt`,
-which exist as the fields of `budget` in `internal/blobfs/budget.go`; and per
-writer `pc`, `start` and `ret`.
+the fields of `budget` in `internal/blobfs/budget.go`, which exist; and per
+writer `start`, `await`'s local, which exists, and `pc` and `ret`, reserved,
+ADR 0013.
 
-**Settle outcomes.** `Succeeded`, `Failed`, `Abandoned`, `Panicked` (ADR 0003
-§4), with the actions `SettleSucceeded`, `SettleFailed`, `SettleAbandoned`,
-`SettlePanicked`.
+**Settle outcomes.** All reserved, ADR 0013, under the names ADR 0003 §4
+gives them: `Succeeded`, `Failed`, `Abandoned`, `Panicked`, with the actions
+`SettleSucceeded`, `SettleFailed`, `SettleAbandoned`, `SettlePanicked`.
 
-**Drain events.** `DrainReturnsNil`, `DrainReturnsError`, `DrainPanics`,
-`DrainGoexits`.
+**Drain events.** All reserved, ADR 0013: `DrainReturnsNil`,
+`DrainReturnsError`, `DrainPanics`, `DrainGoexits`.
 
-**Returns.** `ret[w]` in {`"Admitted"`, `"DrainError"`, `"PanicError"`,
-`"CtxError"`}.
+**Returns.** Reserved, ADR 0013: `ret[w]` in {`"Admitted"`, `"DrainError"`,
+`"PanicError"`, `"CtxError"`}.
 
-**Actions.** `Enter`, `Park`, `Wake`, `BecomeDrainer`, `Release`, `Add`,
-`Cancel`.
+**Actions.** All reserved, ADR 0013: `Enter`, `Park`, `Wake`,
+`BecomeDrainer`, `Release`, `Add`, `Cancel`.
 
-**Properties.** `AtMostOneDrain`, `NoStrandedDrain`, `G1`, `G2`, `G3` (ADR 0003
-§4's failure contract), `NoLostWakeup`.
+**Properties.** All reserved, ADR 0013: `AtMostOneDrain`, `NoStrandedDrain`,
+`G1`, `G2`, `G3` (ADR 0003 §4's failure contract), `NoLostWakeup`.
 
-**Fixes.** Named by the Budget spec's PR.
+**Fixes.** Named by the Budget spec's PR; none yet.
 
 ## V7. Policies
 
 - `Mutable`: V1; exists.
-- `ReadOnlyNeverWrites`: an invariant (V3). The fence, `store.ReadOnly`, exists
-  (ADR 0011 §3).
+- `ReadOnlyNeverWrites`: an invariant (V3); reserved, ADR 0013. The fence,
+  `store.ReadOnly`, exists (ADR 0011 §3).
 - Reserved, ADR 0014:
   - `Permits` = `policy.Permits(c, o, want)`;
   - `UnixAllows(r)` = `policy.Unix().Check(r)` returns nil;
