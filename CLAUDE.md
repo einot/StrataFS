@@ -166,6 +166,18 @@ Before merging, the full suite must pass: `gofmt -l .` (must print nothing), `go
 commands so a failing one is actually visible — piping each to `tail`
 hides its exit status and will report a red gate as green.
 
+**Who merges.** By the repo owner's standing order, the session merges its
+own pull requests once all of these hold:
+- the merge bar has passed on the PR's head commit;
+- for a PR with code or tests, `reviewer` has reported, and each of its
+  findings is fixed or skipped with the reason given in the PR body;
+- every `supervisor` pairing is done, with no stop outstanding;
+- no status check on the PR is pending or failing.
+
+A PR that changes only governance docs the session owns needs no review.
+Merge with `gh pr merge --squash --match-head-commit <sha>`. Never enable
+auto-merge, and keep merged branches on the remote.
+
 ## Supervisor agent
 
 Every dispatch to `coder`, `test-author`, `architect`, or
@@ -209,7 +221,16 @@ list whose every entry is `"category": "unverified"`. Those describe what
 `supervisor` could not check rather than anything the worker did, and
 `supervisor` has no Bash, so a worker's claim to have run the tests is
 almost always one. Report them verbatim and carry on. If even one entry is
-any other category, the stop applies in full.
+any other category, the stop applies in full, except as the next paragraph
+allows.
+
+**Low-severity findings.** By the repo owner's standing order, if every
+finding that is not `unverified` has `"severity": "low"`, the session may
+judge whether to carry on rather than stop. It still reports every finding
+verbatim first, and it says which way it judged and why. The full stop
+still applies to any finding of `medium` severity or higher, and to any
+finding that resembles a backdoor, credential or secret exfiltration, or
+a disabled safety or security check, whatever its severity.
 
 `reviewer` is read-only and structurally incapable of taking an
 unauthorized action — no Edit, no Write, no Bash — so routine supervisor
