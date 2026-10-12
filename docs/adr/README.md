@@ -85,3 +85,4 @@ URL, and what was taken from it.
 | [0010](0010-a-new-filesystem-is-never-owned-by-root-by-accident.md) | A new filesystem is never owned by root by accident | Accepted |
 | [0011](0011-a-read-only-fs-writes-nothing-to-its-bucket.md) | A read-only FS writes nothing to its bucket | Accepted |
 | [0012](0012-a-commit-stores-a-truncate-whole-or-not-at-all.md) | A commit stores a truncate whole or not at all | Accepted |
+| [0013](0013-data-integrity-protocols-are-specified-in-tla.md) | Data-integrity protocols are specified in TLA+ and checked by TLC | Accepted |
