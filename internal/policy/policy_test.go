@@ -362,8 +362,8 @@ type unixCase struct {
 // allowing and one refusing request for each check in the row. It avoids
 // every row U1 to U6 leave unpinned (§11):
 //
-// U1: no OpRead, OpWrite or OpTruncate refusal involves the owner, so no owner
-// lacking the permission is asked; U2: no OpRead refusal has a class with
+// U1: no owner whose owner bits lack the permission is asked OpRead, OpWrite
+// or OpTruncate; U2: no OpRead refusal has a class with
 // execute but not read; U3: OpRead, OpWrite and OpTruncate are asked only of
 // vfs.TypeReg and vfs.TypeDir; U4: no directory has 0o1000 set; U5 is
 // AccessBits', not these; U6: no OpSetTimes asks for a caller who is neither
@@ -1011,9 +1011,12 @@ func TestTwoUnixValuesDecideAlike(t *testing.T) {
 
 // TestNoCallModifiesCallerGIDs covers P12 (ADR 0014 §11): no call of InGroup,
 // Permits, AccessBits, or the Check of Unix(), All(...) or Func, modifies
-// Caller.GIDs, neither its contents nor its length (§5's purity rule). The
-// GIDs are out of order and hold a repeat, so that a sort or a dedupe in place
-// would show.
+// Caller.GIDs (§5's purity rule). The GIDs are out of order and hold a repeat,
+// so that a sort or a dedupe in place would show. run gives each call GIDs
+// with spare capacity past len, filled with sentinels that no test uses as a
+// GID, so that a write past len, such as an append to Caller.GIDs, shows too.
+// No callee can change the caller's length, since a slice header is passed by
+// value, so the length is not checked.
 func TestNoCallModifiesCallerGIDs(t *testing.T) {
 	bases := []vfs.Caller{
 		{UID: 0, GID: 0, GIDs: []uint32{902, fileGID, 901, 902, 7}},
@@ -1026,15 +1029,24 @@ func TestNoCallModifiesCallerGIDs(t *testing.T) {
 	all := policy.All(policy.Unix(), policy.Func(func(policy.Request) error { return nil }))
 	fn := policy.Func(func(policy.Request) error { return nil })
 
+	// sentinels fill the spare capacity past len in each call's GIDs. No test
+	// uses them as a GID, so one that changes shows a write past len.
+	sentinels := [4]uint32{0xdead0001, 0xdead0002, 0xdead0003, 0xdead0004}
+
 	run := func(what string, base vfs.Caller, call func(c vfs.Caller)) {
 		t.Helper()
+		n := len(base.GIDs)
+		b := make([]uint32, n, n+len(sentinels))
+		copy(b, base.GIDs)
+		full := b[:cap(b)]
+		copy(full[n:], sentinels[:])
+		want := append(slices.Clone(base.GIDs), sentinels[:]...)
 		c := base
-		c.GIDs = slices.Clone(base.GIDs)
-		n := len(c.GIDs)
+		c.GIDs = b[:n]
 		call(c)
-		if len(c.GIDs) != n || !slices.Equal(c.GIDs, base.GIDs) {
-			t.Errorf("%s with GIDs %v left them %v: no call modifies Caller.GIDs, neither its contents nor its length (ADR 0014 §5, §11 P12)",
-				what, base.GIDs, c.GIDs)
+		if !slices.Equal(full, want) {
+			t.Errorf("%s with GIDs %v left their backing array %v, want %v (the GIDs, then the sentinels past len): no call modifies Caller.GIDs, within its length or past it (ADR 0014 §5, §11 P12)",
+				what, base.GIDs, full, want)
 		}
 	}
 
@@ -1068,7 +1080,7 @@ func TestNoCallModifiesCallerGIDs(t *testing.T) {
 	for _, tc := range unixCases() {
 		ref := slices.Clone(tc.req.Caller.GIDs)
 		_ = u.Check(tc.req)
-		if !slices.Equal(tc.req.Caller.GIDs, ref) || len(tc.req.Caller.GIDs) != len(ref) {
+		if !slices.Equal(tc.req.Caller.GIDs, ref) {
 			t.Errorf("%s: Unix().Check left the caller's GIDs %v, want %v (ADR 0014 §5, §11 P12)", tc.name, tc.req.Caller.GIDs, ref)
 		}
 	}
