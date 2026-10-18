@@ -13,6 +13,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"strata/internal/xdr"
 )
@@ -125,22 +126,62 @@ func (s *Server) Register(prog, vers uint32, h Handler) {
 	s.versions[prog] = append(s.versions[prog], vers)
 }
 
-// Serve accepts connections until the listener closes or ctx is cancelled.
+// Serve accepts connections until ctx is done or Accept fails with an error
+// that is not temporary, which it returns. A temporary error, such as running
+// out of file descriptors, is retried after the next wait in acceptDelay's
+// schedule, and a successful Accept resets the schedule. Serve returns nil
+// exactly when ctx is done (ADR 0016 §1).
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	go func() {
 		<-ctx.Done()
 		ln.Close()
 	}()
+	var wait time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Temporary() {
+				wait = acceptDelay(wait)
+				s.log.Warn("accept failed, retrying", "err", err, "delay", wait)
+				t := time.NewTimer(wait)
+				select {
+				case <-ctx.Done():
+					t.Stop()
+					return nil
+				case <-t.C:
+				}
+				continue
+			}
 			return err
 		}
+		wait = 0
 		go s.serveConn(ctx, conn)
 	}
+}
+
+// acceptDelay returns the wait before retrying a temporary Accept error, given
+// the previous wait, or 0 if the last Accept succeeded. It starts at 5 ms and
+// doubles up to 1 s, the schedule net/http's Server.Serve uses, so a server out
+// of file descriptors neither spins nor stops serving (ADR 0016 §1).
+func acceptDelay(prev time.Duration) time.Duration {
+	const (
+		first = 5 * time.Millisecond
+		limit = 1 * time.Second
+	)
+	if prev <= 0 {
+		return first
+	}
+	if prev >= limit/2 {
+		return limit
+	}
+	if d := 2 * prev; d > first {
+		return d
+	}
+	return first
 }
 
 func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
