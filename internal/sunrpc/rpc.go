@@ -48,9 +48,11 @@ const (
 const maxRecord = 8 << 20
 
 // Cred carries the AUTH_SYS identity a client asserts. NFS auth is advisory by
-// design: the client states who it is and the server trusts it. Because this
-// server listens on loopback only, that is the same trust boundary as the
-// local user account.
+// design: the client states who it is and the server believes it. This server
+// listens on loopback, which keeps other machines out but not other local
+// users: any local process can connect and claim any uid, root included, so
+// every local user can act as any user through it (README.md, "Honest
+// limitations"; ADR 0015).
 type Cred struct {
 	UID, GID uint32
 	GIDs     []uint32

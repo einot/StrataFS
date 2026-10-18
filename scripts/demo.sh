@@ -19,7 +19,7 @@ Mount point: $mountpoint
 
 Starting strata. In another terminal:
 
-  sudo mount -t nfs -o vers=3,tcp,port=$port,mountport=$port,noresvport,nolocks,locallocks 127.0.0.1:/ $mountpoint
+  sudo mount -t nfs -o vers=3,tcp,port=$port,mountport=$port,noresvport,nosuid,nolocks,locallocks 127.0.0.1:/ $mountpoint
 
 and when you are done:
 

@@ -9,7 +9,8 @@ mkdir -p "$mountpoint"
 
 # strata serves NFS but not the separate NLM lock protocol, so locking stays
 # local. The option is spelled differently on each platform.
-opts="vers=3,tcp,port=$port,mountport=$port,noresvport,hard"
+# nosuid: any local user can reach the server as any uid (README, Honest limitations).
+opts="vers=3,tcp,port=$port,mountport=$port,noresvport,hard,nosuid"
 if [[ "$(uname -s)" == "Darwin" ]]; then
   opts="$opts,nolocks,locallocks"
 else
