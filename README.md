@@ -6,7 +6,7 @@ no FUSE, no admin install.
 
 ```
 $ strata -bucket s3://my-filesystem -endpoint https://objectscale.example.net -path-style
-$ sudo mount -t nfs -o vers=3,tcp,port=20490,mountport=20490,noresvport,nosuid,nolocks 127.0.0.1:/ /tmp/strata-mnt
+$ sudo mount -t nfs -o vers=3,tcp,port=20490,mountport=20490,noresvport,nosuid,nodev,nolocks 127.0.0.1:/ /tmp/strata-mnt
 $ cp ~/big-video.mov /tmp/strata-mnt/
 ```
 
@@ -110,12 +110,14 @@ It prints the exact mount command. In another terminal:
 
 ```bash
 mkdir -p /tmp/strata-mnt
-sudo mount -t nfs -o vers=3,tcp,port=20490,mountport=20490,noresvport,nosuid,nolocks,locallocks 127.0.0.1:/ /tmp/strata-mnt
+sudo mount -t nfs -o vers=3,tcp,port=20490,mountport=20490,noresvport,nosuid,nodev,nolocks,locallocks 127.0.0.1:/ /tmp/strata-mnt
 ```
 
-`mount` needs root on both macOS and Linux; the server itself does not, and
-binds to loopback only, which keeps other machines out but not the other users
-of this one (see *Honest limitations*).
+`mount` needs root on both macOS and Linux; the server itself does not, and by
+default binds to loopback (`-listen` defaults to `127.0.0.1:20490`), which keeps
+other machines out but not the other users of this one; a `-listen` address off
+loopback drops even that and exposes the server to every host that can reach the
+port (see *Honest limitations*).
 
 Against AWS S3:
 
@@ -251,15 +253,23 @@ own permissions say, which looks alarming but has nothing to do with the mount.
 This is a proof of concept. What that means concretely:
 
 - **Any local user can act as any user, root included.** strata believes the
-  uid and gid a client puts in its AUTH_SYS credential, as NFSv3 servers do,
-  and its loopback port is open to every process on the machine, so any local
-  user who speaks the protocol can read, change or delete anything in the
-  filesystem, whatever its permissions say. The mount commands above carry
-  `nosuid`, so that a set-user-ID or set-group-ID program made that way does
-  not run with its owner's or group's rights through the mount; a mount
-  without it can give any local user root. `nosuid` does not stop the access
-  itself: run strata only where every local user may be trusted with the
-  whole filesystem ([ADR 0015](docs/adr/0015-every-mount-command-carries-nosuid.md)).
+  uid and gid a client puts in its AUTH_SYS credential, as NFSv3 servers do.
+  Unlike a default Linux `nfsd` export — which squashes a client's root to an
+  anonymous id and, through its `secure` export option, requires requests to
+  come from a reserved port — strata neither squashes root nor requires a
+  reserved source port; every mount command above even passes `noresvport`.
+  Its loopback port is open to every process on the machine, so any local user
+  who speaks the protocol can read anything in the filesystem and,
+  unless strata runs with `-read-only`, change or delete it too, whatever its
+  permissions say. The mount commands above carry `nosuid` and `nodev`:
+  `nosuid` stops a set-user-ID or set-group-ID program made through the protocol
+  from running with its owner's or group's rights through the mount, and `nodev`
+  stops a device node from being opened through it — which matters most if the
+  mount outlives the server, since any local user can then bind its unprivileged
+  port and serve a planted set-id or device-node file. A mount without these can
+  give any local user root. Neither option stops the access itself: run strata
+  only where every local user may be trusted with the whole filesystem
+  ([ADR 0015](docs/adr/0015-every-mount-command-carries-nosuid.md)).
 - **The namespace is held in memory and written whole on every commit.** One GET
   gives a mounting client a consistent view and there is no log to replay, but a
   tree of millions of files would make commits expensive. This is the limitation
