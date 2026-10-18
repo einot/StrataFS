@@ -14,15 +14,16 @@ Every entry has a status (ADR 0013 §5):
 
 - **exists**: its Go name is in the code now, or, for a `Fixes` member, the fix
   it names is. Every entry marked exists was confirmed in the code at
-  `f102570`.
+  `f102570`, but for the V7 entries ADR 0014 adds, which were written with it,
+  before its code, and are confirmed at the commit that merges it.
 - **reserved**, with the ADR named: it is not in the code, and that ADR
   introduces it. A name only the specs use, with no Go name, such as an
   action, a ghost, a property or a string a variable holds, is reserved by
   ADR 0013, which introduces it, unless its entry names another ADR.
 
 A status given to a group, a list or a section holds for every entry in it.
-ADR 0014, the lifecycle ADR, the load-race ADR and the ADR for #5 are not yet
-written; their entries hold the names those ADRs will use. The operators of
+The lifecycle ADR, the load-race ADR and the ADR for #5 are not yet written;
+their entries hold the names those ADRs will use. The operators of
 the standard modules, listed at the end, are not entries: they are the names
 rule 1 rules out.
 
@@ -62,10 +63,19 @@ variables (ADR 0013, Assumption 13). So `pruning[m]`'s three strings, which
 refine the bool `FS.pruning`, are no machine's states, and its row records
 them.
 
+## Go machines
+
+Every Go machine is an `internal/fsm` table (ADR 0014 §2, §3), named after the
+field that holds its state, as rule 3 names its TLA+ variable. That name is
+the `machine` value in log lines (ADR 0014 §9).
+
 ## V1. Mount mode
 
-Go type `mountMode`, field `FS.mode` (read without a lock; ADR 0014 §7);
-today `FS.readOnly` and `FS.diverged`. TLA+ `mode[m]`.
+Go types `mountMode` and `mountEvent`. Table `mountModes`, named `"mode"`,
+which is the `machine` value in log lines and the `Machine` of an
+`fsm.IllegalError`. Field `FS.mode`, an `*fsm.Atomic[mountMode, mountEvent]`,
+read without a lock (ADR 0014 §7); today `FS.readOnly` and `FS.diverged`.
+TLA+ `mode[m]`.
 
 | Name | Kind | Go | TLA+ | Meaning | Status |
 |---|---|---|---|---|---|
@@ -297,18 +307,26 @@ from its first access to the charge or to `of.bytes` until its last, and a
 - `Mutable`: V1; exists.
 - `ReadOnlyNeverWrites`: an invariant (V3); reserved, ADR 0013. The fence,
   `store.ReadOnly`, exists (ADR 0011 §3).
-- Reserved, ADR 0014:
+- Exists, `internal/policy/policy.go`, added with ADR 0014:
   - `Permits` = `policy.Permits(c, o, want)`;
-  - `UnixAllows(r)` = `policy.Unix().Check(r)` returns nil;
+  - `UnixAllows(r)` = `policy.Unix().Check(r) == nil`;
   - `AccessBits` = `policy.AccessBits`;
   - `OpRead`, `OpWrite`, `OpTruncate`, `OpChmod`, `OpChown`, `OpChgrp`,
     `OpSetTimes`, `OpLookup`, `OpReadDir`, `OpAddEntry`, `OpRemoveEntry`,
     `OpRename`;
   - `PermExec`, `PermWrite`, `PermRead`.
 
-  `UnixAllows` departs from rule 4, under which it would be `Check`; ADR 0014,
-  which introduces the policy, settles which of the two gives way.
-- `EffectAuthorized`: an optional FileData invariant; reserved, ADR 0014.
+  `UnixAllows` stands (ADR 0014 §10). Rule 4 gives the spec a Go predicate's
+  own name. This predicate is `policy.Unix().Check(r) == nil`: the `Check`
+  method that every `Policy` has, reached through a function that returns an
+  interface. So the name rule 4 would give it, `Check`, would name every
+  policy at once. Rule 4 is not changed for any other name.
+- `EffectAuthorized`: an optional FileData invariant; reserved, ADR 0014. It
+  says that every change a call makes to a file's bytes or size is one that
+  `UnixAllows` allows, for that call's caller, against the file's attributes
+  at the instant the change is made. Whether FileData states it, and how its
+  configurations use it, is that spec's business. Under #101 it fails today
+  (ADR 0014 §10).
 - Commit-protocol decisions, such as deleting a snapshot or writing the root
   unconditionally, are named by their ADRs, under rule 4.
 
