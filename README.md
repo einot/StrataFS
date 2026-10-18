@@ -6,7 +6,7 @@ no FUSE, no admin install.
 
 ```
 $ strata -bucket s3://my-filesystem -endpoint https://objectscale.example.net -path-style
-$ sudo mount -t nfs -o vers=3,tcp,port=20490,mountport=20490,noresvport,nolocks 127.0.0.1:/ /tmp/strata-mnt
+$ sudo mount -t nfs -o vers=3,tcp,port=20490,mountport=20490,noresvport,nosuid,nolocks 127.0.0.1:/ /tmp/strata-mnt
 $ cp ~/big-video.mov /tmp/strata-mnt/
 ```
 
@@ -110,11 +110,12 @@ It prints the exact mount command. In another terminal:
 
 ```bash
 mkdir -p /tmp/strata-mnt
-sudo mount -t nfs -o vers=3,tcp,port=20490,mountport=20490,noresvport,nolocks,locallocks 127.0.0.1:/ /tmp/strata-mnt
+sudo mount -t nfs -o vers=3,tcp,port=20490,mountport=20490,noresvport,nosuid,nolocks,locallocks 127.0.0.1:/ /tmp/strata-mnt
 ```
 
 `mount` needs root on both macOS and Linux; the server itself does not, and
-binds to loopback only.
+binds to loopback only, which keeps other machines out but not the other users
+of this one (see *Honest limitations*).
 
 Against AWS S3:
 
@@ -249,6 +250,16 @@ own permissions say, which looks alarming but has nothing to do with the mount.
 
 This is a proof of concept. What that means concretely:
 
+- **Any local user can act as any user, root included.** strata believes the
+  uid and gid a client puts in its AUTH_SYS credential, as NFSv3 servers do,
+  and its loopback port is open to every process on the machine, so any local
+  user who speaks the protocol can read, change or delete anything in the
+  filesystem, whatever its permissions say. The mount commands above carry
+  `nosuid`, so that a set-user-ID or set-group-ID program made that way does
+  not run with its owner's or group's rights through the mount; a mount
+  without it can give any local user root. `nosuid` does not stop the access
+  itself: run strata only where every local user may be trusted with the
+  whole filesystem ([ADR 0015](docs/adr/0015-every-mount-command-carries-nosuid.md)).
 - **The namespace is held in memory and written whole on every commit.** One GET
   gives a mounting client a consistent view and there is no log to replay, but a
   tree of millions of files would make commits expensive. This is the limitation

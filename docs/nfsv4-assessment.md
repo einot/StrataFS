@@ -464,7 +464,7 @@ for NFS versions 2 and 3 only"*, and with no version given *"the client tries
 version 4.2 first, then negotiates down"*. So:
 
 ```
-sudo mount -t nfs -o vers=4.2,port=20490 127.0.0.1:/ /tmp/strata-mnt
+sudo mount -t nfs -o vers=4.2,port=20490,nosuid 127.0.0.1:/ /tmp/strata-mnt
 ```
 
 No `mountport`, no `nolock`, no rpcbind, one port. The printed instructions get
