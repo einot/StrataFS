@@ -221,10 +221,11 @@ func acceptRequireNilAfterCancel(t *testing.T, served <-chan error) {
 // not close the listener itself: a Serve blocked in a pass-through Accept must
 // end on the cancel alone (ADR 0016 §1: "So `Serve` returns nil exactly when
 // `ctx` is done."), and one that ignores the cancel fails at the bound rather
-// than hanging. The listener is still closed in cleanup. The client
+// than hanging. This helper never touches the listener; the cleanup that
+// acceptListen registers closes it when the test ends. The client
 // connection is closed first so that the result does not depend on whether
 // Serve waits for its connections, which ADR 0016 leaves to #82.
-func acceptShutDownServing(t *testing.T, conn net.Conn, cancel context.CancelFunc, ln net.Listener, served <-chan error) {
+func acceptShutDownServing(t *testing.T, conn net.Conn, cancel context.CancelFunc, served <-chan error) {
 	t.Helper()
 	conn.Close()
 	cancel()
@@ -259,7 +260,7 @@ func TestServeSurvivesTemporaryAcceptErrors(t *testing.T) {
 		}
 	}
 
-	acceptShutDownServing(t, conn, cancel, ln, served)
+	acceptShutDownServing(t, conn, cancel, served)
 }
 
 // TestServeReturnsPermanentAcceptError is S2 (ADR 0016 §4): a non-temporary
@@ -307,7 +308,7 @@ func TestServeRetriesWrappedTemporaryError(t *testing.T) {
 	acceptRequireAnswer(t, conn, xid)
 	acceptRequireServing(t, served)
 
-	acceptShutDownServing(t, conn, cancel, ln, served)
+	acceptShutDownServing(t, conn, cancel, served)
 }
 
 // TestServeReturnsPermanentErrorAfterTemporaryOnes is S5 (ADR 0016 §4): two
