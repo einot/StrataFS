@@ -88,3 +88,4 @@ URL, and what was taken from it.
 | [0013](0013-data-integrity-protocols-are-specified-in-tla.md) | Data-integrity protocols are specified in TLA+ and checked by TLC | Accepted |
 | [0014](0014-state-machines-are-tables-and-permission-checks-are-policies.md) | State machines are explicit tables, and permission checks are policies | Accepted |
 | [0015](0015-every-mount-command-carries-nosuid.md) | Every mount command carries nosuid and nodev | Accepted |
+| [0016](0016-a-failed-accept-is-retried-or-ends-in-the-final-commit.md) | A failed Accept is retried or ends in the final commit | Accepted |
