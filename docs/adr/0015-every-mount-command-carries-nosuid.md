@@ -362,12 +362,23 @@ owner's decision 1 delegated, and say so.
    line, and the scripts keep the base command on one line, for this to hold.
 6. **Every `goos` other than darwin gets the Linux spelling.** That is today's
    behaviour.
-7. **Not breaking.** No running deployment needs to act to keep working: a
-   mount without `nosuid` or `nodev` keeps functioning, since strata serves no
-   set-id-honouring content and no device nodes, so adding the options changes
-   nothing a legitimate workload relies on, and remounting with them is for
-   safety. So the `CHANGES` entry carries no `BREAKING:` prefix, and the owner's
-   decision 2 is not relied on.
+7. **Not breaking.** No running deployment needs to act to keep working. The
+   change is to the commands strata prints, documents and scripts: strata itself
+   behaves as before, and no existing mount changes, so an existing mount keeps
+   working as it was, and remounting with the new options is for safety. That
+   narrower ground is what the conclusion rests on, not a claim that the options
+   cost nothing. `nodev` costs nothing legitimate, since no client can make a
+   device node through strata. `nosuid` does cost something: strata stores and
+   serves set-id bits (*Context*, links 2 and 3), so a set-id program kept in
+   strata no longer runs with its owner's or group's rights through a mount made
+   with the new commands, a remount through `scripts/mount.sh` included
+   (*Consequences*). A deployment that relies on that has to move such programs
+   off strata; mounting without `nosuid` keeps them working only by keeping the
+   route to root open. The `CHANGES` entry says so. So it carries no `BREAKING:`
+   prefix, and the owner's decision 2 is not relied on. This is a judgement
+   call: if a set-id program that stops running with its owner's rights at the
+   next mount through the shipped script counts as a deployment needing action
+   to keep working, the entry should take `BREAKING:` instead.
 8. **The printed text gets no explanation of `nosuid` or `nodev`; the README
    carries one.**
 9. **macOS accepting `nosuid`** rests on Apple's man pages, on `mount_nfs.c`,
