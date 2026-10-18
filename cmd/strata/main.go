@@ -289,10 +289,13 @@ func currentIDs() (uid, gid uint32) {
 // mountOptions returns the options of the mount command strata prints. Any
 // goos but "darwin" gets the Linux spelling of the lock options (ADR 0015 §2).
 func mountOptions(goos, port string, readOnly bool) []string {
-	// nosuid is there because any local user can reach the server as any uid,
-	// root included, so a set-id program made through it must not run with its
-	// owner's rights (README, "Honest limitations").
-	opts := []string{"vers=3", "tcp", "port=" + port, "mountport=" + port, "noresvport", "hard", "nosuid"}
+	// nosuid and nodev are there because any local user can reach the server as
+	// any uid, root included, and because the mount can outlive strata: once it
+	// exits, any local user can bind its unprivileged port and serve a set-id or
+	// device-node file. nosuid stops a set-id program from running with its
+	// owner's rights through the mount; nodev stops a device node from being
+	// opened through it (README, "Honest limitations"; ADR 0015).
+	opts := []string{"vers=3", "tcp", "port=" + port, "mountport=" + port, "noresvport", "hard", "nosuid", "nodev"}
 	// We serve NFS but not the separate NLM lock protocol, so the client must
 	// be told to keep locking local rather than trying to reach a lock manager
 	// that is not there. The option is spelled differently on each platform.
