@@ -2,6 +2,9 @@
 
 **Status:** Accepted
 **Date:** 2026-10-10
+**Revised:** 2026-10-18 — cross-reference only: since ADR 0016, `run` makes its
+final commit on a `Serve` error, so Assumption 7's first example no longer
+describes the code; `Crash`'s meaning is unchanged.
 **Issue:** #109
 
 ## Context
@@ -605,10 +608,10 @@ when TLC runs in §10, and the issue in *Context*.
    `context.Background`. Every store call that took effect stays, and a call
    in flight either took effect or never does. The mount comes back at
    `loadOrInit`'s first read: `New`'s checks of its `Config` make no store
-   call (ADR 0009 §2). "Any exit that skips the final commit" covers `run`
-   returning on a `Serve` error without its shutdown `Sync`, and the
-   committer's final `Sync` cut off because `run` returned first (ADR 0012
-   *Context*).
+   call (ADR 0009 §2). "Any exit that skips the final commit" covered `run`
+   returning on a `Serve` error without its shutdown `Sync` until ADR 0016,
+   and covers the committer's final `Sync` cut off because `run` returned
+   first (ADR 0012 *Context*).
 8. **Atomic listings** (§4). `S3.List` reads pages, `pruneSnapshots` reads
    1,000 keys a page, and `Local.List` walks a directory; none is one
    instant's view, and AWS promises only that a listing begun after a

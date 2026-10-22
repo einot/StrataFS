@@ -32,7 +32,10 @@ func main() {
 	}
 }
 
-func run() error {
+// shutdownTimeout bounds the final commit (ADR 0016 §3).
+const shutdownTimeout = 60 * time.Second
+
+func run() (err error) {
 	var (
 		bucketSpec = flag.String("bucket", "", "bucket holding the filesystem: s3://BUCKET or a local directory path")
 		endpoint   = flag.String("endpoint", "", "S3 endpoint URL (default: AWS for the given region)")
@@ -129,6 +132,19 @@ func run() error {
 		return err
 	}
 
+	// Every return from here on makes the final commit, a failure to listen or
+	// serve included, so nothing written before it is left uncommitted (ADR
+	// 0016 §2). It runs before stop, so a second signal stays caught until the
+	// commit is done.
+	serveCtx, endServing := context.WithCancel(ctx)
+	defer func() {
+		err = finalCommit(err, endServing, fs.Sync)
+		if err == nil {
+			epoch, inodes, hits, misses, _ := fs.Stats()
+			log.Info("clean shutdown", "epoch", epoch, "inodes", inodes, "cache_hits", hits, "cache_misses", misses)
+		}
+	}()
+
 	rpc := sunrpc.NewServer(log)
 	rpc.Register(nfs.ProgramNFS, nfs.VersionNFS, nfs.NewServer(fs, fs.WriteVerf(), log))
 	rpc.Register(nfs.ProgramMount, nfs.VersionMount, nfs.NewMountServer(fs, *export, log))
@@ -142,29 +158,38 @@ func run() error {
 	host, port, _ := net.SplitHostPort(ln.Addr().String())
 	printMountInstructions(host, port, *export, *readOnly)
 
-	go fs.Run(ctx)
+	go fs.Run(serveCtx)
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- rpc.Serve(ctx, ln) }()
+	go func() { errCh <- rpc.Serve(serveCtx, ln) }()
 
 	select {
 	case <-ctx.Done():
 		log.Info("shutting down, committing")
-	case err := <-errCh:
-		if err != nil {
-			return fmt.Errorf("serve: %w", err)
+		return nil
+	case e := <-errCh:
+		if e == nil {
+			log.Info("shutting down, committing")
+			return nil
 		}
+		log.Error("serving failed, committing", "err", e)
+		return fmt.Errorf("serve: %w", e)
 	}
+}
 
-	// The signal context is already cancelled, so the final commit needs its own.
-	shutCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+// finalCommit ends serving and then makes the final commit, whatever cause is,
+// and returns cause joined with the commit's failure, if any. The commit gets
+// a context of its own, bounded by shutdownTimeout, because the one serving
+// ran under is cancelled by then. It logs nothing, leaving that to run (ADR
+// 0016 §3).
+func finalCommit(cause error, endServing func(), sync func(context.Context) error) error {
+	endServing()
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := fs.Sync(shutCtx); err != nil {
-		return fmt.Errorf("final commit: %w", err)
+	if err := sync(ctx); err != nil {
+		return errors.Join(cause, fmt.Errorf("final commit: %w", err))
 	}
-	epoch, inodes, hits, misses, _ := fs.Stats()
-	log.Info("clean shutdown", "epoch", epoch, "inodes", inodes, "cache_hits", hits, "cache_misses", misses)
-	return nil
+	return errors.Join(cause)
 }
 
 // maxDirtyBytes converts -max-dirty, in MiB, to Config.MaxDirtyBytes.
