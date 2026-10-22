@@ -1,0 +1,19 @@
+#module	config	tier	expect	property	exit	log	shows
+CommitProtocol	CommitProtocol	smoke	MustHold	-	-	-	one writer from an empty bucket, with failed swaps, failed puts and a crash, and no pruning
+CommitProtocol	CommitProtocol_PruneSingle	smoke	MustHold	-	-	-	one writer pruning at retention 2 with a crash and no failed swap; the root's snapshot is never deleted
+CommitProtocol	CommitProtocol_Follower	smoke	MustHold	-	-	-	a writer and a read-only follower that a stray path dirties; the follower writes nothing
+CommitProtocol	CommitProtocol_UnconditionalSingle	smoke	MustHold	-	-	-	one writer on a backend with no conditional writes; the fallback is safe for a single writer
+CommitProtocol	CommitProtocol_InitRace	smoke	MustHold	-	-	-	two first mounts; one creates the filesystem and the other diverges
+CommitProtocol	CommitProtocol_TwoWriters	smoke	MustHold	-	-	-	two writers that loaded one root; the loser diverges and nothing acknowledged is lost
+CommitProtocol	CommitProtocol_NoIfNoneMatch	smoke	MustFail	NoLostAck	-	-	removes IfNoneMatchInit from CommitProtocol_InitRace; the second init overwrites the first
+CommitProtocol	CommitProtocol_NoNonce	smoke	MustFail	NoLostAck	-	-	removes Nonce from CommitProtocol_TwoWriters; the loser's snapshot overwrites the winner's
+CommitProtocol	CommitProtocol_SnapshotBeforeChunks	smoke	MustFail	ChunksBeforeRoot	-	-	removes ChunksFirst from CommitProtocol; the root's snapshot names an unstored chunk
+CommitProtocol	CommitProtocol_RootBeforeSnapshot	smoke	MustFail	RootSnapshotExists	-	-	removes ChunksFirst from CommitProtocol; the root names an unstored snapshot
+CommitProtocol	CommitProtocol_NoReadOnlyFence	smoke	MustFail	ReadOnlyNeverWrites	-	-	removes ReadOnlyFence from CommitProtocol_Follower; a dirtied read-only mount writes
+CommitProtocol	CommitProtocol_PruneOrphan	smoke	MustFail	RootSnapshotExists	-	-	#88, route 1: a failed swap's orphan
+CommitProtocol	CommitProtocol_PruneTwoWriters	smoke	MustFail	RootSnapshotExists	-	-	#88, route 2: a losing writer's orphan
+CommitProtocol	CommitProtocol_PruneOverlap	smoke	MustFail	RootSnapshotExists	-	-	#88, route 3: a listing overlapping two commits
+CommitProtocol	CommitProtocol_LoadRace	smoke	MustFail	NoLostAck	-	-	#89: the ETag is taken after another writer's swap
+CommitProtocol	CommitProtocol_Fallback	smoke	MustFail	NoLostAck	-	-	#91: one 501 becomes a blind overwrite
+CommitProtocol	CommitProtocol_SelfDiverge	smoke	MustFail	NoSelfDivergence	-	-	#5: a lost reply
+CommitProtocol	CommitProtocol_SelfDiverge409	smoke	MustFail	NoSelfDivergence	-	-	#5: a 409 while the condition held
