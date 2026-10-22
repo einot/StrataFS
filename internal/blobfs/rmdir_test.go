@@ -785,6 +785,7 @@ func l5Walk(t *testing.T, fs *FS, h vfs.Handle, d *l5Obj, where string, out map[
 		if attr.Type != o.kind.fileType() {
 			t.Fatalf("%s: Lookup(%s) gives type %d, want a %s", where, o.path(), attr.Type, o.kind)
 		}
+		out[o] = ch
 		if o.kind == l5Dir {
 			l5Walk(t, fs, ch, o, where, out)
 		}
