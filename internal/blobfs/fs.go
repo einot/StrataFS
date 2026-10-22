@@ -786,13 +786,9 @@ func (f *FS) unlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name stri
 	}
 
 	delete(d.Entries, name)
-	if n.isDir() {
-		d.NLink--
-	}
 	d.touchM(time.Now())
 
-	n.NLink--
-	if n.NLink == 0 {
+	if relink(n, d, nil) {
 		// The inode is gone from the namespace. Its chunks stay in the data
 		// bucket: they are content-addressed and may be shared with other
 		// files or other people's trees, so reclaiming them is a garbage
@@ -802,6 +798,31 @@ func (f *FS) unlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name stri
 	}
 	f.dirty = true
 	return nil
+}
+
+// relink adjusts link counts as n's name moves from directory from to
+// directory to, or leaves from when to is nil, and reports whether n has left
+// the namespace (ADR 0017 §1, §2; ADR 0014 §8). A directory's only name is its
+// entry in its parent, so a directory leaves with that name whatever its count
+// says. Rmdir and Rename refuse a directory with entries, so what leaves takes
+// nothing with it. Caller must hold mu for writing.
+func relink(n, from, to *inode) (gone bool) {
+	if to == nil {
+		if n.isDir() {
+			from.NLink--
+			n.NLink = 0
+			return true
+		}
+		if n.NLink > 0 {
+			n.NLink--
+		}
+		return n.NLink == 0
+	}
+	if n.isDir() && from.ID != to.ID {
+		from.NLink--
+		to.NLink++
+	}
+	return false
 }
 
 // dropOpen removes id's buffered writes from f.open, first releasing their
@@ -884,11 +905,7 @@ func (f *FS) Rename(ctx context.Context, c vfs.Caller, fromDir vfs.Handle, fromN
 			case victim.isDir() && len(victim.Entries) > 0:
 				return vfs.ErrNotEmpty
 			}
-			victim.NLink--
-			if victim.isDir() {
-				dst.NLink--
-			}
-			if victim.NLink == 0 {
+			if relink(victim, dst, nil) {
 				delete(f.inodes, victimID)
 				f.dropOpen(victimID)
 			}
@@ -897,10 +914,7 @@ func (f *FS) Rename(ctx context.Context, c vfs.Caller, fromDir vfs.Handle, fromN
 
 	delete(src.Entries, fromName)
 	dst.Entries[toName] = id
-	if moving.isDir() && src.ID != dst.ID {
-		src.NLink--
-		dst.NLink++
-	}
+	relink(moving, src, dst)
 	moving.Parent = dst.ID
 	moving.touchC(time.Now())
 	src.touchM(time.Now())
