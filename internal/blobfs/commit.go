@@ -21,6 +21,8 @@ import (
 // root pointer holds no filesystem: a writable mount creates an empty one
 // there, and a read-only mount refuses it, having written nothing (ADR 0011
 // §1, §2).
+//
+// TLA+: docs/tla/CommitProtocol.tla GetRoot, RefuseEmpty, InitEmpty, HeadRoot, GetSnapshot
 func (f *FS) loadOrInit(ctx context.Context) error {
 	raw, err := f.store.Get(ctx, rootKey)
 	if errors.Is(err, store.ErrNotFound) {
@@ -88,6 +90,8 @@ func (f *FS) loadOrInit(ctx context.Context) error {
 // initEmpty creates a brand-new filesystem: a single root directory, committed
 // with If-None-Match so that two processes racing to initialize the same bucket
 // cannot both win. Only a writable mount reaches it (ADR 0011 §2).
+//
+// TLA+: docs/tla/CommitProtocol.tla InitEmpty
 func (f *FS) initEmpty(ctx context.Context) error {
 	now := time.Now()
 	root := &inode{
@@ -137,6 +141,8 @@ func fsidFor(name string) uint64 {
 // so a truncate is in the commit whole if it returned before the phase began
 // and not at all otherwise (§1, Rule D). An error from either pass commits
 // nothing.
+//
+// TLA+: docs/tla/CommitProtocol.tla Flush
 func (f *FS) Sync(ctx context.Context) error {
 	// Buffered file data must be stored before the namespace that
 	// references it. This happens before mu is taken because flushing acquires
@@ -171,6 +177,8 @@ func (f *FS) Sync(ctx context.Context) error {
 // C; §4). Sync's settle pass makes that impossible, so a refusal means a path
 // changed a chunk list without the commit gate, and is logged as the bug it is
 // rather than committed as a silent exposure of removed bytes.
+//
+// TLA+: docs/tla/CommitProtocol.tla PutSnapshot, SwapOK, SwapReplyLost, SwapFailed, SwapConflict, SwapUnsupported, FallbackPut, FallbackHead
 func (f *FS) commitLocked(ctx context.Context) error {
 	if f.diverged.Load() {
 		return errors.New("filesystem diverged: another writer committed to this bucket; remount to continue")
@@ -264,6 +272,8 @@ func (f *FS) commitLocked(ctx context.Context) error {
 
 // schedulePrune starts a background pass that deletes superseded snapshots,
 // unless one is already running. Caller must hold mu.
+//
+// TLA+: docs/tla/CommitProtocol.tla StartPrune, PruneEnd
 func (f *FS) schedulePrune(current uint64) {
 	if f.retention == 0 || f.pruning {
 		return
@@ -287,6 +297,8 @@ func (f *FS) schedulePrune(current uint64) {
 // epoch order and the newest entries are simply the last ones listed. The
 // snapshot the root pointer currently names is never a candidate: it is inside
 // the retention window by construction, and the check below is belt and braces.
+//
+// TLA+: docs/tla/CommitProtocol.tla PruneList, PruneDelete
 func (f *FS) pruneSnapshots(ctx context.Context, current uint64) error {
 	var all []store.ObjectInfo
 	after := ""
@@ -346,6 +358,7 @@ func encodeSnapshot(s *snapshot) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// TLA+: docs/tla/CommitProtocol.tla GetSnapshot
 func decodeSnapshot(b []byte) (*snapshot, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(b))
 	if err != nil {

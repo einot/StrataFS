@@ -59,10 +59,13 @@ type Store interface {
 // every write path remembering to check a flag.
 type ReadOnly struct{ Store }
 
+// TLA+: docs/tla/CommitProtocol.tla PutSnapshot, FallbackPut
 func (r ReadOnly) Put(ctx context.Context, key string, data []byte) error {
 	return ErrUnsupported
 }
 func (r ReadOnly) Delete(ctx context.Context, key string) error { return ErrUnsupported }
+
+// TLA+: docs/tla/CommitProtocol.tla SwapUnsupported
 func (r ReadOnly) PutIfMatch(ctx context.Context, key string, data []byte, etag string) (string, error) {
 	return "", ErrUnsupported
 }

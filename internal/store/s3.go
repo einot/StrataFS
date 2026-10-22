@@ -162,6 +162,8 @@ type s3Error struct {
 }
 
 // errorFor turns a non-2xx response into a typed error.
+//
+// TLA+: docs/tla/CommitProtocol.tla SwapReplyLost, SwapFailed, SwapConflict, SwapUnsupported
 func errorFor(method, key string, resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	resp.Body.Close()
@@ -262,6 +264,7 @@ func (s *S3) Put(ctx context.Context, key string, data []byte) error {
 	return nil
 }
 
+// TLA+: docs/tla/CommitProtocol.tla SwapOK, SwapReplyLost, SwapFailed
 func (s *S3) PutIfMatch(ctx context.Context, key string, data []byte, etag string) (string, error) {
 	if data == nil {
 		data = []byte{}

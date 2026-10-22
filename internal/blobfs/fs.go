@@ -211,6 +211,8 @@ var _ vfs.FS = (*FS)(nil)
 // New opens the filesystem in the bucket. Only a writable mount creates one in
 // a bucket that holds none; a read-only New refuses such a bucket instead
 // (ADR 0011 §2).
+//
+// TLA+: docs/tla/CommitProtocol.tla Init, Crash
 func New(ctx context.Context, cfg Config) (*FS, error) {
 	if cfg.Store == nil {
 		return nil, errors.New("blobfs: a store is required")
@@ -418,6 +420,8 @@ func inGroup(c vfs.Caller, gid uint32) bool {
 }
 
 // mutable reports whether the mount accepts changes at all.
+//
+// TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) mutable() error {
 	if f.readOnly {
 		return vfs.ErrROFS
@@ -454,6 +458,7 @@ func (f *FS) GetAttr(ctx context.Context, h vfs.Handle) (vfs.Attr, error) {
 	return n.attr(f.fsid), nil
 }
 
+// TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) SetAttr(ctx context.Context, c vfs.Caller, h vfs.Handle, sa vfs.SetAttr) (vfs.Attr, error) {
 	if err := f.mutable(); err != nil {
 		return vfs.Attr{}, err
@@ -651,6 +656,8 @@ func (f *FS) allocInode(t vfs.FileType, mode uint32, c vfs.Caller, parent uint64
 }
 
 // createEntry is the shared body of CREATE, MKDIR and SYMLINK.
+//
+// TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) createEntry(ctx context.Context, c vfs.Caller, dir vfs.Handle, name string, t vfs.FileType, sa vfs.SetAttr, target string, excl bool) (vfs.Handle, vfs.Attr, error) {
 	if err := f.mutable(); err != nil {
 		return nil, vfs.Attr{}, err
@@ -745,6 +752,8 @@ func (f *FS) Symlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name, ta
 }
 
 // unlink removes a name, requiring the target to be (or not be) a directory.
+//
+// TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) unlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name string, wantDir bool) error {
 	if err := f.mutable(); err != nil {
 		return err
@@ -847,6 +856,7 @@ func (f *FS) Rmdir(ctx context.Context, c vfs.Caller, dir vfs.Handle, name strin
 	return f.unlink(ctx, c, dir, name, true)
 }
 
+// TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) Rename(ctx context.Context, c vfs.Caller, fromDir vfs.Handle, fromName string, toDir vfs.Handle, toName string) error {
 	if err := f.mutable(); err != nil {
 		return err
@@ -1135,6 +1145,8 @@ func (f *FS) isKnown(hash string) bool {
 // The cache stores its own copy of what is uploaded (ADR 0004 §1), so data
 // stays the caller's. That matters because a flush that fails later leaves
 // data in of.dirty, where the next write changes it in place.
+//
+// TLA+: docs/tla/CommitProtocol.tla Flush
 func (f *FS) putChunk(ctx context.Context, data []byte) (chunkRef, error) {
 	sum := sha256.Sum256(data)
 	hash := hex.EncodeToString(sum[:])
@@ -1468,6 +1480,8 @@ func (f *FS) Write(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, 
 // Its caller must first clamp data as Write does, so that off + len(data) is
 // at most maxFileSize: off + written is computed unchecked below (ADR 0007
 // §4, #66).
+//
+// TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off uint64, data []byte) (int, error) {
 	of.mu.Lock()
 	defer of.mu.Unlock()
@@ -1608,6 +1622,8 @@ func (f *FS) syncFileAndNamespace(ctx context.Context, id uint64) error {
 // fetching one of its chunks can hold across store calls, and for mu, which a
 // commit holds across its store calls (#43; ADR 0012 §7). A cut into a stored
 // chunk marks the file unsettled for a Sync's settle pass to find (§3).
+//
+// TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint64) error {
 	// A size above the limit is refused before anything is looked up or
 	// locked, even one that would shrink a file an earlier build left larger;
@@ -1762,6 +1778,8 @@ func (f *FS) commitFile(ctx context.Context, id uint64) error {
 // A flush that succeeds clears the file's unsettled mark, including one that
 // returns early with nothing to apply; one that fails leaves it set (ADR 0012
 // §3; ADR 0006 §5).
+//
+// TLA+: docs/tla/CommitProtocol.tla Flush
 func (f *FS) flushOpen(ctx context.Context, id uint64, of *openFile) error {
 	of.mu.Lock()
 	defer of.mu.Unlock()
@@ -1890,6 +1908,8 @@ func (f *FS) dropIfGone(id uint64, of *openFile) {
 }
 
 // flushAll uploads every inode's buffered data. It must be called without mu.
+//
+// TLA+: docs/tla/CommitProtocol.tla Flush
 func (f *FS) flushAll(ctx context.Context) error {
 	f.mu.RLock()
 	ids := make([]uint64, 0, len(f.open))
@@ -1914,6 +1934,8 @@ func (f *FS) flushAll(ctx context.Context) error {
 // Its caller must hold the commit gate for writing and no other lock, so that
 // no truncate can mark a file once the list is taken, and a pass that succeeds
 // leaves none marked (§3, §5).
+//
+// TLA+: docs/tla/CommitProtocol.tla Flush
 func (f *FS) settleAll(ctx context.Context) error {
 	var (
 		ids   []uint64
