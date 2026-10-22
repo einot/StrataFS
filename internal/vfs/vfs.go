@@ -212,6 +212,16 @@ type FS interface {
 	Mkdir(ctx context.Context, c Caller, dir Handle, name string, sa SetAttr) (Handle, Attr, error)
 	Symlink(ctx context.Context, c Caller, dir Handle, name, target string, sa SetAttr) (Handle, Attr, error)
 	ReadLink(ctx context.Context, h Handle) (string, error)
+
+	// Remove, Rmdir and Rename each take a name away: Remove and Rmdir the
+	// one they are given, and Rename the target name it replaces, if one
+	// exists. An object left with no name is gone, and a directory always
+	// is once its name goes, since it has no other. From then on every
+	// method given the object's handle fails, with ErrStale unless it
+	// refuses the call for another reason first, except that a Write of no
+	// bytes may succeed without looking at the handle. A Pinner can hold an
+	// object back from going; nothing else does. The object Rename moves
+	// keeps its handle.
 	Remove(ctx context.Context, c Caller, dir Handle, name string) error
 	Rmdir(ctx context.Context, c Caller, dir Handle, name string) error
 	Rename(ctx context.Context, c Caller, fromDir Handle, fromName string, toDir Handle, toName string) error
