@@ -4,10 +4,11 @@
 \* crashes. ADR 0013 section 1 names this module and what it must show: that
 \* no acknowledged commit is lost (NoLostAck); that the root pointer never
 \* names a snapshot or a chunk the bucket does not hold (RootSnapshotExists,
-\* ChunksBeforeRoot); that a read-only mount writes nothing
-\* (ReadOnlyNeverWrites, ADR 0011); and that a mount diverges only after
-\* another writer (NoSelfDivergence). docs/tla/trace.tsv gives the Go symbols
-\* that perform each action, and docs/vocabulary.md, V3, gives every name.
+\* ChunksBeforeRoot); that a read-only mount writes nothing, read as ADR 0011
+\* reads it (ReadOnlyNeverWrites, Assumption J16); and that a mount diverges
+\* only after another writer (NoSelfDivergence). docs/tla/trace.tsv gives the
+\* Go symbols that perform each action, and docs/vocabulary.md, V3, gives
+\* every name.
 \*
 \* Checked against 043927f
 \*
@@ -18,8 +19,10 @@
 \*   - Commits: chunks, then the snapshot, then a conditional swap of the
 \*     root pointer, with five store outcomes (SwapOK, SwapReplyLost,
 \*     SwapFailed, SwapConflict, SwapUnsupported) and the fallback after a
-\*     501 (FallbackPut, FallbackHead).
-\*   - Divergence.
+\*     501 (FallbackPut, FallbackHead). The snapshot Put and the fallback's
+\*     Put may each fail without taking effect (PutFailed), or take effect
+\*     and fail (SnapshotReplyLost, FallbackReplyLost).
+\*   - Divergence (Diverge).
 \*   - Each mount's prune passes: StartPrune, PruneList, PruneDelete and
 \*     PruneEnd.
 \*   - Crashes.
@@ -35,8 +38,9 @@
 \*   - Failed List and Delete calls (Assumption J14).
 \*   - A swap reply with no ETag (#103), and a Head failing after the
 \*     fallback's Put.
-\*   - One call taking effect more than once through the retries of S3.do
-\*     (ADR 0013 Assumption 5).
+\*   - A Put or a Delete taking effect more than once through the retries
+\*     of S3.do, with other calls in between: here a call takes effect at
+\*     most once, at its own step (ADR 0013 Assumption 5).
 \*   - Two processes on one Local directory.
 \*   - Requests that take effect after they return, and timeouts.
 \*   - Paged listings: a listing is exact below 1,000 keys (R9).
@@ -66,9 +70,15 @@
 \*        and every configuration stays far below that.
 \*   R10. PruneEnd stays a step of its own, because it does not commute with
 \*        schedulePrune's read of FS.pruning.
-\*   R11. A read-only mount's conflict leaves mode[m] at "ReadOnly". At
-\*        043927f mutable() checks FS.readOnly first, and with ReadOnlyFence
-\*        the case cannot be reached.
+\*   R11. A conflict makes a read-only mount "Diverged" too (Diverge). At
+\*        043927f commitLocked sets FS.diverged on any store.ErrPrecondition,
+\*        whatever FS.readOnly is, and then refuses every commit, and
+\*        mutable() refuses a read-only mount either way. Only a
+\*        configuration without ReadOnlyFence reaches the case, since
+\*        store.ReadOnly answers every write of a fenced mount
+\*        store.ErrUnsupported, never store.ErrPrecondition. ADR 0014
+\*        section 7 gives "ReadOnly" no edge, so the PR that converts the
+\*        mode revises this.
 \*
 \* Assumptions (judgement calls, not requirements)
 \*   J1.  Commit ids are lineage ids, [writer, epoch]. They are unique,
@@ -81,11 +91,18 @@
 \*   J3.  An ETag is [key, writer]. With Nonce it is fresh, since every key
 \*        is (ADR 0013 section 4 and Assumption 6). Without Nonce, two
 \*        writes of the root pointer share an ETag only when one mount writes
-\*        one key twice. That needs a crash and an unconditional write, and
-\*        no configuration that removes Nonce allows either.
+\*        one key twice, which takes an unconditional write: the fallback's
+\*        Put, or initEmpty's swap without IfNoneMatchInit (J8). The one
+\*        configuration that removes Nonce, CommitProtocol_NoNonce, is
+\*        "Conditional" and keeps IfNoneMatchInit, so it makes neither.
 \*   J4.  The fault meanings given with the constants below. The 409
 \*        over-approximates the 409 Conflict that AWS documents for
 \*        concurrent requests, as ADR 0013 Assumption 5 asks.
+\*        SnapshotReplyLost and FallbackReplyLost are S3.Put's: an attempt
+\*        can take effect and the call still return an error, since its
+\*        reply can be lost and S3.do sends it again after a transport
+\*        error, a 5xx or a 429. Local.Put cannot, since its last step is
+\*        the rename that applies it.
 \*   J5.  Start = "Loaded" is a reachable state, used to isolate a defect
 \*        without assuming a fix that does not exist. Its commit was made
 \*        outside the model and is no mount's acknowledgement, so acked
@@ -99,9 +116,20 @@
 \*   J9.  Crash also restarts a mount whose New failed, and every restart
 \*        counts against MaxCrashes.
 \*   J10. Deletes run in ascending key order, as pruneSnapshots sorts them.
-\*   J11. The MustHold envelope is a reading, not a measurement: pruning is
-\*        shown safe only without failed swaps and with Retention at least 2
-\*        (CommitProtocol_PruneSingle).
+\*   J11. The MustHold envelope is a reading, not a measurement. Pruning is
+\*        shown safe only for one writer at Retention 2 with no fault at
+\*        all, within the bounds of CommitProtocol_PruneSingle. A fault that
+\*        leaves a snapshot the root pointer does not name sorting above the
+\*        one it names reaches #88: a failed swap's orphan by route 1
+\*        (CommitProtocol_PruneOrphan); the orphan of a snapshot Put that
+\*        takes effect and fails by route 4
+\*        (CommitProtocol_PruneSnapshotReply); and a root write that takes
+\*        effect and fails, whose retry sorts above it, by route 5
+\*        (CommitProtocol_PruneSwapReply, CommitProtocol_PruneFallbackReply).
+\*        Route 4 also reaches #88 at Retention 2 within PruneSingle's other
+\*        bounds, with route 3's unswapped next attempt as the second key
+\*        above the root's (a route read, not run), so a fix for #88 cannot
+\*        rest on a Retention above 1.
 \*   J12. The configurations' bounds and tiers are judgement calls.
 \*   J13. Neither rootKnowledge nor AtomicLoad is modelled. Their ADRs add
 \*        them.
@@ -116,10 +144,20 @@
 \*        also ran through #89's window. No bound removes them, since the
 \*        mount whose pass it is can always commit at epoch 2. The
 \*        constraint assumes no fix: it only stops TLC taking a step from a
-\*        state that breaks it. Once the configuration flips, it leaves
-\*        unchecked a pass that overlaps its own mount's commit and another
-\*        mount's attempt at once, which no configuration covers, so the ADR
-\*        for #88's fix adds one.
+\*        state that breaks it. CommitProtocol_PruneOverlapTwoWriters has the
+\*        same constants and invariants and no constraint, so it checks what
+\*        the constraint cuts, a pass that overlaps its own mount's commit
+\*        and another mount's attempt at once. Both name #88 and flip
+\*        together: once a MustHold configuration sets a constraint, the
+\*        runner fails the gate unless such a twin is MustHold too
+\*        (docs/tla/README.md, Configuration files).
+\*   J16. ReadOnlyNeverWrites is about calls, as ADR 0011 sections 3 and 4
+\*        put "writes nothing": no Put, PutIfMatch or Delete of a read-only
+\*        mount reaches the bucket. A call that reaches it breaks the
+\*        property whether or not it changes an object, and a call that
+\*        store.ReadOnly refuses reaches nothing. Every object write is such
+\*        a call, so it also implies that no object holds a read-only
+\*        mount's write.
 
 EXTENDS Naturals, FiniteSets
 
@@ -148,9 +186,16 @@ CONSTANTS
 \*     while its condition holds; errorFor maps it to ErrPrecondition.
 \*   Fault "PutFailed": a snapshot Put, with the chunk uploads folded before
 \*     it, or the fallback's root Put, is not applied.
+\*   Fault "SnapshotReplyLost": a snapshot Put is applied, with the chunk
+\*     uploads folded before it, and an error is returned: an attempt took
+\*     effect, but its reply was lost, or S3.do's later attempts failed, or
+\*     the context ended.
+\*   Fault "FallbackReplyLost": the fallback's root Put is applied, and an
+\*     error is returned, in the same ways.
 
 AllFixes  == {"IfNoneMatchInit", "Nonce", "ChunksFirst", "ReadOnlyFence"}
-AllFaults == {"SwapReplyLost", "SwapFailed", "SwapConflict409", "PutFailed"}
+AllFaults == {"SwapReplyLost", "SwapFailed", "SwapConflict409", "PutFailed",
+              "SnapshotReplyLost", "FallbackReplyLost"}
 
 ASSUME
   /\ Mounts # {}
@@ -189,6 +234,7 @@ VARIABLES
   acked,         \* commits whose commitLocked returned nil
   used,          \* snapshot keys a write that took effect has named
   overtaken,     \* another mount wrote the root since m last set rootETag[m]
+  roWrites,      \* read-only mounts a write call of which reached the bucket
   crashes        \* Crash steps taken so far
 
 -----------------------------------------------------------------------------
@@ -283,8 +329,13 @@ SwapCondition(m, k) ==
 BucketVars == <<bucketRoot, snapshots, chunks>>
 MountVars  == <<pc, mode, rootETag, epoch, nsDirty, attempt, rpSnapshot, base>>
 PruneVars  == <<pruning, pruneCurrent, pruneDoomed>>
-GhostVars  == <<acked, used, overtaken>>
+GhostVars  == <<acked, used, overtaken, roWrites>>
 Vars       == <<BucketVars, MountVars, PruneVars, GhostVars, crashes>>
+
+\* A Put, PutIfMatch or Delete call of m's reaches the bucket, whether or not
+\* it changes anything (Assumption J16).
+WriteCall(m) ==
+  roWrites' = IF m \in ReadOnlyMounts THEN roWrites \cup {m} ELSE roWrites
 
 \* m writes the root pointer, naming k.
 WriteRoot(m, k) ==
@@ -299,6 +350,22 @@ CommitFails(m, k) ==
 \* The chunk of m's commit at k's epoch is stored (Assumption J2).
 FlushEffect(m, k) ==
   chunks' = IF k.epoch = 1 THEN chunks ELSE chunks \cup {CommitIdOf(m, k)}
+
+\* m's snapshot Put of k takes effect: the snapshot holds m's namespace and
+\* its commit at k's epoch, and with ChunksFirst the chunk uploads folded
+\* before it took effect too (R6).
+SnapshotEffect(m, k) ==
+  /\ snapshots' = [x \in DOMAIN snapshots \cup {k} |->
+                     IF x = k THEN base[m] \cup {CommitIdOf(m, k)}
+                              ELSE snapshots[x]]
+  /\ used' = used \cup {k}
+  /\ IF "ChunksFirst" \in Fixes THEN FlushEffect(m, k) ELSE UNCHANGED chunks
+
+\* Diverge: the event of docs/vocabulary.md, V1, which at 043927f is
+\* commitLocked's diverged.Store(true) on store.ErrPrecondition. It makes a
+\* read-only mount "Diverged" too (R11).
+\* Go (trace.tsv): FS.commitLocked.
+Diverge(m) == mode' = [mode EXCEPT ![m] = "Diverged"]
 
 \* StartPrune: schedulePrune, in the hold of FS.mu of the success path that
 \* calls it (R8): unless pruning is off or a pass is running, a pass starts
@@ -327,7 +394,7 @@ Committed(m, k, et) ==
 
 \* FallbackPut: commitLocked's unconditional Put of the root pointer after
 \* store.ErrUnsupported, merged with SwapUnsupported (R7).
-\* Go (trace.tsv): FS.commitLocked; ReadOnly.Put.
+\* Go (trace.tsv): FS.commitLocked; ReadOnly.Put; S3.Put.
 FallbackPut(m, k) ==
   /\ WriteRoot(m, k)
   /\ overtaken' = [x \in Mounts |-> IF x = m THEN overtaken[m] ELSE TRUE]
@@ -371,6 +438,7 @@ TypeOK ==
        /\ overtaken[m] \in BOOLEAN
   /\ acked \subseteq CommitIds
   /\ used \subseteq Keys
+  /\ roWrites \subseteq ReadOnlyMounts
   /\ crashes \in 0..MaxCrashes
 
 -----------------------------------------------------------------------------
@@ -394,6 +462,7 @@ Init ==
   /\ pruneDoomed = [m \in Mounts |-> {}]
   /\ acked = {}
   /\ overtaken = [m \in Mounts |-> FALSE]
+  /\ roWrites = {}
   /\ crashes = 0
   /\ IF Start = "Empty"
        THEN /\ bucketRoot = [key |-> NoKey, etag |-> NoETag, writer |-> ""]
@@ -452,7 +521,7 @@ InitEmpty(m) ==
   /\ nsDirty' = [nsDirty EXCEPT ![m] = FALSE]
   /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
   /\ UNCHANGED <<BucketVars, mode, attempt, rpSnapshot, PruneVars, acked,
-                 used, crashes>>
+                 used, roWrites, crashes>>
 
 \* HeadRoot: loadOrInit's Head of the root pointer, whose ETag becomes
 \* FS.rootETag (R2). Another writer's swap between GetRoot and HeadRoot is
@@ -464,7 +533,7 @@ HeadRoot(m) ==
   /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
   /\ pc' = [pc EXCEPT ![m] = "GetSnapshot"]
   /\ UNCHANGED <<BucketVars, mode, epoch, nsDirty, attempt, rpSnapshot, base,
-                 PruneVars, acked, used, crashes>>
+                 PruneVars, acked, used, roWrites, crashes>>
 
 \* GetSnapshot: loadOrInit's Get of the snapshot the root pointer named, and
 \* decodeSnapshot. A missing snapshot makes New fail with its "read snapshot"
@@ -512,30 +581,45 @@ StrayDirty(m) ==
 
 \* PutSnapshot: commitLocked's refusal once diverged, its encode and nonce,
 \* and its Put of the snapshot. With ChunksFirst it includes Flush (R6).
-\* store.ReadOnly refuses the Put when the mount is fenced. commitLocked's
-\* refusal while a file is unsettled (ADR 0012 section 4) is FileData's.
-\* Go (trace.tsv): FS.commitLocked; ReadOnly.Put.
+\* store.ReadOnly refuses the Put when the mount is fenced, and the call
+\* reaches nothing. Otherwise it reaches the bucket, and is not applied
+\* (PutFailed), is applied, or is applied and answers with an error
+\* (SnapshotReplyLost); each failure is commitLocked returning an error.
+\* commitLocked's refusal while a file is unsettled (ADR 0012 section 4) is
+\* FileData's.
+\* Go (trace.tsv): FS.commitLocked; ReadOnly.Put; S3.Put.
 PutSnapshot(m) ==
   /\ NextStep(m) = "PutSnapshot"
   /\ \E k \in KeyFor(m) :
-       \/ /\ (Fenced(m) \/ "PutFailed" \in Faults)
+       \/ /\ Fenced(m)
           /\ CommitFails(m, k)
           /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty,
                          rpSnapshot, base, PruneVars, GhostVars, crashes>>
        \/ /\ ~Fenced(m)
-          /\ snapshots' = [x \in DOMAIN snapshots \cup {k} |->
-                             IF x = k THEN base[m] \cup {CommitIdOf(m, k)}
-                                      ELSE snapshots[x]]
-          /\ used' = used \cup {k}
+          /\ "PutFailed" \in Faults
+          /\ WriteCall(m)
+          /\ CommitFails(m, k)
+          /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty,
+                         rpSnapshot, base, PruneVars, acked, used, overtaken,
+                         crashes>>
+       \/ /\ ~Fenced(m)
+          /\ WriteCall(m)
+          /\ SnapshotEffect(m, k)
           /\ IF "ChunksFirst" \in Fixes
-               THEN /\ FlushEffect(m, k)
-                    /\ pc' = [pc EXCEPT ![m] = "Swap"]
+               THEN /\ pc' = [pc EXCEPT ![m] = "Swap"]
                     /\ attempt' = [attempt EXCEPT ![m] = k]
-               ELSE /\ UNCHANGED chunks
-                    /\ pc' = [pc EXCEPT ![m] =
+               ELSE /\ pc' = [pc EXCEPT ![m] =
                                 IF k.epoch = 1 THEN "Ready" ELSE "Flush"]
                     /\ attempt' = [attempt EXCEPT ![m] =
                                      IF k.epoch = 1 THEN NoKey ELSE k]
+          /\ UNCHANGED <<bucketRoot, mode, rootETag, epoch, nsDirty,
+                         rpSnapshot, base, PruneVars, acked, overtaken,
+                         crashes>>
+       \/ /\ ~Fenced(m)
+          /\ "SnapshotReplyLost" \in Faults
+          /\ WriteCall(m)
+          /\ SnapshotEffect(m, k)
+          /\ CommitFails(m, k)
           /\ UNCHANGED <<bucketRoot, mode, rootETag, epoch, nsDirty,
                          rpSnapshot, base, PruneVars, acked, overtaken,
                          crashes>>
@@ -546,11 +630,12 @@ PutSnapshot(m) ==
 \* FS.putChunk.
 Flush(m) ==
   /\ pc[m] = "Flush"
+  /\ WriteCall(m)
   /\ FlushEffect(m, attempt[m])
   /\ pc' = [pc EXCEPT ![m] = "Ready"]
   /\ attempt' = [attempt EXCEPT ![m] = NoKey]
   /\ UNCHANGED <<bucketRoot, snapshots, mode, rootETag, epoch, nsDirty,
-                 rpSnapshot, base, PruneVars, GhostVars, crashes>>
+                 rpSnapshot, base, PruneVars, acked, used, overtaken, crashes>>
 
 \* SwapOK: commitLocked's PutIfMatch succeeds, then its success path and
 \* schedulePrune (R8).
@@ -564,6 +649,7 @@ SwapOK(m) ==
        /\ WriteRoot(m, k)
        /\ overtaken' = [x \in Mounts |-> x # m]
        /\ Committed(m, k, ETagOf(k, m))
+  /\ WriteCall(m)
   /\ UNCHANGED <<snapshots, chunks, mode, rpSnapshot, crashes>>
 
 \* SwapReplyLost: the swap is applied, but an error is returned, so
@@ -579,6 +665,7 @@ SwapReplyLost(m) ==
        /\ WriteRoot(m, k)
        /\ overtaken' = [x \in Mounts |-> IF x = m THEN overtaken[m] ELSE TRUE]
        /\ CommitFails(m, k)
+  /\ WriteCall(m)
   /\ UNCHANGED <<snapshots, chunks, mode, rootETag, epoch, nsDirty,
                  rpSnapshot, base, PruneVars, acked, crashes>>
 
@@ -591,13 +678,14 @@ SwapFailed(m) ==
   /\ "SwapFailed" \in Faults
   /\ ~Fenced(m)
   /\ \E k \in KeyFor(m) : CommitFails(m, k)
+  /\ WriteCall(m)
   /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty, rpSnapshot, base,
-                 PruneVars, GhostVars, crashes>>
+                 PruneVars, acked, used, overtaken, crashes>>
 
 \* SwapConflict: store.ErrPrecondition, from errorFor's 412 or 409 or from
-\* Local's ETag check, and commitLocked's diverged.Store(true). With
-\* SwapConflict409 it may also come while the condition holds. A read-only
-\* mount's mode stays "ReadOnly" (R11).
+\* Local's ETag check, and commitLocked's diverged.Store(true), which is
+\* Diverge. With SwapConflict409 it may also come while the condition holds.
+\* A read-only mount diverges too (R11).
 \* Go (trace.tsv): FS.commitLocked; errorFor; Local.PutIfMatch.
 SwapConflict(m) ==
   /\ NextStep(m) = "Swap"
@@ -605,27 +693,43 @@ SwapConflict(m) ==
   /\ ~Fenced(m)
   /\ \E k \in KeyFor(m) :
        /\ (~SwapCondition(m, k) \/ "SwapConflict409" \in Faults)
-       /\ mode' = [mode EXCEPT ![m] = IF @ = "Writable" THEN "Diverged" ELSE @]
+       /\ Diverge(m)
        /\ CommitFails(m, k)
+  /\ WriteCall(m)
   /\ UNCHANGED <<BucketVars, rootETag, epoch, nsDirty, rpSnapshot, base,
-                 PruneVars, GhostVars, crashes>>
+                 PruneVars, acked, used, overtaken, crashes>>
 
 \* SwapUnsupported: store.ErrUnsupported, from errorFor's 501 or from
 \* ReadOnly.PutIfMatch, then the fallback's unconditional Put of the root
-\* pointer (FallbackPut, R7), which store.ReadOnly refuses when the mount is
-\* fenced.
+\* pointer (FallbackPut, R7). store.ReadOnly refuses both calls when the
+\* mount is fenced, and they reach nothing. Otherwise both reach the bucket,
+\* and the Put is not applied (PutFailed), is applied, or is applied and
+\* answers with an error (FallbackReplyLost), which leaves rootETag as it
+\* was.
 \* Go (trace.tsv): FS.commitLocked; errorFor; ReadOnly.PutIfMatch.
 SwapUnsupported(m) ==
   /\ NextStep(m) = "Swap"
   /\ (Capability \in {"Unconditional", "Flaky"} \/ Fenced(m))
   /\ \E k \in KeyFor(m) :
-       \/ /\ (Fenced(m) \/ "PutFailed" \in Faults)
+       \/ /\ Fenced(m)
           /\ CommitFails(m, k)
           /\ UNCHANGED <<BucketVars, GhostVars>>
        \/ /\ ~Fenced(m)
+          /\ "PutFailed" \in Faults
+          /\ WriteCall(m)
+          /\ CommitFails(m, k)
+          /\ UNCHANGED <<BucketVars, acked, used, overtaken>>
+       \/ /\ ~Fenced(m)
+          /\ WriteCall(m)
           /\ FallbackPut(m, k)
           /\ pc' = [pc EXCEPT ![m] = "FallbackHead"]
           /\ attempt' = [attempt EXCEPT ![m] = k]
+          /\ UNCHANGED <<snapshots, chunks, acked>>
+       \/ /\ ~Fenced(m)
+          /\ "FallbackReplyLost" \in Faults
+          /\ WriteCall(m)
+          /\ FallbackPut(m, k)
+          /\ CommitFails(m, k)
           /\ UNCHANGED <<snapshots, chunks, acked>>
   /\ UNCHANGED <<mode, rootETag, epoch, nsDirty, rpSnapshot, base, PruneVars,
                  crashes>>
@@ -637,7 +741,7 @@ FallbackHead(m) ==
   /\ pc[m] = "FallbackHead"
   /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
   /\ Committed(m, attempt[m], bucketRoot.etag)
-  /\ UNCHANGED <<BucketVars, mode, rpSnapshot, used, crashes>>
+  /\ UNCHANGED <<BucketVars, mode, rpSnapshot, used, roWrites, crashes>>
 
 -----------------------------------------------------------------------------
 \* Prune passes.
@@ -665,8 +769,9 @@ PruneDelete(m) ==
   /\ LET k == Least(pruneDoomed[m])
      IN  /\ snapshots' = [x \in DOMAIN snapshots \ {k} |-> snapshots[x]]
          /\ pruneDoomed' = [pruneDoomed EXCEPT ![m] = @ \ {k}]
+  /\ WriteCall(m)
   /\ UNCHANGED <<bucketRoot, chunks, MountVars, pruning, pruneCurrent,
-                 GhostVars, crashes>>
+                 acked, used, overtaken, crashes>>
 
 \* PruneEnd: the goroutine's final hold of FS.mu, which clears FS.pruning
 \* (R10).
@@ -701,7 +806,7 @@ Crash(m) ==
   /\ pruneCurrent' = [pruneCurrent EXCEPT ![m] = 0]
   /\ pruneDoomed' = [pruneDoomed EXCEPT ![m] = {}]
   /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
-  /\ UNCHANGED <<BucketVars, acked, used>>
+  /\ UNCHANGED <<BucketVars, acked, used, roWrites>>
 
 -----------------------------------------------------------------------------
 \* The specification.
@@ -748,15 +853,10 @@ ChunksBeforeRoot ==
   bucketRoot.key \in DOMAIN snapshots =>
     \A c \in snapshots[bucketRoot.key] : c.epoch = 1 \/ c \in chunks
 
-\* No root pointer, snapshot or chunk holds a read-only mount's write. A
-\* read-only mount could delete only through a prune pass, which starts only
-\* after one of its writes of the root pointer, and that write already
-\* breaks this.
-ReadOnlyNeverWrites ==
-  /\ bucketRoot.writer \notin ReadOnlyMounts
-  /\ \A k \in DOMAIN snapshots :
-       \A c \in snapshots[k] : c.writer \notin ReadOnlyMounts
-  /\ \A c \in chunks : c.writer \notin ReadOnlyMounts
+\* No Put, PutIfMatch or Delete call of a read-only mount reaches the bucket,
+\* whether or not it would change anything (ADR 0011 sections 3 and 4;
+\* Assumption J16).
+ReadOnlyNeverWrites == roWrites = {}
 
 \* A mount diverges only after another mount has written the root pointer
 \* since it last set rootETag.
@@ -769,7 +869,8 @@ NoSelfDivergence ==
 \* PassApartFromOwnCommits: while a mount's prune pass runs, the mount
 \* completes no commit, and the pass has not deleted the snapshot of an
 \* attempt the mount has still to swap. So only other mounts' commits
-\* overlap a pass. Only CommitProtocol_PruneTwoWriters sets it (Assumption
+\* overlap a pass. Only CommitProtocol_PruneTwoWriters sets it, and
+\* CommitProtocol_PruneOverlapTwoWriters is its twin without it (Assumption
 \* J15). TLC checks the invariants of a state that breaks a constraint, and
 \* takes no step from it, so the second conjunct stops the mount's swap to a
 \* snapshot its own pass deleted before TLC can take that swap.

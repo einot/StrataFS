@@ -86,6 +86,15 @@ TLA+ `mode[m]`.
 | `Close` | event | `mountClose` | `Close(m)` | its edges are the lifecycle ADR's | reserved, the lifecycle ADR |
 | `Mutable` | predicate | `(*FS).mutable` | `Mutable(m)` | nil exactly when `Writable` | exists, `internal/blobfs/fs.go` |
 
+At `043927f` the mode is `FS.readOnly` and `FS.diverged`, and `commitLocked`
+sets `FS.diverged` on any `store.ErrPrecondition`, a read-only mount's
+included. `docs/tla/CommitProtocol.tla`, checked against that commit, holds
+that as `"Diverged"` either way, so its `Diverge(m)` can leave `ReadOnly`,
+which this table, and ADR 0014 §7, do not allow. Only a read-only mount
+without `store.ReadOnly` beneath it can get that answer, so only a
+configuration without `ReadOnlyFence` reaches the case. The PR that converts
+the mode revises the spec (its reduction R11).
+
 ## V2. Root-pointer knowledge
 
 Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
@@ -109,7 +118,7 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 `mutable`, `SetAttr`, `createEntry`, `unlink`, `Rename`, `bufferWrite`,
 `truncate`, `flushAll`, `settleAll`, `flushOpen` and `putChunk` in
 `internal/blobfs/fs.go`; `ReadOnly.Put` and `ReadOnly.PutIfMatch` in
-`internal/store/store.go`; `S3.PutIfMatch` and `errorFor` in
+`internal/store/store.go`; `S3.Put`, `S3.PutIfMatch` and `errorFor` in
 `internal/store/s3.go`; and `Local.PutIfMatch` in `internal/store/local.go`.
 `docs/tla/trace.tsv` gives each action's symbols.
 
@@ -128,12 +137,12 @@ Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
 | `Mutate` | any namespace-changing `vfs.FS` method | guarded by `Mutable` |
 | `StrayDirty` | none | a path that dirties a read-only mount: ADR 0011 §7's seam, through which a test sets `FS.dirty` on a read-only FS. No path does so at `043927f` |
 | `Flush` | `Sync`'s `flushAll` and `settleAll`; `flushOpen`; `putChunk` | a step of its own only without `ChunksFirst`; with it, part of `PutSnapshot` |
-| `PutSnapshot` | `commitLocked`'s snapshot `Put` | |
+| `PutSnapshot` | `commitLocked`'s snapshot `Put` | refused by `store.ReadOnly` when the mount is fenced; otherwise it reaches the bucket, and is applied, not applied (`"PutFailed"`), or applied with an error returned (`"SnapshotReplyLost"`) |
 | `SwapOK` | `commitLocked`'s `PutIfMatch` | applied, and the reply carries the ETag |
 | `SwapReplyLost` | the same | applied, and an error is returned |
 | `SwapFailed` | the same | not applied, and an error is returned |
-| `SwapConflict` | the same | `store.ErrPrecondition`; fires `Diverge` |
-| `SwapUnsupported` | the same | `store.ErrUnsupported` |
+| `SwapConflict` | the same | `store.ErrPrecondition`; fires `Diverge` (V1), on a read-only mount too at `043927f` |
+| `SwapUnsupported` | the same | `store.ErrUnsupported`, then `FallbackPut`, which `store.ReadOnly` refuses when the mount is fenced, and which otherwise is applied, not applied (`"PutFailed"`), or applied with an error returned (`"FallbackReplyLost"`) |
 | `FallbackPut` | `commitLocked`'s unconditional root `Put` after it | merged with `SwapUnsupported`: an operator of that action's success branch, not a step of its own |
 | `FallbackHead` | the `Head` after `FallbackPut` | |
 | `StartPrune` | `schedulePrune`'s guard, and its setting of `FS.pruning` | an operator that `SwapOK` and `FallbackHead` conjoin, since it runs in the same hold of `FS.mu`; not a step of its own |
@@ -152,7 +161,7 @@ machine states, and the rest are named here. CommitProtocol leaves
 | `snapshots` | the objects under `snapshotPrefix` | a function from the keys present to sets of commit ids: a key's set stands for that snapshot's `snapshot.Inodes`, as the commits it includes | exists |
 | `chunks` | the objects under `chunkPrefix` | a set of commit ids: a commit is in it once its chunk is stored | exists |
 | `pc[m]` | none | where `New`, `loadOrInit` or `commitLocked` has got to, as one of the strings below | reserved, ADR 0013 |
-| `mode[m]` | `FS.mode` (V1) | | reserved, ADR 0014 |
+| `mode[m]` | `FS.mode` (V1) | at `043927f`, `FS.readOnly` and `FS.diverged`: `"Diverged"` while `FS.diverged` is set, `"ReadOnly"` while only `FS.readOnly` is, and `"Writable"` otherwise (V1's note) | reserved, ADR 0014 |
 | `rootKnowledge[m]` | `FS.rootKnowledge` (V2) | | reserved, the ADR for #5 |
 | `rootETag[m]` | `FS.rootETag` | | exists |
 | `epoch[m]` | `FS.epoch` | | exists |
@@ -165,6 +174,7 @@ machine states, and the rest are named here. CommitProtocol leaves
 | `acked` | none: a ghost | the commits whose `commitLocked` returned nil, from `Sync` or from `initEmpty` | reserved, ADR 0013 |
 | `used` | none: a ghost | the snapshot keys named by a snapshot `Put` or a write of the root pointer that took effect. A fresh key is one not in it, which is how the spec takes the nonce never to repeat (ADR 0013 §4) | reserved, ADR 0013 |
 | `overtaken[m]` | none: a ghost | another mount has written the root pointer since this mount last set `rootETag[m]` | reserved, ADR 0013 |
+| `roWrites` | none: a ghost | the read-only mounts from which a `Put`, `PutIfMatch` or `Delete` call has reached the bucket, whether or not it changed an object; a call `store.ReadOnly` refuses reaches nothing | reserved, ADR 0013 |
 | `crashes` | none | how many `Crash` steps have been taken, at most `MaxCrashes` | reserved, ADR 0013 |
 
 **`pc[m]`'s strings.** All reserved, ADR 0013. Like `pruning[m]`'s, they are no
@@ -188,7 +198,7 @@ machine's states (rule 3).
 | `ReadOnlyMounts` | a subset of `Mounts` | `Config.ReadOnly` | the mounts that have it set | exists |
 | `Fixes` | a subset of the `Fixes` members below | none | the fixes a configuration includes (ADR 0013 §7) | reserved, ADR 0013 |
 | `Capability` | `"Conditional"`, `"Unconditional"` or `"Flaky"` | none | what the backend does with a conditional write (below) | reserved, ADR 0013 |
-| `Faults` | a subset of `"SwapReplyLost"`, `"SwapFailed"`, `"SwapConflict409"` and `"PutFailed"` | none | the failure outcomes the bucket may give (below) | reserved, ADR 0013 |
+| `Faults` | a subset of `"SwapReplyLost"`, `"SwapFailed"`, `"SwapConflict409"`, `"PutFailed"`, `"SnapshotReplyLost"` and `"FallbackReplyLost"` | none | the failure outcomes the bucket may give (below) | reserved, ADR 0013 |
 | `Start` | `"Empty"` or `"Loaded"` | none | the bucket as a behaviour begins (below) | reserved, ADR 0013 |
 | `Retention` | a natural number | `FS.retention` | how many snapshots a prune pass keeps; 0 turns pruning off | exists |
 | `MaxEpoch` | a positive natural number | none | a bound: the highest epoch a commit may reach | reserved, ADR 0013 |
@@ -211,16 +221,23 @@ machine's states (rule 3).
     that `SwapConflict` may then fire.
   - `"PutFailed"`: a snapshot `Put`, with the chunk uploads folded before it,
     or the fallback's root `Put`, is not applied.
+  - `"SnapshotReplyLost"`: a snapshot `Put` is applied, with the chunk
+    uploads folded before it, and an error is returned: an attempt took
+    effect, but its reply was lost, or `S3.do`'s later attempts failed, or
+    the context ended. Only `S3.Put` gives it.
+  - `"FallbackReplyLost"`: the fallback's root `Put` is applied, and an error
+    is returned, in the same ways, so `commitLocked` keeps its old
+    `rootETag`.
 - **`Start`'s values.** Both reserved, ADR 0013. `"Empty"`: an empty bucket,
   with every mount at `loadOrInit`'s first read. `"Loaded"`: a filesystem at
   epoch 1, written outside the model, which every mount has loaded.
 
 **Definitions.** The module's other definitions. All reserved, ADR 0013, but
-`Mutable`, which exists (V1).
+`Mutable`, which exists, and `Diverge`, which ADR 0014 reserves (V1).
 
 | Definition | Meaning |
 |---|---|
-| `AllFixes`, `AllFaults` | the four `Fixes` members, and the four `Faults` values |
+| `AllFixes`, `AllFaults` | the four `Fixes` members, and the six `Faults` values |
 | `Writers` | `Mounts` and `""`, a writer outside the model |
 | `Keys` | the snapshot keys, `snapshots/<epoch>-<nonce>.json.gz`, as records `[epoch, nonce]` whose nonce is in `Nonces` or is 0 |
 | `NoKey` | no key: epoch 0, nonce 0 |
@@ -241,13 +258,16 @@ machine's states (rule 3).
 | `FirstStep` | a commit's first call: `"PutSnapshot"`, or without `ChunksFirst` `"Swap"` |
 | `NextStep(m)` | the commit step due at `m`, or `"None"`. At `"Ready"` it is a commit's first call when `nsDirty[m]` is set, as `Sync` requires, and `m` has not diverged, as `commitLocked` requires |
 | `SwapCondition(m, k)` | whether the bucket would apply `m`'s swap to the root pointer naming `k`: If-None-Match for an empty `rootETag`, which is unconditional without `IfNoneMatchInit`, and If-Match otherwise |
+| `WriteCall(m)` | a `Put`, `PutIfMatch` or `Delete` call of `m`'s reaches the bucket: a read-only `m` joins `roWrites` |
 | `WriteRoot(m, k)` | `m` writes the root pointer, naming `k` |
 | `CommitFails(m, k)` | `commitLocked` returns an error: back to `"Ready"`, or to `"Failed"` for `initEmpty`'s commit |
 | `FlushEffect(m, k)` | the chunk of `m`'s commit at `k`'s epoch is stored; an epoch-1 commit has none |
+| `SnapshotEffect(m, k)` | `m`'s snapshot `Put` of `k` takes effect, and with `ChunksFirst` the chunk uploads folded before it too |
+| `Diverge(m)` | V1's event, which `SwapConflict` conjoins: at `043927f`, `commitLocked`'s `diverged.Store(true)`, which makes `mode[m]` `"Diverged"`, a read-only mount's too (V1's note) |
 | `Committed(m, k, et)` | `commitLocked`'s success path, with the root pointer's new ETag `et` |
 | `BucketVars`, `MountVars`, `PruneVars`, `GhostVars`, `Vars` | the variables, in groups, for `UNCHANGED` and for `Spec` |
 | `Next`, `Spec` | the next-state relation, and the specification, `Init /\ [][Next]_Vars` |
-| `PassApartFromOwnCommits` | a state constraint, which only `CommitProtocol_PruneTwoWriters` sets: while a mount's prune pass runs, the mount completes no commit, and the pass has not deleted the snapshot of an attempt the mount has still to swap. TLC takes no step from a state that breaks it |
+| `PassApartFromOwnCommits` | a state constraint, which only `CommitProtocol_PruneTwoWriters` sets: while a mount's prune pass runs, the mount completes no commit, and the pass has not deleted the snapshot of an attempt the mount has still to swap. TLC takes no step from a state that breaks it. `CommitProtocol_PruneOverlapTwoWriters` is the same configuration without it |
 
 **Properties.** All reserved, ADR 0013: `TypeOK`, `RootSnapshotExists`,
 `NoLostAck`, `ChunksBeforeRoot`, `ReadOnlyNeverWrites`, `NoSelfDivergence`.
@@ -266,13 +286,15 @@ machine's states (rule 3).
 checked against rule 1 and against the operators listed at the end of this
 file. The bare names are `Init`, `StrayDirty` and `PruneEnd`; the constants
 from `Mounts` to `MaxCrashes`; the values `"SwapConflict409"`, `"PutFailed"`,
-`"Empty"` and `"Loaded"`; `pc[m]`'s `"Ready"`, `"Swap"` and `"Failed"`;
-`NextStep`'s `"None"`; and the definitions above. Each is UpperCamel ASCII
-letters and digits starting with a letter, and none equals an operator of the
-four modules, a Go keyword or predeclared identifier, all of which are lower
-case, or a TLA+ reserved word, all of which are upper case. The new variables,
-`rpSnapshot`, `base`, `overtaken` and `crashes`, are lowerCamel like every
-variable here, and none is a reserved word or an operator. No name was
+`"SnapshotReplyLost"`, `"FallbackReplyLost"`, `"Empty"` and `"Loaded"`;
+`pc[m]`'s `"Ready"`, `"Swap"` and `"Failed"`; `NextStep`'s `"None"`; and the
+definitions above, `WriteCall` and `SnapshotEffect` among them. Each is
+UpperCamel ASCII letters and digits starting with a letter, and none equals an
+operator of the four modules, a Go keyword or predeclared identifier, all of
+which are lower case, or a TLA+ reserved word, all of which are upper case.
+The new variables, `rpSnapshot`, `base`, `overtaken`, `roWrites` and
+`crashes`, are lowerCamel like every variable here, and none is a reserved
+word or an operator. `Diverge` is V1's, and was checked there. No name was
 renamed.
 
 ## V4. Sync and file data
@@ -408,7 +430,9 @@ from its first access to the charge or to `of.bytes` until its last, and a
 ## V7. Policies
 
 - `Mutable`: V1; exists.
-- `ReadOnlyNeverWrites`: an invariant (V3); reserved, ADR 0013. The fence,
+- `ReadOnlyNeverWrites`: an invariant (V3): no `Put`, `PutIfMatch` or
+  `Delete` call of a read-only mount reaches the bucket, whether or not it
+  would change anything (ADR 0011 §3, §4); reserved, ADR 0013. The fence,
   `store.ReadOnly`, exists (ADR 0011 §3).
 - Exists, `internal/policy/policy.go`, added with ADR 0014:
   - `Permits` = `policy.Permits(c, o, want)`;
