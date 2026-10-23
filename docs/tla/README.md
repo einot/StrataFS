@@ -11,9 +11,9 @@ This file says what the directory holds, how to read it and how to run it.
 - **`CommitProtocol.tla`**: how a mount reads the root pointer, commits,
   prunes snapshots and diverges, against other mounts, failing store calls
   and crashes (ADR 0013 §1, item 1). It is checked against `043927f`.
-- **Its 23 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
-  six MustHold and seventeen MustFail. Five of the MustFail ones each remove
-  a fix the code has, and twelve each show an open defect: #88 by seven,
+- **Its 24 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
+  six MustHold and eighteen MustFail. Five of the MustFail ones each remove
+  a fix the code has, and thirteen each show an open defect: #88 by eight,
   #89, #91, and #5 by three. Each opens with a comment giving its
   expectation, its issue or the fix it removes, and the source of each
   `Fixes` member. One, `CommitProtocol_PruneTwoWriters`, also sets a state
@@ -111,28 +111,54 @@ runs (*Running*):
   is two spaces and then the entry's text and belongs to the heading above
   it. The headings are exactly `SPECIFICATION <name>`, `CONSTANTS`,
   `CONSTRAINT`, `INVARIANTS`, `CHECK_DEADLOCK TRUE` and
-  `CHECK_DEADLOCK FALSE`, and a file has each of the five keywords at most
-  once. Only `CONSTANTS`, `CONSTRAINT` and `INVARIANTS` take entries.
+  `CHECK_DEADLOCK FALSE`. A file has `SPECIFICATION` and `INVARIANTS` once
+  each, and each of the other three keywords at most once. Only
+  `CONSTANTS`, `CONSTRAINT` and `INVARIANTS` take entries.
 - An entry under `CONSTANTS` is `<name> = <value>`; under `CONSTRAINT` or
-  `INVARIANTS`, a name alone.
-- A name matches `^[A-Za-z][A-Za-z0-9_]*$`. A value is a natural number in
-  digits, a string of letters and digits in double quotes, or a set: `{}`,
-  or `{`, then such numbers or strings separated by `, `, then `}`.
+  `INVARIANTS`, a name alone. No name appears twice under one heading.
+- A name matches `^[A-Za-z][A-Za-z0-9_]*$`, and is not made of capital
+  letters and underscores alone, that is, it does not match `^[A-Z_]+$`.
+  That holds for `SPECIFICATION`'s name, every name under `CONSTANTS`, and
+  every entry under `CONSTRAINT` and `INVARIANTS`.
+- A value is a natural number in digits, a string of letters and digits in
+  double quotes, or a set: `{}`, or `{`, then such numbers or strings
+  separated by `, `, then `}`.
 
-Two rules tie the configurations to `manifest.tsv`, and the runner enforces
-both:
+The rule on capitals keeps a keyword out of every place a name stands. TLC
+1.7.4 has eighteen configuration keywords: `CONSTANT`, `CONSTANTS`,
+`CONSTRAINT`, `CONSTRAINTS`, `ACTION_CONSTRAINT`, `ACTION_CONSTRAINTS`,
+`INVARIANT`, `INVARIANTS`, `INIT`, `NEXT`, `VIEW`, `SYMMETRY`,
+`SPECIFICATION`, `PROPERTY`, `PROPERTIES`, `TYPE`, `TYPE_CONSTRAINT` and
+`CHECK_DEADLOCK` (*Sources*). Each is capital letters and underscores alone,
+so an entry `CONSTRAINT` under `INVARIANTS`, which TLC would read as a
+keyword and so as the start of a constraint, is refused. The runner refuses the shape rather than this list,
+so that a keyword a later TLC adds the same way is refused too. The cost is
+that a name such as `N` must be spelt otherwise. A name such as `I1` or `G1`,
+which `docs/vocabulary.md` reserves, holds a digit and stands.
+
+Three rules tie the configurations to `manifest.tsv`, and the runner enforces
+all three:
 
 - **A MustFail configuration** has exactly two entries under `INVARIANTS`:
   `TypeOK` and its row's `property`, in either order (ADR 0013 §7).
+- **A MustHold configuration** has `TypeOK` and at least one other entry
+  under `INVARIANTS`, so that none can pass by checking nothing but types.
+  The runner asks no more, because a defect's configuration keeps its two
+  invariants when it flips, and the flip may change nothing else (ADR 0013
+  §7). A configuration written as MustHold lists every property its module
+  defines, as the six here do; review holds it to that, since the runner
+  cannot tell the two kinds apart.
 - **A MustHold configuration with a state constraint has a twin.** A
   constraint stops TLC taking a step from a state that breaks it
   (*Sources*), so it narrows what a configuration checks inside its bounds,
   which ADR 0013 §11 does not count among them. So a MustHold configuration
   that has a `CONSTRAINT` heading needs another MustHold configuration of the
-  same module that has none, and whose entries under `CONSTANTS` and under
-  `INVARIANTS` are the same lines in the same order. When
-  `CommitProtocol_PruneTwoWriters` flips, `CommitProtocol_PruneOverlapTwoWriters`
-  must flip with it, the same fix added to both, or the gate fails.
+  same module whose lines, comments aside, are its own lines with the
+  `CONSTRAINT` heading and its entries taken out, in the same order. That
+  compares the specification, the constants, the invariants and the deadlock
+  check at once. When `CommitProtocol_PruneTwoWriters` flips,
+  `CommitProtocol_PruneOverlapTwoWriters` must flip with it, the same fix
+  added to both, or the gate fails.
 
 ## Counterexamples
 
@@ -187,19 +213,34 @@ before TLC runs.
    program runs: `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`,
    `CLASSPATH`, every variable whose name begins `DYLD_` or `LD_`,
    `BASH_ENV`, `PERL5OPT`, `PERL5LIB` and `PERLLIB`. It unsets `GLOBIGNORE`,
-   turns globbing on, and turns `nullglob`, `failglob`, `dotglob` and
-   `nocaseglob` off, so that `docs/tla/*.cfg` matches exactly the files
-   there.
+   turns globbing on, and turns `nullglob`, `failglob`, `dotglob`,
+   `nocaseglob`, `nocasematch` and `extglob` off, so that `docs/tla/*.cfg`
+   matches exactly the files there and every comparison is exact unless the
+   runner itself asks otherwise.
 2. **Its paths.** `docs/tla` must resolve, by `pwd -P`, to
    `<root>/docs/tla`; nothing under `docs/tla` may be a symbolic link; and
-   every file the runner reads there must be a regular file.
+   every file the runner reads there must be a regular file. A name the
+   runner prints from the directory itself, such as a link `find` reports or
+   a `.cfg` with no row, has every character that is not printable ASCII
+   shown as `?`.
 3. **The temporary directory.** `mktemp -d` makes `<tmp>` under `$TMPDIR`,
    or else `/tmp`. The runner refuses, both before `mktemp` and after it, a
-   directory that lies inside `<root>`, or inside any directory above
-   `<root>` that holds an entry named `.git`, such as the main checkout that
-   holds a linked worktree. It finds those by walking up from `<root>`, and
-   runs no git command. It also refuses a `<tmp>` whose path holds `:`. The
-   comparisons ignore case, as the default macOS filesystem does.
+   directory that lies inside a guard: `<root>`, or any directory above
+   `<root>` that holds an entry named `.git`, a dangling symbolic link of
+   that name included, such as the main checkout that holds a linked
+   worktree. It finds the guards by walking up from `<root>`, and runs no git
+   command.
+   - A directory lies inside a guard when it, or any directory on its path
+     up to `/`, is the guard itself by device and inode, as bash's
+     `test -ef` compares them. So no spelling of the path hides it: a
+     firmlink such as macOS's `/System/Volumes/Data`, a bind mount, or a
+     change of case. The runner also refuses, as it did before, a path that
+     begins with a guard's path, ignoring case.
+   - If it cannot examine a directory on either path, it refuses the run.
+   - It also refuses a `<tmp>` whose path holds `:`.
+   - Its limits: a linked worktree that git placed outside its main checkout
+     does not guard that checkout, since only git knows of it, and a network
+     mount of the tree reports another device.
 4. **The tools**, before TLC runs:
    - `tools.tsv` keeps the layout in *Tables*, which allows exactly two
      rows;
@@ -219,18 +260,19 @@ before TLC runs.
 
    `tools` stops here.
 5. **The manifest**: `manifest.tsv` keeps the layout in *Tables*, which
-   ties each row's `exit` and `log` to its `expect` and `property`; every
-   row's `docs/tla/<module>.tla` and `docs/tla/<config>.cfg` exist; every
-   such `.cfg` keeps the layout in *Configuration files*, and meets its two
-   rules; and every `docs/tla/*.cfg` has exactly one row.
+   ties each row's `exit` and `log` to its `expect` and `property`. For
+   every row the runner makes `<run>`, which is `<tmp>/<config>`, and copies
+   `docs/tla/<module>.tla` and `docs/tla/<config>.cfg` into it; each must be
+   a regular file, and from then on the runner, and TLC, read only the
+   copies, so TLC reads exactly what was checked. Every copied `.cfg` keeps
+   the layout in *Configuration files* and meets its rules, and every
+   `docs/tla/*.cfg` has exactly one row.
 6. **Each row the mode runs**:
    - a row whose `exit` or `log` is `-` is uncalibrated, and fails without
      running TLC;
-   - otherwise the runner makes `<run>`, which is `<tmp>/<config>`, and in it
-     the empty directories `<run>/home` and `<run>/tmp`; copies
-     `docs/tla/<module>.tla` and `docs/tla/<config>.cfg` into `<run>`; and,
-     with `<run>` as its working directory, runs this command, with the
-     output going to a log:
+   - otherwise the runner makes the empty directories `<run>/home` and
+     `<run>/tmp`, and, with `<run>` as its working directory, runs this
+     command on the copies in it, with the output going to a log:
 
      ```sh
      "$java" -XX:+UseParallelGC -XX:-UsePerfData \
@@ -249,11 +291,12 @@ before TLC runs.
      expected.
 
 `show <config>` makes steps 1 to 4, then step 5's checks of `manifest.tsv`
-and of that one row's files and configuration, but not the checks across
-rows: that every `.cfg` has a row, and that a constrained MustHold
-configuration has its twin. It then runs that configuration as step 6 runs a
-row, whether or not the row is calibrated. It prints TLC's whole output and
-then `tla.sh: TLC exited with status N`, and exits with TLC's status. It
+and, on its copies, of that one row's files and configuration, but not the
+checks across rows: that every `.cfg` has a row, and that a constrained
+MustHold configuration has its twin. It then runs that configuration as
+step 6 runs a row, whether or not the row is calibrated. It prints TLC's
+whole output and then `tla.sh: TLC exited with status N`, and exits with
+TLC's status. It
 judges nothing: it is how the session calibrates a row and gets a
 counterexample.
 
@@ -448,6 +491,33 @@ same tool:
 **Honesty note:** the tool was asked to quote the lines that do these
 things, and gave them as quotations inside its own summary; neither file was
 read whole.
+
+The list of keywords in *Configuration files* rests on two more files of TLC
+1.7.4's source, each fetched on 2026-10-23, while the re-review's findings
+were ruled on, through the same tool:
+
+- `ModelConfig.java`, at the URL above: its 18 keyword constants, and
+  `public final static String[] ALL_KEYWORDS = { Constant, Constants,
+  Constraint, Constraints, ActionConstraint, ActionConstraints, Invariant,
+  Invariants, Init, Next, View, Symmetry, Spec, Prop, Props, Type,
+  TypeConstraint, CheckDeadlock };`. Seven are literals there:
+  `"CONSTRAINT"`, `"CONSTRAINTS"`, `"VIEW"`, `"PROPERTIES"`, `"TYPE"`,
+  `"TYPE_CONSTRAINT"` and `"CHECK_DEADLOCK"`. `ActionConstraints` and
+  `Invariants` add `'S'` to `ActionConstraint` and `Invariant`, and the other
+  nine come from `TLAConstants.KeyWords`.
+- `util/TLAConstants.java`, at
+  <https://raw.githubusercontent.com/tlaplus/tlaplus/v1.7.4/tlatools/org.lamport.tlatools/src/util/TLAConstants.java>:
+  in `KeyWords`, `ACTION_CONSTRAINT = "ACTION_CONSTRAINT"`,
+  `CONSTANT = "CONSTANT"`, `CONSTANTS = CONSTANT + 'S'`, `INIT = "INIT"`,
+  `INVARIANT = "INVARIANT"`, `NEXT = "NEXT"`, `PROPERTY = "PROPERTY"`,
+  `SPECIFICATION = "SPECIFICATION"` and `SYMMETRY = "SYMMETRY"`.
+
+**Honesty note:** the tool quoted the declarations and the array, but not the
+constructor's table of keywords whole, of which it gave only the first
+`this.configTbl.put(...)` line, and its own count of the literals, eight, does
+not match the seven it quoted; the seven are what the lines show. That a
+keyword written where a name stands is still read as a keyword rests on the
+token stream described above, not on a run.
 
 What the runner does to keep TLC's writes and reads in `<tmp>` rests on four
 more sources, each fetched on 2026-10-23, while the review's findings on the

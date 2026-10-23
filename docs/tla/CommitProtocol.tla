@@ -126,10 +126,13 @@
 \*        (CommitProtocol_PruneSnapshotReply); and a root write that takes
 \*        effect and fails, whose retry sorts above it, by route 5
 \*        (CommitProtocol_PruneSwapReply, CommitProtocol_PruneFallbackReply).
-\*        Route 4 also reaches #88 at Retention 2 within PruneSingle's other
-\*        bounds, with route 3's unswapped next attempt as the second key
-\*        above the root's (a route read, not run), so a fix for #88 cannot
-\*        rest on a Retention above 1.
+\*        Route 4 also reaches #88 at Retention 2, within PruneSingle's own
+\*        bounds, together with route 3's overlap: the pass outlives the
+\*        commit at epoch 2, and a snapshot Put at epoch 3 that takes effect
+\*        and fails, with the next commit's unswapped snapshot at epoch 3,
+\*        gives the two keys above the root's
+\*        (CommitProtocol_PruneSnapshotReplyRetention2). So a fix for #88
+\*        cannot rest on a Retention above 1.
 \*   J12. The configurations' bounds and tiers are judgement calls.
 \*   J13. Neither rootKnowledge nor AtomicLoad is modelled. Their ADRs add
 \*        them.
@@ -144,13 +147,14 @@
 \*        also ran through #89's window. No bound removes them, since the
 \*        mount whose pass it is can always commit at epoch 2. The
 \*        constraint assumes no fix: it only stops TLC taking a step from a
-\*        state that breaks it. CommitProtocol_PruneOverlapTwoWriters has the
-\*        same constants and invariants and no constraint, so it checks what
-\*        the constraint cuts, a pass that overlaps its own mount's commit
-\*        and another mount's attempt at once. Both name #88 and flip
-\*        together: once a MustHold configuration sets a constraint, the
-\*        runner fails the gate unless such a twin is MustHold too
-\*        (docs/tla/README.md, Configuration files).
+\*        state that breaks it. CommitProtocol_PruneOverlapTwoWriters is the
+\*        same configuration without the constraint, so it checks what the
+\*        constraint cuts, a pass that overlaps its own mount's commit and
+\*        another mount's attempt at once. Both name #88 and flip together:
+\*        once a MustHold configuration sets a constraint, the runner fails
+\*        the gate unless a MustHold configuration whose lines are its own
+\*        without the constraint exists too (docs/tla/README.md,
+\*        Configuration files).
 \*   J16. ReadOnlyNeverWrites is about calls, as ADR 0011 sections 3 and 4
 \*        put "writes nothing": no Put, PutIfMatch or Delete of a read-only
 \*        mount reaches the bucket. A call that reaches it breaks the
