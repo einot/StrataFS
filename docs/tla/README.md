@@ -515,7 +515,10 @@ were ruled on, through the same tool:
 **Honesty note:** the tool quoted the declarations and the array, but not the
 constructor's table of keywords whole, of which it gave only the first
 `this.configTbl.put(...)` line, and its own count of the literals, eight, does
-not match the seven it quoted; the seven are what the lines show. That a
+not match the seven it quoted; the seven are what the lines show. The
+session also checked the list against the pinned jar itself, by reading
+`tlc2/tool/impl/ModelConfig.class`, which holds exactly these 18 keyword
+strings and no others, `ALIAS` and `POSTCONDITION` among the absent. That a
 keyword written where a name stands is still read as a keyword rests on the
 token stream described above, not on a run.
 
