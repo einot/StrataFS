@@ -19,19 +19,23 @@
 #
 # Every mode makes one temporary parent outside the repository, and outside any
 # checkout above it, and removes it on exit unless a failed run keeps it for
-# its logs. TLC writes trace files beside the module it checks and its state
-# queue under -metadir, so each configuration runs on copies in its own
-# directory there, and a run leaves the working tree as it found it (ADR 0013
-# section 9). TLC loads a copy of the jar made there and verified there, not the
-# installed file, which could change between the check and the run. Each run
-# directory has its own home and tmp, which user.home and java.io.tmpdir name,
-# so that TLC reads and writes nothing outside the temporary directory and
-# sends no usage statistics.
+# its logs. Those guards are compared by device and inode as well as by path,
+# so no spelling of a path inside one, such as a macOS firmlink, gets past
+# them. TLC writes trace files beside the module it checks and its state queue
+# under -metadir, so each configuration runs on copies in its own directory
+# there, and a run leaves the working tree as it found it (ADR 0013 section 9).
+# Those copies are made first and checked, and TLC reads the copies that were
+# checked, not files in docs/tla that could change in between. Likewise TLC
+# loads a copy of the jar made there and verified there, not the installed
+# file. Each run directory has its own home and tmp, which user.home and
+# java.io.tmpdir name, so that TLC reads and writes nothing outside the
+# temporary directory and sends no usage statistics.
 #
 # The data files are read as data: no field is evaluated, none is passed where
 # it could be read as an option, and none names a path outside docs/tla. Each
-# .cfg must keep a fixed layout of headings and entries, checked before TLC
-# reads it.
+# .cfg must keep a fixed layout of headings and entries, and no name in it may
+# have the shape of a TLC configuration keyword, all capitals and underscores,
+# so that TLC cannot read a name as a heading.
 #
 # The script's own variables are lowercase. tools.tsv names an environment
 # variable in uppercase and the script reads it by indirection, so it can only
@@ -51,10 +55,10 @@ for envvar in "${!DYLD_@}" "${!LD_@}"; do
     unset -v "$envvar"
   fi
 done
-# The *.cfg loop must see exactly the files there, whatever SHELLOPTS or
-# BASHOPTS said.
+# The *.cfg loop must see exactly the files there, and every pattern must mean
+# what it says, whatever SHELLOPTS or BASHOPTS said.
 set +f
-shopt -u nullglob failglob dotglob nocaseglob
+shopt -u nullglob failglob dotglob nocaseglob nocasematch extglob
 
 tab=$'\t'
 nl=$'\n'
@@ -69,6 +73,7 @@ log_holds='Model checking completed. No error has been found.'
 re_ascii=$'^[\t -~]*$'
 re_cfg_line='^[ -~]*$'
 re_name='^[A-Za-z][A-Za-z0-9_]*$'
+re_keyword='^[A-Z_]+$'
 re_property='^[A-Za-z][A-Za-z0-9]*$'
 re_env='^[A-Z][A-Z0-9_]*$'
 re_digits='^[0-9]+$'
@@ -141,8 +146,16 @@ check_paths() {
     die "find failed under $tla_dir"
   fi
   if [ -n "$out" ]; then
-    die "docs/tla holds symbolic links, which the runner refuses:$nl$out"
+    printable "$out"
+    die "docs/tla holds symbolic links, which the runner refuses:$nl$printable_out"
   fi
+}
+
+# printable sets printable_out to $1 with every character that is not
+# printable ASCII shown as "?", apart from the newlines between find's lines,
+# so that a name taken from the directory cannot drive the terminal.
+printable() {
+  printable_out=${1//[![:print:]$nl]/?}
 }
 
 # split_fields sets fld[0..nfields-1] to the tab-separated fields of $1. read
@@ -612,15 +625,26 @@ check_tools() {
   fi
 }
 
-# check_cfg reads row $1's .cfg on descriptor 4 and dies on anything outside
-# the layout TLC is known to read as intended: comments, the five headings,
-# and plain entries under the three that take them. It keeps what
-# check_directory compares across rows.
+# not_keyword dies if the name $2 has the shape of a TLC configuration
+# keyword, which TLC could read as a heading rather than a name; $1 says where.
+not_keyword() {
+  if [[ $2 =~ $re_keyword ]]; then
+    die "$1: \"$2\" has the shape of a TLC configuration keyword, all capitals and underscores"
+  fi
+}
+
+# check_cfg reads row $1's .cfg from the copy $2, on descriptor 4, and dies on
+# anything outside the layout TLC is known to read as intended: comments, the
+# five headings, and plain entries under the three that take them. Its
+# messages name the file in docs/tla. It keeps what check_directory compares
+# across rows: whether there is a CONSTRAINT heading, and the body, every
+# line but comments and the CONSTRAINT section.
 check_cfg() {
-  local i=$1
-  local file=$tla_dir/${m_config[$i]}.cfg name=docs/tla/${m_config[$i]}.cfg
+  local i=$1 file=$2
+  local name=docs/tla/${m_config[$i]}.cfg prop=${m_property[$i]}
   local line lineno=0 heading= seen=" " key entry cname value
-  local constraint=0 constants= invariants= prop=${m_property[$i]}
+  local constraint=0 invariants= body= typeok=0 others=0
+  local names_constants=" " names_constraint=" " names_invariants=" "
   while :; do
     line=
     if ! IFS= read -r line <&4; then
@@ -658,17 +682,38 @@ check_cfg() {
             if ! [[ $cname =~ $re_name ]]; then
               die "$name:$lineno: \"$cname\" is not a constant name"
             fi
+            not_keyword "$name:$lineno" "$cname"
             if ! [[ $value =~ $re_value ]]; then
               die "$name:$lineno: \"$value\" is not a number, a quoted string or a set of them"
             fi
-            constants=$constants$line$nl
+            case $names_constants in
+              *" $cname "*) die "$name:$lineno: $cname appears twice under CONSTANTS" ;;
+            esac
+            names_constants="$names_constants$cname "
+            body=$body$line$nl
             ;;
           CONSTRAINT | INVARIANTS)
             if ! [[ $entry =~ $re_name ]]; then
               die "$name:$lineno: a $heading entry is a name, not \"$entry\""
             fi
-            if [ "$heading" = INVARIANTS ]; then
+            not_keyword "$name:$lineno" "$entry"
+            if [ "$heading" = CONSTRAINT ]; then
+              case $names_constraint in
+                *" $entry "*) die "$name:$lineno: $entry appears twice under CONSTRAINT" ;;
+              esac
+              names_constraint="$names_constraint$entry "
+            else
+              case $names_invariants in
+                *" $entry "*) die "$name:$lineno: $entry appears twice under INVARIANTS" ;;
+              esac
+              names_invariants="$names_invariants$entry "
               invariants=$invariants$line$nl
+              if [ "$entry" = TypeOK ]; then
+                typeok=1
+              else
+                others=$((others + 1))
+              fi
+              body=$body$line$nl
             fi
             ;;
           *)
@@ -686,6 +731,7 @@ check_cfg() {
             if ! [[ ${line#"SPECIFICATION "} =~ $re_name ]]; then
               die "$name:$lineno: SPECIFICATION names no specification"
             fi
+            not_keyword "$name:$lineno" "${line#"SPECIFICATION "}"
             ;;
           CONSTANTS | CONSTRAINT | INVARIANTS)
             key=$line
@@ -704,39 +750,70 @@ check_cfg() {
         heading=$key
         if [ "$key" = CONSTRAINT ]; then
           constraint=1
+        else
+          body=$body$line$nl
         fi
         ;;
     esac
   done 4<"$file"
+  case $seen in
+    *" SPECIFICATION "*) ;;
+    *) die "$name: there is no SPECIFICATION heading" ;;
+  esac
+  case $seen in
+    *" INVARIANTS "*) ;;
+    *) die "$name: there is no INVARIANTS heading" ;;
+  esac
   # The two entries are distinct, since a MustFail property is never TypeOK.
   if [ "${m_expect[$i]}" = MustFail ] &&
     [ "$invariants" != "  TypeOK$nl  $prop$nl" ] &&
     [ "$invariants" != "  $prop$nl  TypeOK$nl" ]; then
     die "$name: a MustFail configuration's INVARIANTS are exactly TypeOK and $prop"
   fi
+  # A MustHold row that checked only TypeOK, or not even that, would pass
+  # while showing nothing about the protocol.
+  if [ "${m_expect[$i]}" = MustHold ] &&
+    { [ "$typeok" -eq 0 ] || [ "$others" -eq 0 ]; }; then
+    die "$name: a MustHold configuration's INVARIANTS include TypeOK and at least one other invariant"
+  fi
   m_constraint[$i]=$constraint
-  m_constants[$i]=$constants
-  m_invariants[$i]=$invariants
+  m_body[$i]=$body
 }
 
+# check_row_files copies row $1's module and configuration into its run
+# directory and checks the copies, which are what TLC later reads, so that
+# nothing can change between the check and the run.
 check_row_files() {
   local i=$1
-  regular_file "$tla_dir/${m_module[$i]}.tla" "docs/tla/${m_module[$i]}.tla, named by the row for ${m_config[$i]},"
-  regular_file "$tla_dir/${m_config[$i]}.cfg" "docs/tla/${m_config[$i]}.cfg"
-  check_cfg "$i"
+  local module=${m_module[$i]} config=${m_config[$i]} dir
+  regular_file "$tla_dir/$module.tla" "docs/tla/$module.tla, named by the row for $config,"
+  regular_file "$tla_dir/$config.cfg" "docs/tla/$config.cfg"
+  dir=$tmp_parent/$config
+  if ! mkdir -- "$dir"; then
+    die "cannot create $dir"
+  fi
+  if ! cp -- "$tla_dir/$module.tla" "$dir/$module.tla"; then
+    die "cannot copy docs/tla/$module.tla to $dir"
+  fi
+  regular_file "$dir/$module.tla" "the copy $dir/$module.tla"
+  if ! cp -- "$tla_dir/$config.cfg" "$dir/$config.cfg"; then
+    die "cannot copy docs/tla/$config.cfg to $dir"
+  fi
+  regular_file "$dir/$config.cfg" "the copy $dir/$config.cfg"
+  check_cfg "$i" "$dir/$config.cfg"
 }
 
 # check_directory ties the manifest to the directory both ways, so that a
 # configuration added without a row cannot go unchecked.
 check_directory() {
-  local i=0 f name j hit
+  local i=0 f name j hit shown
   while [ "$i" -lt "$m_count" ]; do
     check_row_files "$i"
     i=$((i + 1))
   done
   # A CONSTRAINT prunes the states TLC explores, so a MustHold row with one
-  # holds only of what it kept; its twin without one checks the same
-  # invariants over the same constants unpruned.
+  # holds only of what it kept; its twin, the same configuration line for line
+  # without the CONSTRAINT section, checks the same thing unpruned.
   i=0
   while [ "$i" -lt "$m_count" ]; do
     if [ "${m_expect[$i]}" = MustHold ] && [ "${m_constraint[$i]}" -eq 1 ]; then
@@ -746,14 +823,13 @@ check_directory() {
         if [ "${m_expect[$j]}" = MustHold ] &&
           [ "${m_module[$j]}" = "${m_module[$i]}" ] &&
           [ "${m_constraint[$j]}" -eq 0 ] &&
-          [ "${m_constants[$j]}" = "${m_constants[$i]}" ] &&
-          [ "${m_invariants[$j]}" = "${m_invariants[$i]}" ]; then
+          [ "${m_body[$j]}" = "${m_body[$i]}" ]; then
           hit=1
         fi
         j=$((j + 1))
       done
       if [ "$hit" -eq 0 ]; then
-        die "${m_config[$i]}: a MustHold configuration with a CONSTRAINT needs a MustHold one of ${m_module[$i]} without it, with the same CONSTANTS and INVARIANTS"
+        die "${m_config[$i]}: a MustHold configuration with a CONSTRAINT needs a MustHold twin of ${m_module[$i]}, which must be the same configuration without the constraint"
       fi
     fi
     i=$((i + 1))
@@ -773,34 +849,49 @@ check_directory() {
       j=$((j + 1))
     done
     if [ "$hit" -eq 0 ]; then
-      die "docs/tla/${f##*/} has no row in docs/tla/manifest.tsv"
+      shown=${f##*/}
+      shown=${shown//[![:print:]]/?}
+      die "docs/tla/$shown has no row in docs/tla/manifest.tsv"
     fi
   done
 }
 
 # find_guards sets guard[0..g_count-1] to the prefixes, each ending in one
-# "/", that the temporary directory must lie outside: the repository, and
-# every directory above it that holds .git, since a worktree's main checkout
-# is as much the repository as the worktree is.
+# "/", that the temporary directory must lie outside, and guard_dir[] to the
+# same directories without that "/": the repository, and every directory
+# above it that holds .git, since a worktree's main checkout is as much the
+# repository as the worktree is. A .git that is a dangling link still counts.
 find_guards() {
-  local d=$root
+  local d=$root k=0
   guard[0]=${root%/}/
+  guard_dir[0]=$root
   g_count=1
   while [ -n "$d" ] && [ "$d" != / ]; do
     d=${d%/*}
     if [ -z "$d" ]; then
       d=/
     fi
-    if [ -e "${d%/}/.git" ]; then
+    if [ -e "${d%/}/.git" ] || [ -L "${d%/}/.git" ]; then
       guard[$g_count]=${d%/}/
+      guard_dir[$g_count]=$d
       g_count=$((g_count + 1))
     fi
   done
+  while [ "$k" -lt "$g_count" ]; do
+    if [ ! -d "${guard_dir[$k]}" ]; then
+      die "the guard ${guard_dir[$k]} is not a directory"
+    fi
+    k=$((k + 1))
+  done
 }
 
-# inside_repo returns 0 if $1 lies under a guard, and sets inside_of to it.
+# inside_repo returns 0 if $1, a path resolved by pwd -P, lies under a guard,
+# and sets inside_of to it. A path can name a directory in more than one
+# spelling, as a macOS firmlink under /System/Volumes/Data does, so besides
+# the prefix it compares $1 and every directory above it with each guard by
+# device and inode, which -ef does without a stat command.
 inside_repo() {
-  local p=$1/ k=0 hit=1
+  local p=$1/ d=$1 k=0 hit=1
   inside_of=
   shopt -s nocasematch
   while [ "$k" -lt "$g_count" ]; do
@@ -813,7 +904,30 @@ inside_repo() {
     k=$((k + 1))
   done
   shopt -u nocasematch
-  return "$hit"
+  if [ "$hit" -eq 0 ]; then
+    return 0
+  fi
+  while :; do
+    if [ ! -d "$d" ]; then
+      die "$d, on the way up from $1, is not a directory"
+    fi
+    k=0
+    while [ "$k" -lt "$g_count" ]; do
+      if [ "$d" -ef "${guard_dir[$k]}" ]; then
+        inside_of=${guard[$k]}
+        return 0
+      fi
+      k=$((k + 1))
+    done
+    if [ "$d" = / ]; then
+      break
+    fi
+    d=${d%/*}
+    if [ -z "$d" ]; then
+      d=/
+    fi
+  done
+  return 1
 }
 
 # make_tmp creates the one temporary parent of every run directory. The
@@ -863,28 +977,17 @@ make_tmp() {
 # refuses -noGenerateSpecTE with status 1; and one worker keeps the state
 # counts the same from run to run. user.home and java.io.tmpdir point into the
 # run directory, and -XX:-UsePerfData keeps the JVM's own file out of the
-# system temp directory.
+# system temp directory. TLC reads the copies check_row_files made and checked
+# in the run directory.
 run_row() {
   local i=$1
   local module=${m_module[$i]} config=${m_config[$i]} dir start
-  make_tmp
   dir=$tmp_parent/$config
-  if ! mkdir -- "$dir"; then
-    die "cannot create $dir"
-  fi
   if ! mkdir -- "$dir/home"; then
     die "cannot create $dir/home"
   fi
   if ! mkdir -- "$dir/tmp"; then
     die "cannot create $dir/tmp"
-  fi
-  regular_file "$tla_dir/$module.tla" "docs/tla/$module.tla"
-  if ! cp -- "$tla_dir/$module.tla" "$dir/$module.tla"; then
-    die "cannot copy docs/tla/$module.tla to $dir"
-  fi
-  regular_file "$tla_dir/$config.cfg" "docs/tla/$config.cfg"
-  if ! cp -- "$tla_dir/$config.cfg" "$dir/$config.cfg"; then
-    die "cannot copy docs/tla/$config.cfg to $dir"
   fi
   if ! cd -- "$dir"; then
     die "cannot enter $dir"
