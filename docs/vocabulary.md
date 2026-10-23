@@ -247,6 +247,7 @@ machine's states (rule 3).
 | `Committed(m, k, et)` | `commitLocked`'s success path, with the root pointer's new ETag `et` |
 | `BucketVars`, `MountVars`, `PruneVars`, `GhostVars`, `Vars` | the variables, in groups, for `UNCHANGED` and for `Spec` |
 | `Next`, `Spec` | the next-state relation, and the specification, `Init /\ [][Next]_Vars` |
+| `PassApartFromOwnCommits` | a state constraint, which only `CommitProtocol_PruneTwoWriters` sets: while a mount's prune pass runs, the mount completes no commit, and the pass has not deleted the snapshot of an attempt the mount has still to swap. TLC takes no step from a state that breaks it |
 
 **Properties.** All reserved, ADR 0013: `TypeOK`, `RootSnapshotExists`,
 `NoLostAck`, `ChunksBeforeRoot`, `ReadOnlyNeverWrites`, `NoSelfDivergence`.

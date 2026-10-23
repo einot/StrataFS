@@ -16,8 +16,12 @@ This file says what the directory holds, how to read it and how to run it.
   fix the code has, and seven each show an open defect: #88 by three routes,
   #89, #91, and #5 by two. Each opens with a comment giving its expectation,
   its issue or the fix it removes, and the source of each `Fixes` member.
+  One, `CommitProtocol_PruneTwoWriters`, also sets a state constraint,
+  `PassApartFromOwnCommits`, for the reason its comment and the module's
+  Assumption J15 give.
 - **The three tables** (*Tables*): `trace.tsv`, `manifest.tsv` and
-  `tools.tsv`. No row of `manifest.tsv` is calibrated yet (*Running*).
+  `tools.tsv`. A row of `manifest.tsv` whose `exit` and `log` are `-` is not
+  calibrated yet (*Running*).
 - **The runner**, `scripts/tla.sh`, outside this directory (*Running*).
 - **The tripwire**, `internal/blobfs/tla_trace_test.go`, outside it too
   (*Tripwire*).
@@ -308,3 +312,20 @@ long page 100,000 characters at a time.
 how comments are handled, so the second item comes from a second read, from
 character 100,000. The grammar's lexical rules were in its first 100,000
 characters, and the rest of it was not read.
+
+The state constraint rests on two more facts from TLC 1.7.4's source, each
+fetched on 2026-10-22, while the configurations were calibrated, through the
+same tool:
+
+- `ModelConfig.java`, at the URL above: `CONSTRAINT` and `CONSTRAINTS` are
+  keywords of a configuration, and each name that follows one, up to the next
+  keyword, is stored as a state constraint.
+- `tlc2/tool/ModelChecker.java`, at
+  <https://raw.githubusercontent.com/tlaplus/tlaplus/v1.7.4/tlatools/org.lamport.tlatools/src/tlc2/tool/ModelChecker.java>:
+  in `doNext`, a successor state that breaks a state constraint is still
+  checked against the invariants, but is neither added to the set of states
+  seen nor queued, so TLC takes no step from it.
+
+**Honesty note:** the tool was asked to quote the lines that do these
+things, and gave them as quotations inside its own summary; neither file was
+read whole.

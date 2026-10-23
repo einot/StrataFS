@@ -108,6 +108,18 @@
 \*   J14. Failed List and Delete calls are left out. A failed Delete can
 \*        leave an orphan above the root pointer's snapshot, so the ADR for
 \*        #88's fix adds them if its argument needs them.
+\*   J15. CommitProtocol_PruneTwoWriters sets the state constraint
+\*        PassApartFromOwnCommits, and no other configuration sets one. Its
+\*        two writers also admit, at the same length as #88's route 2,
+\*        behaviours in which a pass overlaps its own mount's next commit,
+\*        the trigger of routes 1 and 3, and TLC reported one of them, which
+\*        also ran through #89's window. No bound removes them, since the
+\*        mount whose pass it is can always commit at epoch 2. The
+\*        constraint assumes no fix: it only stops TLC taking a step from a
+\*        state that breaks it. Once the configuration flips, it leaves
+\*        unchecked a pass that overlaps its own mount's commit and another
+\*        mount's attempt at once, which no configuration covers, so the ADR
+\*        for #88's fix adds one.
 
 EXTENDS Naturals, FiniteSets
 
@@ -750,5 +762,22 @@ ReadOnlyNeverWrites ==
 \* since it last set rootETag.
 NoSelfDivergence ==
   \A m \in Mounts : mode[m] = "Diverged" => overtaken[m]
+
+-----------------------------------------------------------------------------
+\* State constraints.
+
+\* PassApartFromOwnCommits: while a mount's prune pass runs, the mount
+\* completes no commit, and the pass has not deleted the snapshot of an
+\* attempt the mount has still to swap. So only other mounts' commits
+\* overlap a pass. Only CommitProtocol_PruneTwoWriters sets it (Assumption
+\* J15). TLC checks the invariants of a state that breaks a constraint, and
+\* takes no step from it, so the second conjunct stops the mount's swap to a
+\* snapshot its own pass deleted before TLC can take that swap.
+PassApartFromOwnCommits ==
+  \A m \in Mounts :
+    pruning[m] # "Idle" =>
+      /\ epoch[m] = pruneCurrent[m]
+      /\ ((pc[m] = "Swap" /\ attempt[m] # NoKey) =>
+            attempt[m] \in DOMAIN snapshots)
 
 =============================================================================
