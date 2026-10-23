@@ -43,9 +43,13 @@ func checkTrace(root, tsv string) []string {
 	cache := map[string]traceParsed{}
 	rows := 0
 
-	// LF line endings: the last line's LF ends it, and does not begin a
-	// blank line after it.
+	// LF line endings: every line ends in LF, the last one included. The
+	// last line's LF ends it, and does not begin a blank line after it. An
+	// empty tsv has no line, so only its header and its rows are missing.
 	lines := strings.Split(strings.TrimSuffix(tsv, "\n"), "\n")
+	if tsv != "" && !strings.HasSuffix(tsv, "\n") {
+		report(len(lines), "does not end in LF: every line must, the last one included")
+	}
 	for i, line := range lines {
 		n := i + 1
 		for j := 0; j < len(line); j++ {
@@ -54,6 +58,9 @@ func checkTrace(root, tsv string) []string {
 				break
 			} else if c >= 0x80 {
 				report(n, "has byte %#x at offset %d, which is not ASCII", c, j)
+				break
+			} else if c != '\t' && (c < 0x20 || c == 0x7f) {
+				report(n, "has control byte %#x at offset %d: only printable ASCII and the tab between fields", c, j)
 				break
 			}
 		}
@@ -424,8 +431,13 @@ func TestTLATraceCheckerCatchesProblems(t *testing.T) {
 		{"lower-case action", bad(row("M", "init", "p/x.go", "F")), 3},
 		{"action with an underscore", bad(row("M", "Init_2", "p/x.go", "F")), 3},
 		{"carriage return", bad(valid[0] + "\r"), 3},
-		{"non-ASCII byte", bad(traceRow("M", "Init", "p/x.go", "F", "nöne", "-")), 3},
+		{"non-ASCII byte", bad(traceRow("M", "Init", "p/x.go", "F", "n\xc3\xb6ne", "-")), 3},
+		{"NUL byte", bad(traceRow("M", "Init", "p/x.go", "F", "no\x00ne", "-")), 3},
+		{"form feed", bad(traceRow("M", "Init", "p/x.go", "F", "no\x0cne", "-")), 3},
+		{"DEL byte", bad(traceRow("M", "Init", "p/x.go", "F", "no\x7fne", "-")), 3},
 		{"blank line", bad(""), 3},
+		{"last row without LF", strings.TrimSuffix(traceDoc(traceHeader, valid[0], valid[1]), "\n"), 3},
+		{"last comment without LF", strings.TrimSuffix(traceDoc(traceHeader, valid[0], "# a comment"), "\n"), 3},
 		{"wrong header", traceDoc("#spec\taction\tfile\tsymbol\tlocks", valid[0]), 1},
 		{"header with spaces", traceDoc(strings.ReplaceAll(traceHeader, "\t", " "), valid[0]), 1},
 		{"no header", traceDoc(valid[0], valid[1]), 1},
