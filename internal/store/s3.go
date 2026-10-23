@@ -249,6 +249,11 @@ func (s *S3) Head(ctx context.Context, key string) (ObjectInfo, error) {
 	return ObjectInfo{Key: key, Size: size, ETag: cleanETag(resp.Header.Get("ETag"))}, nil
 }
 
+// Put writes an object unconditionally. do sends it again after a
+// transport error, a 5xx or a 429, so an attempt can take effect while
+// Put still returns an error.
+//
+// TLA+: docs/tla/CommitProtocol.tla PutSnapshot, FallbackPut
 func (s *S3) Put(ctx context.Context, key string, data []byte) error {
 	if data == nil {
 		data = []byte{}

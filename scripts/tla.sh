@@ -11,13 +11,27 @@
 # than skipping it: a gate that passes because nothing ran is no gate. Nothing
 # is downloaded or installed here.
 #
-# TLC writes trace files beside the module it checks and its state queue under
-# -metadir, so each configuration runs on copies in its own directory under
-# one temporary parent outside the repository, and a run leaves the working
-# tree as it found it (ADR 0013 section 9).
+# Before anything else, the script clears the environment that would change
+# what java, bash or the tools it calls load or match: the JVM's option
+# variables, CLASSPATH, BASH_ENV, the Perl variables shasum reads, GLOBIGNORE,
+# and every DYLD_ and LD_ variable. It refuses a docs/tla that resolves
+# anywhere but the repository's own, and any symbolic link under it.
+#
+# Every mode makes one temporary parent outside the repository, and outside any
+# checkout above it, and removes it on exit unless a failed run keeps it for
+# its logs. TLC writes trace files beside the module it checks and its state
+# queue under -metadir, so each configuration runs on copies in its own
+# directory there, and a run leaves the working tree as it found it (ADR 0013
+# section 9). TLC loads a copy of the jar made there and verified there, not the
+# installed file, which could change between the check and the run. Each run
+# directory has its own home and tmp, which user.home and java.io.tmpdir name,
+# so that TLC reads and writes nothing outside the temporary directory and
+# sends no usage statistics.
 #
 # The data files are read as data: no field is evaluated, none is passed where
-# it could be read as an option, and none names a path outside docs/tla.
+# it could be read as an option, and none names a path outside docs/tla. Each
+# .cfg must keep a fixed layout of headings and entries, checked before TLC
+# reads it.
 #
 # The script's own variables are lowercase. tools.tsv names an environment
 # variable in uppercase and the script reads it by indirection, so it can only
@@ -28,6 +42,19 @@ unset CDPATH
 # The JVM reads these and would add flags to both java invocations, the
 # version probe and TLC, despite the script passing no other flag.
 unset JAVA_TOOL_OPTIONS _JAVA_OPTIONS JDK_JAVA_OPTIONS
+# CLASSPATH would add to what TLC loads, BASH_ENV runs code in any bash this
+# starts, the Perl variables load code into shasum, and the DYLD_ and LD_
+# variables load libraries into every program it runs.
+unset CLASSPATH BASH_ENV PERL5OPT PERL5LIB PERLLIB GLOBIGNORE
+for envvar in "${!DYLD_@}" "${!LD_@}"; do
+  if [ -n "$envvar" ]; then
+    unset -v "$envvar"
+  fi
+done
+# The *.cfg loop must see exactly the files there, whatever SHELLOPTS or
+# BASHOPTS said.
+set +f
+shopt -u nullglob failglob dotglob nocaseglob
 
 tab=$'\t'
 nl=$'\n'
@@ -35,10 +62,12 @@ cr=$'\r'
 
 tools_header="#tool${tab}version${tab}env${tab}default${tab}bytes${tab}sha256${tab}sha1${tab}verify${tab}source"
 manifest_header="#module${tab}config${tab}tier${tab}expect${tab}property${tab}exit${tab}log${tab}shows"
+log_holds='Model checking completed. No error has been found.'
 
 # Patterns are kept in variables because bash 3.2 matches a quoted right-hand
 # side of =~ as a literal string.
 re_ascii=$'^[\t -~]*$'
+re_cfg_line='^[ -~]*$'
 re_name='^[A-Za-z][A-Za-z0-9_]*$'
 re_property='^[A-Za-z][A-Za-z0-9]*$'
 re_env='^[A-Z][A-Z0-9_]*$'
@@ -47,6 +76,7 @@ re_sha256='^[0-9A-Fa-f]{64}$'
 re_sha1='^[0-9A-Fa-f]{40}$'
 re_major='^[0-9]{1,9}$'
 re_count='^[0-9][0-9,]*$'
+re_value='^([0-9]+|"[A-Za-z0-9]*"|\{\}|\{([0-9]+|"[A-Za-z0-9]*")(, ([0-9]+|"[A-Za-z0-9]*"))*\})$'
 
 tmp_parent=
 keep_tmp=0
@@ -55,6 +85,7 @@ java_bin=
 hasher=
 t_count=0
 m_count=0
+g_count=0
 nfields=0
 
 die() {
@@ -81,6 +112,38 @@ trap 'exit 143' TERM
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P) ||
   die "cannot find the repository root from ${BASH_SOURCE[0]}"
 tla_dir=$root/docs/tla
+
+# regular_file dies unless $1 is a regular file and not a symbolic link; $2
+# names it in the message.
+regular_file() {
+  if [ -L "$1" ]; then
+    die "$2 is a symbolic link, which the runner refuses"
+  fi
+  if [ ! -e "$1" ]; then
+    die "$2 does not exist"
+  fi
+  if [ ! -f "$1" ]; then
+    die "$2 is not a regular file"
+  fi
+}
+
+# check_paths refuses a docs/tla reached through a link, so that every file
+# the runner reads is the one in this checkout.
+check_paths() {
+  local resolved out
+  if ! resolved=$(cd -- "$tla_dir" && pwd -P); then
+    die "cannot enter $tla_dir"
+  fi
+  if [ "$resolved" != "$root/docs/tla" ]; then
+    die "docs/tla resolves to $resolved, not $root/docs/tla"
+  fi
+  if ! out=$(find "$tla_dir" -type l -print); then
+    die "find failed under $tla_dir"
+  fi
+  if [ -n "$out" ]; then
+    die "docs/tla holds symbolic links, which the runner refuses:$nl$out"
+  fi
+}
 
 # split_fields sets fld[0..nfields-1] to the tab-separated fields of $1. read
 # with IFS set to a tab would merge adjacent tabs and drop leading and
@@ -110,9 +173,7 @@ split_fields() {
 read_table() {
   local file=$1 header=$2 want=$3 handler=$4
   local name=${1#"$root"/} line lineno=0 i
-  if [ ! -f "$file" ]; then
-    die "$name does not exist"
-  fi
+  regular_file "$file" "$name"
   while :; do
     line=
     if ! IFS= read -r line <&3; then
@@ -157,6 +218,10 @@ read_table() {
 
 add_tool_row() {
   local at=$1 j=0
+  case ${fld[0]} in
+    tla2tools.jar | java) ;;
+    *) die "$at: tool \"${fld[0]}\" is neither tla2tools.jar nor java" ;;
+  esac
   while [ "$j" -lt "$t_count" ]; do
     if [ "${t_tool[$j]}" = "${fld[0]}" ]; then
       die "$at: a second row for ${fld[0]}"
@@ -188,7 +253,7 @@ same_name() {
 }
 
 add_manifest_row() {
-  local at=$1 j=0
+  local at=$1 j=0 must_log
   local module=${fld[0]} config=${fld[1]} tier=${fld[2]} expect=${fld[3]}
   local property=${fld[4]} want_exit=${fld[5]} want_log=${fld[6]}
   if ! [[ $module =~ $re_name ]]; then
@@ -227,10 +292,33 @@ add_manifest_row() {
     fi
     j=$((j + 1))
   done
+
+  # A calibrated row must expect the outcome its expect and property name, so
+  # that a MustFail row cannot pass on some other failure, or on TypeOK, which
+  # every MustFail configuration checks beside its property.
+  if [ "$expect" = MustFail ] && [ "$property" = TypeOK ]; then
+    die "$at: a MustFail row's property cannot be TypeOK"
+  fi
+  if [ "$expect" = MustHold ]; then
+    must_log=$log_holds
+    if [ "$want_exit" != - ] && [ "$want_exit" != 0 ]; then
+      die "$at: a MustHold row's exit is 0, not $want_exit"
+    fi
+  else
+    must_log="Error: Invariant $property is violated."
+    if [ "$want_exit" = 0 ]; then
+      die "$at: a MustFail row's exit cannot be 0"
+    fi
+  fi
+  if [ "$want_log" != - ] && [ "$want_log" != "$must_log" ]; then
+    die "$at: a $expect row's log is \"$must_log\", not \"$want_log\""
+  fi
+
   m_module[$m_count]=$module
   m_config[$m_count]=$config
   m_tier[$m_count]=$tier
   m_expect[$m_count]=$expect
+  m_property[$m_count]=$property
   m_exit[$m_count]=$want_exit
   m_log[$m_count]=$want_log
   m_count=$((m_count + 1))
@@ -330,13 +418,15 @@ java_major() {
 }
 
 # check_tool sets tool_path, and tool_note or tool_why, for row $1, and
-# returns 1 if the tool is not the one pinned.
+# returns 1 if the tool is not the one pinned. For the jar it also sets
+# tool_copy, the verified copy TLC is to load.
 check_tool() {
   local i=$1
   local tool=${t_tool[$i]} env=${t_env[$i]} def=${t_default[$i]}
   local bytes=${t_bytes[$i]} sha256=${t_sha256[$i]} sha1=${t_sha1[$i]}
-  local verify=${t_verify[$i]} val path n status out
+  local verify=${t_verify[$i]} val path copy n status out
   tool_path=$def
+  tool_copy=
   tool_note=
   tool_why=
   # The name is checked before the indirect expansion, which would otherwise
@@ -374,6 +464,14 @@ check_tool() {
       return 1
       ;;
   esac
+  if [ "$tool" = tla2tools.jar ]; then
+    case $path in
+      *:*)
+        tool_why="the path contains \":\", on which java's -cp would split it"
+        return 1
+        ;;
+    esac
+  fi
   if [ "$tool" = tla2tools.jar ] && [ "$verify" != file ]; then
     tool_why="tla2tools.jar is pinned by verify=file, not verify=$verify"
     return 1
@@ -405,8 +503,15 @@ check_tool() {
         tool_why="not readable"
         return 1
       fi
-      if ! n=$(wc -c <"$path"); then
-        tool_why="cannot count its bytes"
+      # The checks run on the copy TLC will load, so that what was verified
+      # is what runs, whatever happens to the installed file meanwhile.
+      copy=$tmp_parent/tla2tools.jar
+      if ! cp -- "$path" "$copy"; then
+        tool_why="cannot copy it to $copy"
+        return 1
+      fi
+      if ! n=$(wc -c <"$copy"); then
+        tool_why="cannot count the bytes of its copy $copy"
         return 1
       fi
       n=${n//[!0-9]/}
@@ -414,7 +519,7 @@ check_tool() {
         tool_why="it has $n bytes, but tools.tsv pins $bytes"
         return 1
       fi
-      if ! digest 256 "$path"; then
+      if ! digest 256 "$copy"; then
         tool_why=$digest_why
         return 1
       fi
@@ -425,7 +530,7 @@ check_tool() {
       fi
       tool_note="$n bytes, SHA-256 matches"
       if [ "$sha1" != - ]; then
-        if ! digest 1 "$path"; then
+        if ! digest 1 "$copy"; then
           tool_why=$digest_why
           return 1
         fi
@@ -436,6 +541,8 @@ check_tool() {
         fi
         tool_note="$tool_note, SHA-1 matches"
       fi
+      tool_note="$tool_note, checked on its copy"
+      tool_copy=$copy
       ;;
     java)
       # bytes, sha256 and sha1 describe the archive the JRE was unpacked from,
@@ -444,10 +551,12 @@ check_tool() {
         tool_why="not an executable file"
         return 1
       fi
+      # Run from the temporary parent, with no perf data file, so that the
+      # probe writes nothing in the caller's cwd or the system temp directory.
       status=0
-      out=$("$path" -XshowSettings:properties -version 2>&1 </dev/null) || status=$?
+      out=$(cd -- "$tmp_parent" && "$path" -XX:-UsePerfData -XshowSettings:properties -version 2>&1 </dev/null) || status=$?
       if [ "$status" -ne 0 ]; then
-        tool_why="\"-XshowSettings:properties -version\" exited with status $status"
+        tool_why="the version probe, \"-XX:-UsePerfData -XshowSettings:properties -version\" run in $tmp_parent, exited with status $status"
         return 1
       fi
       if ! java_major "$out"; then
@@ -479,7 +588,7 @@ check_tools() {
         printf 'ok   %s %s %s (%s)\n' "${t_tool[$i]}" "${t_version[$i]}" "$tool_path" "$tool_note"
       fi
       case ${t_tool[$i]} in
-        tla2tools.jar) jar_path=$tool_path ;;
+        tla2tools.jar) jar_path=$tool_copy ;;
         java) java_bin=$tool_path ;;
       esac
     else
@@ -503,14 +612,118 @@ check_tools() {
   fi
 }
 
+# check_cfg reads row $1's .cfg on descriptor 4 and dies on anything outside
+# the layout TLC is known to read as intended: comments, the five headings,
+# and plain entries under the three that take them. It keeps what
+# check_directory compares across rows.
+check_cfg() {
+  local i=$1
+  local file=$tla_dir/${m_config[$i]}.cfg name=docs/tla/${m_config[$i]}.cfg
+  local line lineno=0 heading= seen=" " key entry cname value
+  local constraint=0 constants= invariants= prop=${m_property[$i]}
+  while :; do
+    line=
+    if ! IFS= read -r line <&4; then
+      if [ -n "$line" ]; then
+        die "$name:$((lineno + 1)): the last line does not end in a newline"
+      fi
+      break
+    fi
+    lineno=$((lineno + 1))
+    if ! [[ $line =~ $re_cfg_line ]]; then
+      die "$name:$lineno: not printable ASCII with LF line endings and no tabs"
+    fi
+    case $line in
+      '\*'*) continue ;;
+    esac
+    case $line in
+      *'\'* | *'(*'*)
+        die "$name:$lineno: a backslash or \"(*\" outside a line beginning \\*"
+        ;;
+    esac
+    case $line in
+      '  '*)
+        if [ -z "$heading" ]; then
+          die "$name:$lineno: an entry before any heading"
+        fi
+        entry=${line:2}
+        case $heading in
+          CONSTANTS)
+            case $entry in
+              *" = "*) ;;
+              *) die "$name:$lineno: a CONSTANTS entry is a name, \" = \" and a value" ;;
+            esac
+            cname=${entry%%" = "*}
+            value=${entry#*" = "}
+            if ! [[ $cname =~ $re_name ]]; then
+              die "$name:$lineno: \"$cname\" is not a constant name"
+            fi
+            if ! [[ $value =~ $re_value ]]; then
+              die "$name:$lineno: \"$value\" is not a number, a quoted string or a set of them"
+            fi
+            constants=$constants$line$nl
+            ;;
+          CONSTRAINT | INVARIANTS)
+            if ! [[ $entry =~ $re_name ]]; then
+              die "$name:$lineno: a $heading entry is a name, not \"$entry\""
+            fi
+            if [ "$heading" = INVARIANTS ]; then
+              invariants=$invariants$line$nl
+            fi
+            ;;
+          *)
+            die "$name:$lineno: $heading takes no entries"
+            ;;
+        esac
+        ;;
+      '' | ' '*)
+        die "$name:$lineno: a blank line, or one beginning with a single space"
+        ;;
+      *)
+        case $line in
+          "SPECIFICATION "*)
+            key=SPECIFICATION
+            if ! [[ ${line#"SPECIFICATION "} =~ $re_name ]]; then
+              die "$name:$lineno: SPECIFICATION names no specification"
+            fi
+            ;;
+          CONSTANTS | CONSTRAINT | INVARIANTS)
+            key=$line
+            ;;
+          "CHECK_DEADLOCK TRUE" | "CHECK_DEADLOCK FALSE")
+            key=CHECK_DEADLOCK
+            ;;
+          *)
+            die "$name:$lineno: \"$line\" is not a heading this runner accepts"
+            ;;
+        esac
+        case $seen in
+          *" $key "*) die "$name:$lineno: a second $key heading" ;;
+        esac
+        seen="$seen$key "
+        heading=$key
+        if [ "$key" = CONSTRAINT ]; then
+          constraint=1
+        fi
+        ;;
+    esac
+  done 4<"$file"
+  # The two entries are distinct, since a MustFail property is never TypeOK.
+  if [ "${m_expect[$i]}" = MustFail ] &&
+    [ "$invariants" != "  TypeOK$nl  $prop$nl" ] &&
+    [ "$invariants" != "  $prop$nl  TypeOK$nl" ]; then
+    die "$name: a MustFail configuration's INVARIANTS are exactly TypeOK and $prop"
+  fi
+  m_constraint[$i]=$constraint
+  m_constants[$i]=$constants
+  m_invariants[$i]=$invariants
+}
+
 check_row_files() {
   local i=$1
-  if [ ! -f "$tla_dir/${m_module[$i]}.tla" ]; then
-    die "docs/tla/${m_module[$i]}.tla, named by the row for ${m_config[$i]}, does not exist"
-  fi
-  if [ ! -f "$tla_dir/${m_config[$i]}.cfg" ]; then
-    die "docs/tla/${m_config[$i]}.cfg does not exist"
-  fi
+  regular_file "$tla_dir/${m_module[$i]}.tla" "docs/tla/${m_module[$i]}.tla, named by the row for ${m_config[$i]},"
+  regular_file "$tla_dir/${m_config[$i]}.cfg" "docs/tla/${m_config[$i]}.cfg"
+  check_cfg "$i"
 }
 
 # check_directory ties the manifest to the directory both ways, so that a
@@ -519,6 +732,30 @@ check_directory() {
   local i=0 f name j hit
   while [ "$i" -lt "$m_count" ]; do
     check_row_files "$i"
+    i=$((i + 1))
+  done
+  # A CONSTRAINT prunes the states TLC explores, so a MustHold row with one
+  # holds only of what it kept; its twin without one checks the same
+  # invariants over the same constants unpruned.
+  i=0
+  while [ "$i" -lt "$m_count" ]; do
+    if [ "${m_expect[$i]}" = MustHold ] && [ "${m_constraint[$i]}" -eq 1 ]; then
+      hit=0
+      j=0
+      while [ "$j" -lt "$m_count" ]; do
+        if [ "${m_expect[$j]}" = MustHold ] &&
+          [ "${m_module[$j]}" = "${m_module[$i]}" ] &&
+          [ "${m_constraint[$j]}" -eq 0 ] &&
+          [ "${m_constants[$j]}" = "${m_constants[$i]}" ] &&
+          [ "${m_invariants[$j]}" = "${m_invariants[$i]}" ]; then
+          hit=1
+        fi
+        j=$((j + 1))
+      done
+      if [ "$hit" -eq 0 ]; then
+        die "${m_config[$i]}: a MustHold configuration with a CONSTRAINT needs a MustHold one of ${m_module[$i]} without it, with the same CONSTANTS and INVARIANTS"
+      fi
+    fi
     i=$((i + 1))
   done
   for f in "$tla_dir"/*.cfg; do
@@ -541,12 +778,40 @@ check_directory() {
   done
 }
 
+# find_guards sets guard[0..g_count-1] to the prefixes, each ending in one
+# "/", that the temporary directory must lie outside: the repository, and
+# every directory above it that holds .git, since a worktree's main checkout
+# is as much the repository as the worktree is.
+find_guards() {
+  local d=$root
+  guard[0]=${root%/}/
+  g_count=1
+  while [ -n "$d" ] && [ "$d" != / ]; do
+    d=${d%/*}
+    if [ -z "$d" ]; then
+      d=/
+    fi
+    if [ -e "${d%/}/.git" ]; then
+      guard[$g_count]=${d%/}/
+      g_count=$((g_count + 1))
+    fi
+  done
+}
+
+# inside_repo returns 0 if $1 lies under a guard, and sets inside_of to it.
 inside_repo() {
-  local p=$1/ r=${root%/}/ hit=1
+  local p=$1/ k=0 hit=1
+  inside_of=
   shopt -s nocasematch
-  case $p in
-    "$r"*) hit=0 ;;
-  esac
+  while [ "$k" -lt "$g_count" ]; do
+    case $p in
+      "${guard[$k]}"*)
+        hit=0
+        inside_of=${guard[$k]}
+        ;;
+    esac
+    k=$((k + 1))
+  done
   shopt -u nocasematch
   return "$hit"
 }
@@ -554,18 +819,24 @@ inside_repo() {
 # make_tmp creates the one temporary parent of every run directory. The
 # comparison ignores case because the default macOS filesystem does, so a
 # TMPDIR differing from the repository only in case is still inside it. The
-# base is checked before mktemp too, so that a refusal writes nothing.
+# base is checked before mktemp too, so that a refusal writes nothing. A ":"
+# is refused because the jar's copy lives here, and java's -cp would split
+# its path there.
 make_tmp() {
   local base resolved made
   if [ -n "$tmp_parent" ]; then
     return 0
   fi
+  find_guards
   base=${TMPDIR:-/tmp}
   if ! resolved=$(cd -- "$base" && pwd -P); then
     die "cannot enter the temporary directory $base"
   fi
+  case $resolved in
+    *:*) die "the temporary directory $resolved contains \":\"" ;;
+  esac
   if inside_repo "$resolved"; then
-    die "the temporary directory $resolved lies inside the repository $root"
+    die "the temporary directory $resolved lies inside $inside_of, the repository or a checkout above it"
   fi
   if ! made=$(mktemp -d -- "$base/tla.XXXXXX"); then
     die "cannot create a temporary directory under $base"
@@ -574,9 +845,15 @@ make_tmp() {
     rmdir -- "$made" || true
     die "cannot enter the temporary directory $made"
   fi
+  case $resolved in
+    *:*)
+      rmdir -- "$made" || true
+      die "the temporary directory $resolved contains \":\""
+      ;;
+  esac
   if inside_repo "$resolved"; then
     rmdir -- "$made" || true
-    die "the temporary directory $resolved lies inside the repository $root"
+    die "the temporary directory $resolved lies inside $inside_of, the repository or a checkout above it"
   fi
   tmp_parent=$resolved
 }
@@ -584,7 +861,9 @@ make_tmp() {
 # run_row runs TLC on row $1 and sets row_status, row_dir, row_log and
 # row_elapsed. Each .cfg sets CHECK_DEADLOCK FALSE, so no -deadlock; TLC 1.7.4
 # refuses -noGenerateSpecTE with status 1; and one worker keeps the state
-# counts the same from run to run.
+# counts the same from run to run. user.home and java.io.tmpdir point into the
+# run directory, and -XX:-UsePerfData keeps the JVM's own file out of the
+# system temp directory.
 run_row() {
   local i=$1
   local module=${m_module[$i]} config=${m_config[$i]} dir start
@@ -593,9 +872,17 @@ run_row() {
   if ! mkdir -- "$dir"; then
     die "cannot create $dir"
   fi
+  if ! mkdir -- "$dir/home"; then
+    die "cannot create $dir/home"
+  fi
+  if ! mkdir -- "$dir/tmp"; then
+    die "cannot create $dir/tmp"
+  fi
+  regular_file "$tla_dir/$module.tla" "docs/tla/$module.tla"
   if ! cp -- "$tla_dir/$module.tla" "$dir/$module.tla"; then
     die "cannot copy docs/tla/$module.tla to $dir"
   fi
+  regular_file "$tla_dir/$config.cfg" "docs/tla/$config.cfg"
   if ! cp -- "$tla_dir/$config.cfg" "$dir/$config.cfg"; then
     die "cannot copy docs/tla/$config.cfg to $dir"
   fi
@@ -604,7 +891,7 @@ run_row() {
   fi
   start=$SECONDS
   row_status=0
-  "$java_bin" -XX:+UseParallelGC -cp "$jar_path" tlc2.TLC -workers 1 -metadir "$dir/states" -config "$config.cfg" "$module.tla" >"$dir/tlc.log" 2>&1 </dev/null || row_status=$?
+  "$java_bin" -XX:+UseParallelGC -XX:-UsePerfData -Duser.home="$dir/home" -Djava.io.tmpdir="$dir/tmp" -cp "$jar_path" tlc2.TLC -workers 1 -metadir "$dir/states" -config "$config.cfg" "$module.tla" >"$dir/tlc.log" 2>&1 </dev/null || row_status=$?
   row_elapsed=$((SECONDS - start))
   if ! cd -- /; then
     die "cannot leave $dir"
@@ -746,6 +1033,8 @@ main() {
       ;;
   esac
 
+  check_paths
+  make_tmp
   if [ "$1" = tools ]; then
     check_tools 1
     exit 0

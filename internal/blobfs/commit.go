@@ -178,7 +178,7 @@ func (f *FS) Sync(ctx context.Context) error {
 // changed a chunk list without the commit gate, and is logged as the bug it is
 // rather than committed as a silent exposure of removed bytes.
 //
-// TLA+: docs/tla/CommitProtocol.tla PutSnapshot, SwapOK, SwapReplyLost, SwapFailed, SwapConflict, SwapUnsupported, FallbackPut, FallbackHead
+// TLA+: docs/tla/CommitProtocol.tla PutSnapshot, SwapOK, SwapReplyLost, SwapFailed, SwapConflict, SwapUnsupported, FallbackPut, FallbackHead, Diverge
 func (f *FS) commitLocked(ctx context.Context) error {
 	if f.diverged.Load() {
 		return errors.New("filesystem diverged: another writer committed to this bucket; remount to continue")
