@@ -23,22 +23,22 @@ package blobfs
 // another mount's acknowledged commit (NoLostAck).
 //
 // Covered: the three tests of ADR 0021 section 6 that compile at 247a276 and
-// fail there.
+// fail there, and the four that need Config.AllowUnconditionalRoot or
+// (*FS).fallbackAllowed.
 //   - TestOne501AfterHonouredSwapsMakesNoUnconditionalRootWrite: F1, the route
 //     test, steps 1 to 8, from CommitProtocol_Fallback's counterexample.
 //   - TestNewOnAStoreWithoutConditionalWritesIsRefused: F2.
 //   - TestCommitOnAStoreWithoutConditionalWritesFailsWithoutOptIn: F3.
+//   - TestOptInRestoresTheUnconditionalFallback: O1.
+//   - TestOptInFallsBackAfterOne501: O2.
+//   - TestOptInOnAReadOnlyMountWritesNothing: O3.
+//   - TestFallbackAllowedFollowsConfig: O4.
+//
+// Elsewhere:
+//   - O5, the R8 update, is in internal/blobfs/prune_root_test.go.
+//   - C1 to C3, which call runCheck, are in cmd/strata/check_test.go.
 //
 // Not covered, on purpose:
-//   - O1 to O4 of ADR 0021 section 6, which use Config.AllowUnconditionalRoot
-//     or (*FS).fallbackAllowed. Neither exists at 247a276, and one reference
-//     to either would stop the package's tests from building, hiding the red
-//     run these tests exist to show. They belong in this file once the code
-//     exists.
-//   - O5, the R8 update in internal/blobfs/prune_root_test.go, for the same
-//     reason.
-//   - C1 to C3, which call runCheck with its new signature and belong in
-//     cmd/strata/check_test.go.
 //   - What ADR 0021 section 6 leaves to review: that commitLocked makes no
 //     store call after a refused swap on every path and leaves FS.epoch,
 //     FS.rootETag, FS.lastCommit and FS.diverged as they were; that the
@@ -85,6 +85,8 @@ package blobfs
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -338,7 +340,8 @@ func sf91NewHarness(t *testing.T, unconditional bool) (*sf91Store, context.Conte
 
 // sf91Config is every mount's Config: the root directory owned by sf91Caller,
 // no pruning and no wait on the write budget (ADR 0021 section 6), and no
-// opt-in, since Config.AllowUnconditionalRoot does not exist at 247a276.
+// opt-in. A test that needs the opt-in or a read-only mount sets
+// AllowUnconditionalRoot or ReadOnly on the value it returns.
 func sf91Config(st store.Store) Config {
 	return Config{
 		Store:             st,
@@ -752,4 +755,219 @@ func TestCommitOnAStoreWithoutConditionalWritesFailsWithoutOptIn(t *testing.T) {
 
 	// A remount on the inner store has c1, and neither c2 nor c3.
 	sf91CheckRemount(t, ctx, h.inner, []string{"c1"}, []string{"c2", "c3"}, "ADR 0021 section 6, F3")
+}
+
+// sf91ETag is *store.Local's ETag for body: the lowercase hexadecimal MD5 of
+// it (ADR 0021 section 6, the facts; ADR 0020 section 6).
+func sf91ETag(body []byte) string {
+	sum := md5.Sum(body)
+	return hex.EncodeToString(sum[:])
+}
+
+// sf91CheckRootFallbacks requires the harness to have counted exactly want
+// Puts and want Heads of rootKey: the opted-in fallback's unconditional write
+// and the Head after it, once per commit that took it (ADR 0021 section 2).
+func sf91CheckRootFallbacks(t *testing.T, rec sf91Records, want int, when, where string) {
+	t.Helper()
+	if n := len(rec.rootPuts); n != want {
+		t.Errorf("%s the harness counted %d Put(s) of the root pointer %q, want %d: with the operator's opt-in a "+
+			"swap the store answers store.ErrUnsupported is followed by the unconditional write, as at 247a276 "+
+			"(ADR 0021 section 1, section 2; %s). Every PutIfMatch of %q, in call order: %v", when, n, rootKey,
+			want, where, rootKey, rec.swaps)
+	}
+	if rec.rootHeads != want {
+		t.Errorf("%s the harness counted %d Head(s) of the root pointer %q, want %d: with the operator's opt-in "+
+			"the unconditional write is followed by the Head, as at 247a276 (ADR 0021 section 2; %s)", when,
+			rec.rootHeads, rootKey, want, where)
+	}
+}
+
+// TestOptInRestoresTheUnconditionalFallback is O1 of ADR 0021 section 6: on a
+// store that answers every PutIfMatch store.ErrUnsupported, a mount with
+// Config.AllowUnconditionalRoot behaves as at 247a276 (section 3, the second
+// case). New over an empty bucket succeeds through one unconditional Put and
+// one Head of rootKey; a commit, c2, succeeds through a second of each; the
+// root pointer on the inner store names a snapshot whose root directory holds
+// c2; and a remount has c2.
+//
+// In the model: docs/tla/CommitProtocol_UnconditionalSingle.cfg, without
+// FallbackOptIn, which reads as one opted-in writer (ADR 0021 section 4):
+// SwapUnsupported's FallbackAllowed branch, FallbackPut, then FallbackHead
+// and Committed, for the init commit and again for c2.
+func TestOptInRestoresTheUnconditionalFallback(t *testing.T) {
+	h, ctx := sf91NewHarness(t, true)
+	cfg := sf91Config(h)
+	cfg.AllowUnconditionalRoot = true
+
+	fs := sf91MustNew(t, ctx, "ADR 0021 section 6, O1: New with AllowUnconditionalRoot over an empty bucket, on "+
+		"a store that answers every PutIfMatch store.ErrUnsupported", cfg)
+	sf91CheckRootFallbacks(t, h.records(), 1, "after New,", "ADR 0021 section 6, O1, the init commit")
+
+	if err := sf91Commit(t, ctx, fs, "c2", "ADR 0021 section 6, O1: Sync of the commit of c2"); err != nil {
+		t.Errorf("ADR 0021 section 6, O1: Sync of the commit of c2, with AllowUnconditionalRoot, = %v, want "+
+			"success: with the opt-in a swap answered store.ErrUnsupported is followed by the unconditional "+
+			"write and the Head, and the commit succeeds (ADR 0021 section 1, section 2)", err)
+	}
+	sf91CheckRootFallbacks(t, h.records(), 2, "after the commit of c2,", "ADR 0021 section 6, O1, the commit of c2")
+
+	// Through the inner store, after the records were read.
+	sf91CheckRootEntries(t, ctx, h.inner, []string{"c2"}, nil, "ADR 0021 section 6, O1")
+	sf91CheckRemount(t, ctx, h.inner, []string{"c2"}, nil, "ADR 0021 section 6, O1")
+}
+
+// TestOptInFallsBackAfterOne501 is O2 of ADR 0021 section 6: a mount with
+// Config.AllowUnconditionalRoot on a store that honours conditional writes
+// and answers one swap 501 takes the fallback for that commit only, and
+// adopts the ETag its Head returned. New over an empty bucket initialises
+// conditionally; with the one-shot 501 armed, a commit of c2 succeeds through
+// exactly one Put and one Head of rootKey; a commit of c3, with the store
+// honouring conditions, succeeds with no further Put or Head, and its swap
+// passed through with an etag argument equal to *store.Local's ETag of the
+// root pointer body the fallback Put wrote, the lowercase hexadecimal MD5 of
+// it.
+//
+// In the model: CommitProtocol_NoFallbackOptIn read as opted-in writers
+// (ADR 0021 section 4) with one writer: SwapUnsupported's FallbackAllowed
+// branch, FallbackPut and FallbackHead, whose Committed keeps the Head's
+// ETag, then SwapOK against it.
+func TestOptInFallsBackAfterOne501(t *testing.T) {
+	h, ctx := sf91NewHarness(t, false)
+	cfg := sf91Config(h)
+	cfg.AllowUnconditionalRoot = true
+
+	fs := sf91MustNew(t, ctx, "ADR 0021 section 6, O2: New with AllowUnconditionalRoot over an empty bucket", cfg)
+
+	// One 501 on the swap of c2: the fallback.
+	h.arm501()
+	if err := sf91Commit(t, ctx, fs, "c2", "ADR 0021 section 6, O2: Sync of the commit of c2"); err != nil {
+		t.Errorf("ADR 0021 section 6, O2: Sync of the commit of c2, its swap answered store.ErrUnsupported once, "+
+			"with AllowUnconditionalRoot, = %v, want success through the fallback (ADR 0021 section 1, section 2)",
+			err)
+	}
+	sf91CheckRootFallbacks(t, h.records(), 1, "after the commit of c2,", "ADR 0021 section 6, O2, the commit of c2")
+
+	// c3, with the store honouring conditions: a conditional swap against the
+	// Head's ETag.
+	mark := len(h.records().swaps)
+	if err := sf91Commit(t, ctx, fs, "c3", "ADR 0021 section 6, O2: Sync of the commit of c3"); err != nil {
+		t.Errorf("ADR 0021 section 6, O2: Sync of the commit of c3, with the store honouring conditions, = %v, "+
+			"want success: its swap is conditioned on the ETag the fallback's Head returned, which is the root "+
+			"pointer's (ADR 0021 section 2, Assumption 5)", err)
+	}
+	rec := h.records()
+	sf91CheckRootFallbacks(t, rec, 1, "after the commit of c3,", "ADR 0021 section 6, O2, the commit of c3")
+
+	if len(rec.rootPuts) == 0 {
+		t.Errorf("the harness kept no Put of the root pointer %q, so the ETag adopted from the fallback's Head "+
+			"cannot be checked (ADR 0021 section 6, O2)", rootKey)
+		return
+	}
+	want := sf91ETag(rec.rootPuts[len(rec.rootPuts)-1])
+	if len(rec.swaps) <= mark {
+		t.Errorf("the commit of c3 made no PutIfMatch of the root pointer %q (the harness saw %d, all before it: "+
+			"%v), want its swap (ADR 0021 section 6, O2)", rootKey, len(rec.swaps), rec.swaps)
+	} else if last := rec.swaps[len(rec.swaps)-1]; last.answered501 || last.etag != want {
+		t.Errorf("the last PutIfMatch of the root pointer %q is %v, want one passed through with the etag "+
+			"argument %q, the lowercase hexadecimal MD5 of the root pointer body the fallback Put wrote: the "+
+			"Head's ETag is adopted (ADR 0021 section 2; section 6, O2). Every PutIfMatch of %q, in call "+
+			"order: %v", rootKey, last, want, rootKey, rec.swaps)
+	}
+}
+
+// TestOptInOnAReadOnlyMountWritesNothing is O3 of ADR 0021 section 6: with
+// Config.ReadOnly and Config.AllowUnconditionalRoot both set, New over a
+// bucket that holds a filesystem succeeds (ADR 0021 section 3; Assumption
+// 11), and a Sync of a mount whose FS.dirty a test set true, holding FS.mu
+// for writing (ADR 0011 section 7), makes no Put, Delete or PutIfMatch of any
+// key and leaves the root pointer's bytes as they were: the opt-in has
+// nothing to allow on a read-only mount. What Sync returns is not pinned.
+//
+// In the model: a fenced mount's SwapUnsupported branch, or its PutSnapshot
+// failing first with ChunksFirst, neither of which reaches the bucket.
+//
+// The root pointer's bytes are read from the inner store after the seeding
+// mount and before the harness's mount, when the harness has received no
+// call, as in F3.
+func TestOptInOnAReadOnlyMountWritesNothing(t *testing.T) {
+	h, ctx := sf91NewHarness(t, false)
+
+	sf91MustNew(t, ctx, "setup: New on the inner store over an empty bucket, to seed a filesystem",
+		sf91Config(h.inner))
+	rootBefore, err := h.inner.Get(ctx, rootKey)
+	if err != nil {
+		t.Fatalf("setup: Get(%q) on the inner store after the seeding mount = %v, want the root pointer",
+			rootKey, err)
+	}
+
+	cfg := sf91Config(h)
+	cfg.ReadOnly = true
+	cfg.AllowUnconditionalRoot = true
+	fs := sf91MustNew(t, ctx, "ADR 0021 section 6, O3: New with ReadOnly and AllowUnconditionalRoot over the "+
+		"seeded bucket", cfg)
+
+	sf91Go(func() bool {
+		fs.mu.Lock()
+		defer fs.mu.Unlock()
+		fs.dirty = true
+		return true
+	}).wait(t, "setting FS.dirty true holding FS.mu for writing")
+
+	if err := sf91Sync(t, ctx, fs, "ADR 0021 section 6, O3: Sync of the dirty read-only mount"); err != nil {
+		t.Logf("Sync of the dirty read-only mount returned %v; what it returns is not pinned (ADR 0021 "+
+			"section 6, O3)", err)
+	}
+
+	rec := h.records()
+	for _, c := range []struct {
+		method string
+		n      int
+	}{{"Put", rec.puts}, {"Delete", rec.deletes}, {"PutIfMatch", rec.putIfMatches}} {
+		if c.n != 0 {
+			t.Errorf("the harness counted %d %s call(s) on a read-only mount with AllowUnconditionalRoot, want "+
+				"none: a read-only mount writes nothing, and the opt-in has nothing to allow (ADR 0011 section "+
+				"3; ADR 0021 section 3, Assumption 11; section 6, O3)", c.n, c.method)
+		}
+	}
+
+	// Through the inner store, after the records were read.
+	rootAfter, err := h.inner.Get(ctx, rootKey)
+	if err != nil {
+		t.Errorf("Get(%q) on the inner store after the Sync = %v, want the root pointer as it was (ADR 0021 "+
+			"section 6, O3)", rootKey, err)
+	} else if !bytes.Equal(rootAfter, rootBefore) {
+		t.Errorf("after the Sync of the read-only mount the root pointer is %q, want it as it was, %q (ADR 0011 "+
+			"section 3; ADR 0021 section 6, O3)", rootAfter, rootBefore)
+	}
+}
+
+// TestFallbackAllowedFollowsConfig is O4 of ADR 0021 section 6:
+// (*FS).fallbackAllowed reports Config.AllowUnconditionalRoot, which New
+// copies into the FS (ADR 0021 section 2). New on a plain *store.Local with
+// the field false gives false, and with it true gives true.
+//
+// In the model: FallbackAllowed, which docs/tla/trace.tsv maps to
+// FS.fallbackAllowed.
+func TestFallbackAllowedFollowsConfig(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		t.Run(fmt.Sprintf("AllowUnconditionalRoot=%v", allow), func(t *testing.T) {
+			local, err := store.NewLocal(filepath.Join(t.TempDir(), "bucket"))
+			if err != nil {
+				t.Fatalf("setup: store.NewLocal: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			cfg := sf91Config(local)
+			cfg.AllowUnconditionalRoot = allow
+			what := fmt.Sprintf("ADR 0021 section 6, O4: New on a plain *store.Local with AllowUnconditionalRoot %v",
+				allow)
+			fs := sf91MustNew(t, ctx, what, cfg)
+			got := sf91Go(func() bool { return fs.fallbackAllowed() }).wait(t, "fallbackAllowed()")
+			if got != allow {
+				t.Errorf("fallbackAllowed() on a mount whose Config has AllowUnconditionalRoot %v = %v, want %v: it "+
+					"reports the operator's opt-in and nothing else (ADR 0021 section 2; section 6, O4)", allow, got,
+					allow)
+			}
+		})
+	}
 }
