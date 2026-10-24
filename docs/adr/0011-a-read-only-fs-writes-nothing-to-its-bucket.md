@@ -8,8 +8,8 @@ decides it. Nothing else changed.
 **Revised:** 2026-10-24 — cross-reference only: since ADR 0020, `loadOrInit`
 reads the root pointer with `GetWithETag`, one call for the body and its
 ETag, and makes no `Head` of it; §1's lead-in and table now say so, and the
-table gains the refusal of a root pointer read with no ETag (ADR 0020 §2).
-The decision is unchanged.
+table gains a row for a root pointer read with no ETag, which mounted in both
+modes until ADR 0020 §2 refused it. The decision is unchanged.
 **Issue:** #68
 
 ## Context
@@ -115,7 +115,8 @@ Nothing else in the bucket is consulted.
 | nothing | `store.ErrNotFound` | creates a filesystem and commits it | the same, and serves it | refused (§2) |
 | objects, but no root pointer: a first commit cut short, a filesystem whose root pointer was deleted, unrelated objects | `store.ErrNotFound` | creates a new filesystem among them and commits it | the same; its pruning can delete some of the snapshots there (*Context*) | refused (§2) |
 | a root pointer and the snapshot it names | the pointer | mounts it | mounts it | mounts it |
-| a root pointer that does not parse or gives another format version, or that comes with no ETag (ADR 0020 §2; at `3dc7c11`, one that `Head` fails on), or that names a snapshot that cannot be read or decoded or that has no root inode | the pointer | fails, writing nothing | the same | the same |
+| a root pointer that does not parse or gives another format version, or that `Head` failed on, until ADR 0020 removed that read, or that names a snapshot that cannot be read or decoded or that has no root inode | the pointer | fails, writing nothing | the same | the same |
+| a root pointer that comes with no ETag | the pointer | since ADR 0020 §2, fails, writing nothing; at `3dc7c11`, and until that ADR, mounted it with an empty `rootETag` | the same as the writable column, at each date | the same |
 | anything, when the read of `root` fails another way (a 403, a network error) | that error | fails, writing nothing | the same | the same |
 
 A local directory that does not exist is created by `store.NewLocal` before

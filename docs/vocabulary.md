@@ -118,8 +118,9 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 `mutable`, `SetAttr`, `createEntry`, `unlink`, `Rename`, `bufferWrite`,
 `truncate`, `flushAll`, `settleAll`, `flushOpen` and `putChunk` in
 `internal/blobfs/fs.go`; `ReadOnly.Put` and `ReadOnly.PutIfMatch` in
-`internal/store/store.go`; `S3.Put`, `S3.PutIfMatch` and `errorFor` in
-`internal/store/s3.go`; and `Local.PutIfMatch` in `internal/store/local.go`.
+`internal/store/store.go`; `S3.Put`, `S3.PutIfMatch`, `S3.GetWithETag` and
+`errorFor` in `internal/store/s3.go`; and `Local.PutIfMatch` and
+`Local.GetWithETag` in `internal/store/local.go`.
 `docs/tla/trace.tsv` gives each action's symbols. Of the entries ADR 0019
 added, `PruneBelowCurrent`, `Prunable`, and `prunable` in V7 exist, as of
 `cc38ca6`, `prunable` in `internal/blobfs/commit.go`; `Below`, which only the

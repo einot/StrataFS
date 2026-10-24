@@ -7,8 +7,13 @@ reported for `CommitProtocol_NoAtomicLoadPrune` and labels the hand trace;
 §6's count of `Head` calls at `55fc666` is one, not two; Assumption 3 no
 longer claims that `-check` catches every store the refusal reaches, and
 Assumption 4 makes the `CHANGES` entry `BREAKING:`; *What this does not
-decide* names a proxy that rewrites a `GET`'s ETag, with its sources. The
-rule, the Go change and the configurations are unchanged.
+decide* names a proxy that rewrites a `GET`'s ETag, with its sources; §6's
+harness, once `GetWithETag` existed, passes the read through and records
+the store's ETag as the loaded ETag beside the body's MD5, which the route
+test checks agree; the Consequences bullet on the refusal says what a
+read-only mount did before, and Assumption 4 that only the refusal's
+`CHANGES` entry is `BREAKING:`. The rule, the Go change and the
+configurations are unchanged.
 **Issue:** #89
 
 ## Context
@@ -384,8 +389,10 @@ type Credentials struct{ AccessKeyID, SecretAccessKey, SessionToken string }
   current body (ADR 0013 Assumption 6; *Context*). So a fake over a
   `*store.Local` may answer `GetWithETag` with the body `inner.Get` returned
   and `hex.EncodeToString(md5.Sum(body))` as its ETag: that is the store's
-  own answer, computed from the bytes returned, and it never races. It stands
-  in for `inner.GetWithETag` until the method exists (Assumption 14).
+  own answer, computed from the bytes returned, and it never races. It stood
+  in for `inner.GetWithETag` until the method existed; the harness now passes
+  the call through and records both, the store's ETag and that MD5, and the
+  route test checks that they agree (Assumption 14).
 - A `*store.S3` built with `PathStyle` true sends `GET /<bucket>/<key>` and
   `HEAD /<bucket>/<key>` to `Endpoint`, with a SigV4 `Authorization` header a
   fake server may ignore. On a 200 it reads the body and the `ETag` header,
@@ -404,15 +411,19 @@ type Credentials struct{ AccessKeyID, SecretAccessKey, SessionToken string }
 written without embedding `store.Store`, that passes every call through to
 the inner store and, in addition:
 
-- implements `GetWithETag` as the fact above says, with the hold below;
+- implements `GetWithETag` by passing the call through to the inner store's
+  `GetWithETag`, with the hold below (at `55fc666`, before the method
+  existed, it computed the ETag as the fact above says: Assumption 14);
 - **holds the next read of `rootKey`, by `Get` or by `GetWithETag`, after
   the inner call has returned and before the harness returns**, when armed,
-  one-shot: it signals that it is held, records the lowercase hexadecimal MD5
-  of the body it is about to return (the *loaded ETag*), waits until released
-  or until the test's context ends, then returns the inner call's result. So
-  the hold falls where #89's window is, whichever read a build makes first:
-  at `55fc666` that read is `Get(rootKey)`, and with this ADR it is
-  `GetWithETag(rootKey)`;
+  one-shot: it records as the *loaded ETag* the ETag the inner `GetWithETag`
+  returned, or, for a `Get`, the lowercase hexadecimal MD5 of the body it is
+  about to return, and records that MD5 of the body in either case; then
+  signals that it is held; waits until released or until the test's context
+  ends; then returns the inner call's result. So the hold falls where #89's
+  window is, whichever read a build makes first: with this ADR that read is
+  `GetWithETag(rootKey)`, and at `55fc666`, or in a build that regresses to
+  it, `Get(rootKey)`;
 - records the `etag` argument of every `PutIfMatch` of `rootKey` it passes
   through, in call order, and counts every `Head` of `rootKey`;
 - in its **no-ETag mode**, answers `Head(rootKey)` with the inner store's
@@ -443,7 +454,9 @@ fresh name in the root directory, by `vfs.Caller{UID: 501, GID: 20}`, then
    `Create` of `b3` on B returns `vfs.ErrStale`.
 6. The *loaded ETag* equals the `etag` argument of the last `PutIfMatch` of
    `rootKey` the harness saw, B's: the ETag swapped against belongs to the
-   body B loaded.
+   body B loaded. And the loaded ETag equals the MD5 the hold recorded of
+   the body it returned, by the first fact: the ETag the store gave B is
+   that body's.
 7. The harness counted no `Head` of `rootKey`.
 8. Through the inner `*store.Local`: `Get(rootKey)` decodes as `rootPointer`,
    `Get` of its `Snapshot` decodes with `decodeSnapshot`, and the root
@@ -473,8 +486,8 @@ store, so that each still satisfies `store.Store` once the method exists;
 `ciStore` counts it and `ciMethods` lists it as the ninth method. At
 `55fc666` an extra method on a fake changes nothing, so the package still
 builds and the two tests above fail rather than fail to build. These
-stand-ins are replaced by `inner.GetWithETag(ctx, key)` once the code exists
-(Assumption 14).
+stand-ins were replaced by `inner.GetWithETag(ctx, key)` once the code
+existed (Assumption 14).
 
 **Tests of the new method**, which cannot build at `55fc666` and are written
 once the code exists, in `internal/store/get_with_etag_test.go`:
@@ -568,7 +581,9 @@ Each is mine unless it says otherwise.
    now, and nothing in `-check` tells such a deployment apart until #133
    lands (Assumption 3). CLAUDE.md prefixes `BREAKING:` when a running
    deployment needs action to keep working; one on such a store does, so the
-   entry is prefixed, and it says what to check. That no such deployment is
+   refusal's entry is prefixed and says what to check, while the race fix,
+   which asks nothing of a deployment, has an unprefixed entry of its own
+   (CLAUDE.md: one line per change). That no such deployment is
    known is not a reason to leave the prefix off: the rule asks whether
    action is needed, not whether we know who needs it. A first draft of this
    ADR left it off on the claim Assumption 3 now narrows; review caught it.
@@ -637,13 +652,18 @@ Each is mine unless it says otherwise.
     The trace's window is between `GetRoot` and `HeadRoot`; a test cannot
     hold `HeadRoot` without failing to find it once the fix lands, so the
     harness holds the first read of the root pointer after it has read,
-    where every build has a read. The harness's `GetWithETag` computes
-    `Local`'s ETag from the bytes it returns rather than calling
-    `inner.GetWithETag`, because that method does not exist at `55fc666` and
-    one reference to it would stop the package's tests from building, hiding
-    the red run. The stand-in is exact, not approximate: it is `Local`'s own
-    ETag rule. It is replaced by the passthrough once the code exists, so
-    that the fakes describe the store and not a copy of its rule.
+    where every build has a read. At `55fc666` the harness's `GetWithETag`
+    computed `Local`'s ETag from the bytes it returned rather than calling
+    `inner.GetWithETag`, because that method did not exist there and one
+    reference to it would have stopped the package's tests from building,
+    hiding the red run. The stand-in was exact, not approximate: it is
+    `Local`'s own ETag rule. Once the code existed, the harness and the
+    fakes were switched to the passthrough, so that they describe the store
+    and not a copy of its rule; the harness still records the body's MD5
+    beside the ETag the store returned, and the route test checks that the
+    two agree, so the rule is exercised against the store's own answer, and
+    a build that regresses to `Get` is still held, with the MD5 as its
+    loaded ETag.
 15. **The error's two parts** (§2, §6). `no ETag` names the cause and the
     store's name says where, as ADR 0011 §7's refusal does; the rest of the
     text is not pinned.
@@ -696,9 +716,11 @@ Each is mine unless it says otherwise.
   absence with it.
 - `store.Store` has nine methods, and every fake of it implements one more.
 - A bucket whose store gives the root pointer no ETag on `GET` cannot be
-  mounted, read-only or not, where before it mounted and then, if `HEAD`
-  gave none either, misreported a second writer at its first commit or wrote
-  unconditionally, and, if `HEAD` gave one, worked (Assumption 4).
+  mounted, read-only or not. Before, a read-only mount of it served normally
+  in every case, since it never commits; a writable mount worked when `HEAD`
+  gave an ETag, and when `HEAD` gave none either it misreported a second
+  writer at its first commit, or wrote the root pointer unconditionally on a
+  store without conditional writes (Assumption 4).
 - Hard to change later: that `GetWithETag` is the only read a mount takes its
   first ETag from, which the redesign's `fsinfo` load (`docs/DESIGN.md` §5)
   inherits.
