@@ -69,8 +69,9 @@ gains cross-references to this ADR. The exemptions are listed in a register,
 reading it at `2d7ff34`, the commit this branch was cut from. Those about the
 holds of `Lookup`, `ReadDir`, `Read`, `SetAttr`, `createEntry`, `unlink`,
 `Rename`, `Write`, `bufferWrite` and `truncate` were read again in this
-branch's worktree at `43460cd`, whose two later commits change no code by the
-session's account. Nothing was run (Assumption 4). Code is cited by symbol.
+branch's worktree when it stood at `43460cd`. By the session's account, the
+branch's two commits from `2d7ff34` to there, `c562abd` and `43460cd`, change
+no code. Nothing was run (Assumption 4). Code is cited by symbol.
 
 **What this constrains.**
 
@@ -79,7 +80,10 @@ session's account. Nothing was run (Assumption 4). Code is cited by symbol.
   §14 included;
 - what an ADR that grants or revokes an exemption does, and the register
   (§4);
-- how a security-relevant transition asks a policy (§5).
+- how a security-relevant transition asks a policy (§5);
+- every later ADR, through two rules this ADR's PR adds to
+  `docs/adr/README.md`'s convention: how a later ADR replaces part of an
+  earlier one, and the register (Assumption 2).
 
 It replaces ADR 0014 §1's scope for new and changed code, and leaves ADR 0014
 §2 to §11 as decided: the APIs, the conventions for a machine, the locks, the
@@ -208,8 +212,8 @@ unless an ADR exempts it.
 **The first twelve.** This ADR grants E1 to E12. Each names its code, the
 rule it is exempt from, and the reason. E1 to E10 are the ten places that the
 owner's decision 1 in ADR 0014 accepted leaving as they were, with the reasons
-ADR 0014 §1 gives them, which are the architect's; this ADR adds their code
-and their rules (Assumption 8). E11 and E12 record forms that ADR 0014 §6 and
+ADR 0014 §1 gives them, which are the architect's, but for E8's, which this
+ADR restates; it adds their code and their rules (Assumption 8). E11 and E12 record forms that ADR 0014 §6 and
 §7 already decide, so that those forms keep the policy rule (Assumption 9).
 None of them is exempt from the link, which none of them needs (§5).
 
@@ -240,8 +244,10 @@ None of them is exempt from the link, which none of them needs (§5).
 - **E8. The flag checks**: `chunkSizeBytes` and `cacheBytes` (ADR 0008),
   `commitInterval` (ADR 0009) and `ownerID` (ADR 0010), in
   `cmd/strata/main.go`; from the policy rule. They are pure functions of their
-  flags that those ADRs pin: three refuse a value, and `cacheBytes` gives one
-  too large to express the largest bound there is.
+  flags that those ADRs pin. Three refuse a value outside their range.
+  `cacheBytes` refuses nothing: it maps a count of 0 or less to 0, the
+  default, and one too large to express in bytes to the largest bound,
+  `math.MaxInt64`.
 - **E9. `-check`**: `runCheck` and its probes, in `cmd/strata/check.go`;
   from the state rule. It is a linear script of probes.
 - **E10. The `MaxFileSize` clamp**: in `(*FS).Write`, in
@@ -331,7 +337,9 @@ when an owner asks its policy (Assumption 11).
   change, between the verdict and the `Fire`. A read hold of the serializing
   lock is never enough: two holders could each be permitted against one
   state, and the second would then fire from the state the first left
-  (Assumption 12).
+  (Assumption 12). Before the owner is shared, as when `initEmpty` commits,
+  nothing can race a `Fire` or change what a request reads, so a `Fire` made
+  then needs no lock, an `Atomic`'s named lock included.
 - **In a `vfs.FS` method**, the request comes after stages A to C and before
   the namespace preconditions of stage E, so a refusal comes in ADR 0007 §4's
   order of errors, and the event fires with the change that follows stage E.
@@ -347,8 +355,9 @@ when an owner asks its policy (Assumption 11).
     allows, since the read hold keeps what the request reads. A machine that
     `FS.mu` serializes needs `FS.mu` for writing: such a method either holds
     it for writing from stage C, or takes it for writing once its read hold
-    ends, resolves its handles and asks the policy again there (stages C and
-    D), and fires only on that second permit.
+    ends and runs stages C to E again there, resolving its handles, asking the
+    policy and checking its preconditions anew, and fires only if all of them
+    pass in that hold.
   - `Write` and `truncate` check under a read hold of `FS.mu`, release it, and
     apply their change in a later hold, after the budget's wait or under the
     commit gate (#101). The permit from that check does not carry over. A
@@ -374,7 +383,8 @@ when an owner asks its policy (Assumption 11).
   holds `f.perm` (ADR 0014 §6). The owner's constructor sets it; nothing else
   writes it; and a test in the owner's package may replace it after
   construction and before first use. In `blobfs`, `Unix()` stays in front of
-  whatever is installed (ADR 0014 §6). The transition's ADR names the field
+  whatever an ADR installs (ADR 0014 §6); a test's replacement follows
+  ADR 0014 §11's safety rule instead. The transition's ADR names the field
   (Assumption 14).
 - **A widening transition that no caller causes** has no caller for a policy
   to judge, and ADR 0014 §5's `Request` has no form for it. Its ADR does one
@@ -408,8 +418,9 @@ and to review. This section adds no name to `docs/vocabulary.md`.
   causes it, so it needs no policy. An edge added later that leaves
   `ReadOnly` or `Diverged` widens, and is linked. Its one transition is made
   in `commitLocked`, which runs holding `FS.mu` for writing, or from
-  `initEmpty` before the FS is shared, so the lock such an edge would need is
-  already held exclusively.
+  `initEmpty` before the FS is shared, when no lock is needed (above). So if
+  such an edge is added, every `Fire` of the mode already meets this section,
+  with `FS.mu` as the lock its doc comment would name.
 - **Root-pointer knowledge and the lifecycle machines**: their ADRs
   (ADR 0014 §8) apply this section. Root-pointer knowledge is
   security-relevant if the ADR for #5 has `mutable()` read it. `ProbeOurs`
@@ -453,8 +464,8 @@ gets its tests from the transition's ADR instead of T1 and T2
 - that a security-relevant transition's policy is asked, and its event fired,
   in one hold that holds the machine's serializing lock exclusively (§5);
 - that no path fires the event without asking;
-- that every `Fire` on an `Atomic` with a security-relevant transition holds
-  the lock its doc comment names, exclusively.
+- that every `Fire` on an `Atomic` with a security-relevant transition, once
+  its owner is shared, holds the lock its doc comment names, exclusively.
 
 ## Assumptions
 
@@ -474,9 +485,16 @@ required, except where it says otherwise. The owner's decisions are in
    record of what was decided on 2026-10-12. A list that grows with every
    exemption is not a decision, so it is a register, as the README's index is
    a list of ADRs: kept in an ADR, every exemption would revise that ADR and
-   stack another `Revised` line on it. ADR 0014 is not superseded
-   whole, because its APIs, its wiring and its tests stand, and the code and
-   the vocabulary cite them.
+   stack another `Revised` line on it. ADR 0014 is not superseded whole,
+   because its APIs, its wiring and its tests stand, and the code and the
+   vocabulary cite them. This ADR's PR adds both rules to
+   `docs/adr/README.md`'s convention, rather than keeping them here, because
+   they bind every later ADR: no rule said how a later ADR replaces part of an
+   earlier one, and an ADR that grants an exemption has to know where its row
+   goes. The first rule lets the earlier ADR gain one pointer sentence in each
+   section the replaced part touches, besides its `Revised` line, as
+   ADR 0014's §1, §3 and §9 do, so that a reader of that section is sent to
+   the later ADR.
 3. **The third rule's citation** (decision 2). The owner accepted a text that
    cites "ADR 0014 §12", where the draft held the definition and the link.
    This ADR holds them in §5. So CLAUDE.md's two citations of ADR 0014 §12,
@@ -515,9 +533,10 @@ required, except where it says otherwise. The owner's decisions are in
    rule for the machines and the state, and the policy rule for the flag
    checks and the clamp. By §2's terms the policy rule does not reach those
    two at all; they stay listed so that the list is the one ADR 0014's
-   decision 1 accepted. E8's reason now says what `cacheBytes` does, since it
-   saturates rather than refuses, and review found "validators" too narrow
-   for it. Their code is named as it stands at `2d7ff34`.
+   decision 1 accepted. E8's reason is restated here to say what `cacheBytes`
+   does: it refuses nothing, so review found "validators" too narrow for it.
+   The register's row for E8 says the reason is restated. Their code is named
+   as it stands at `2d7ff34`.
 9. **E11 and E12** (§4). ADR 0014 §6 and §7 keep the mount gate and
    `ACCESS`'s read-only mask in `blobfs`, and the policy rule names "an
    access mask" and "a gate on an operation", so without these two ADR 0014
@@ -565,8 +584,10 @@ required, except where it says otherwise. The owner's decisions are in
     whether the hold was exclusive.
 13. **Read holds and later holds** (§5). The methods are sorted by the holds
     ADR 0014 §6 gives them and the code at `2d7ff34` makes. For a read hold,
-    the verdict is made again under the write hold, since nothing a read hold
-    decided says anything about the state once that hold ends. For a later
+    stages C to E run again under the write hold, the verdict and the
+    preconditions both, since nothing a read hold decided says anything about
+    the state once that hold ends, and the event must fire on preconditions
+    that still hold. For a later
     hold, checking again where the change lands is what #101 asks of every
     change, here asked only of a security-relevant transition. `Write`'s two
     holds are left to the ADR of any transition tied to its change, since no

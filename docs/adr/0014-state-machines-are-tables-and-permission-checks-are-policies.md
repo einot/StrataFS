@@ -7,8 +7,9 @@ ADR applied to a fixed scope standing for new and changed code, lists every
 exemption in the register `exemptions.md`, and links each security-relevant
 transition to a policy. It replaces §1's scope for new and changed code: §1's
 ten places are that register's E1 to E10, and "Everything else keeps its
-present form" holds only for code that no change reaches. §1, §3 and §9 each
-gain a sentence pointing to ADR 0018. Nothing else here changes, §1's text
+present form" holds for each thing it covers until a change brings that thing
+under the rules (ADR 0018 §2, §3). §1, §3 and §9 each gain a sentence pointing
+to ADR 0018. Nothing else here changes, §1's text
 included, and every test this ADR pins stands.
 **Issue:** #114
 
@@ -162,8 +163,8 @@ callers, or pure checks already pinned by their ADRs.
 
 Since ADR 0018, the rules this section applies bind all new and changed code,
 the ten places above are exemptions E1 to E10 in the register
-`exemptions.md`, and what the paragraph above keeps as it is keeps it only
-until a change reaches it (ADR 0018 §2 to §4).
+`exemptions.md` (ADR 0018 §4), and what the paragraph above keeps as it is
+keeps it until a change brings it under the rules (ADR 0018 §2, §3).
 
 ### 2. The `fsm` API
 

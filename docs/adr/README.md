@@ -25,8 +25,9 @@ against. A decision that only affects one function does not.
   that turned out wrong, not for a fact that moved underneath one.
 - A later ADR may replace one part of an earlier decision and leave the rest
   standing. It says which part it replaces. The earlier ADR keeps its status,
-  its text stays as the record, and a `Revised` line, cross-references only,
-  names the part and the ADR that replaced it.
+  and its text stays as the record. It gains a `Revised` line, cross-references
+  only, that names the part and the ADR that replaced it, and may gain one
+  sentence in each section the part touches, pointing to the later ADR.
 - [`exemptions.md`](exemptions.md) is a register, not an ADR. It lists every
   exemption from ADR 0018's rules that an ADR has granted, in force or
   revoked. The PR that carries an ADR granting or revoking one adds or marks

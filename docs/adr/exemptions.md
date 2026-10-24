@@ -28,7 +28,7 @@ The rules are ADR 0018 §1's: the state rule, the policy rule and the link.
 | E5 | The unsettled mark | `openFile.unsettled`, in `internal/blobfs/fs.go` | the state rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
 | E6 | The XDR reader's sticky error | `xdr.Reader`'s `err`, read through `Err`, in `internal/xdr/xdr.go` | the state rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
 | E7 | The store's retries | `(*S3).do`, in `internal/store/s3.go` | the state rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
-| E8 | The flag checks | `chunkSizeBytes`, `cacheBytes`, `commitInterval` and `ownerID`, in `cmd/strata/main.go` | the policy rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
+| E8 | The flag checks | `chunkSizeBytes`, `cacheBytes`, `commitInterval` and `ownerID`, in `cmd/strata/main.go` | the policy rule | ADR 0018 §4, which restates ADR 0014 §1's reason | in force |
 | E9 | `-check` | `runCheck` and its probes, in `cmd/strata/check.go` | the state rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
 | E10 | The `MaxFileSize` clamp | the clamp in `(*FS).Write`, in `internal/blobfs/fs.go` | the policy rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
 | E11 | The mount gate | `(*FS).mutable`, in `internal/blobfs/fs.go` | the policy rule's "in `internal/policy`" | ADR 0018 §4 | in force |
