@@ -31,21 +31,18 @@ package blobfs
 //   - S1, S2 and S3 of ADR 0020 section 6
 //     (TestLocalGetWithETagReturnsBodyAndItsETag,
 //     TestS3GetWithETagTakesETagFromGetResponse and
-//     TestReadOnlyPassesGetWithETagThrough). They call GetWithETag on a
-//     *store.Local, a *store.S3 and a store.ReadOnly, none of which has it at
-//     55fc666, and one reference to it would stop the package's tests from
-//     building, hiding the red run these tests exist to show. They belong in
-//     internal/store/get_with_etag_test.go once the code exists.
+//     TestReadOnlyPassesGetWithETagThrough). They test GetWithETag on a
+//     *store.Local, a *store.S3 and a store.ReadOnly, which is
+//     internal/store's to test, and they belong in
+//     internal/store/get_with_etag_test.go.
 //   - What ADR 0020 section 6 leaves to review: that loadOrInit takes the body
 //     and the ETag from one GetWithETag call, makes no Head of the root
 //     pointer on any path, and refuses an empty ETag before its snapshot read;
 //     that S3.GetWithETag takes the ETag from the response that carried the
 //     body, and Local.GetWithETag hashes the bytes it returns; that ReadOnly
 //     overrides nothing new; that commitLocked, initEmpty and the fallback are
-//     unchanged; the TLA+ lines, the trace.tsv rows, and that GetRoot with
-//     AtomicLoad describes loadOrInit; and that the stand-ins below, and those
-//     in pr88Store, ciStore and dr48Store, were replaced by
-//     inner.GetWithETag once the method existed.
+//     unchanged; and the TLA+ lines, the trace.tsv rows, and that GetRoot with
+//     AtomicLoad describes loadOrInit.
 //   - Logs, and the error's text beyond the two parts ADR 0020 section 2 pins
 //     ("no ETag" and the store's name). Which store methods New calls is not
 //     pinned beyond no Head of rootKey in the route test and no Put, Delete or
@@ -54,15 +51,18 @@ package blobfs
 // The harness, lr89Store, is ADR 0020 section 6's: a store.Store over a
 // *store.Local that does not embed store.Store and passes every call through
 // to it. In addition it:
-//   - implements GetWithETag as the inner store's Get and the lowercase
-//     hexadecimal MD5 of the body Get returned, which is *store.Local's own
-//     ETag for that body (section 6's first fact). It stands in for
-//     inner.GetWithETag, which does not exist at 55fc666 (Assumption 14);
+//   - passes GetWithETag through to inner.GetWithETag, so that the ETag a
+//     mount loads is the store's own answer and not a copy of its rule
+//     (ADR 0020 Assumption 14);
 //   - when armed, holds the next read of rootKey, by Get or by GetWithETag,
 //     once, after the inner call has returned and before the harness returns:
-//     it records the loaded ETag, the MD5 of the body it is about to return,
-//     signals that it is held, and waits until released or until the test's
-//     context ends;
+//     it records the loaded ETag, signals that it is held, and waits until
+//     released or until the test's context ends. For GetWithETag the loaded
+//     ETag is the ETag inner.GetWithETag returned. For Get, which returns no
+//     ETag, it is the lowercase hexadecimal MD5 of the body Get returned,
+//     *store.Local's ETag for that body (section 6's first fact), so that a
+//     build which still loads the root pointer by Get is held there too and
+//     its swap is compared with the body it loaded;
 //   - records the etag argument of every PutIfMatch of rootKey, in call order,
 //     counts every Head of rootKey, and records every Put, Delete and
 //     PutIfMatch of any key;
@@ -111,7 +111,8 @@ import (
 const lr89Bound = 10 * time.Second
 
 // lr89ETag is *store.Local's ETag for body: the lowercase hexadecimal MD5 of
-// it (ADR 0020 section 6, the first fact).
+// it (ADR 0020 section 6, the first fact). Only the hold on a read of rootKey
+// by Get uses it, since Get returns no ETag.
 func lr89ETag(body []byte) string {
 	sum := md5.Sum(body)
 	return hex.EncodeToString(sum[:])
@@ -129,8 +130,9 @@ type lr89Hold struct {
 	// "GetWithETag".
 	method string
 
-	// loaded is the loaded ETag: the lowercase hexadecimal MD5 of the body the
-	// held read is about to return, or "" if the read failed.
+	// loaded is the loaded ETag: for GetWithETag, the ETag the inner store's
+	// GetWithETag returned; for Get, the lowercase hexadecimal MD5 of the body
+	// the held read is about to return; "" if the read failed.
 	loaded string
 
 	// readErr is what the inner store returned as the held read's error.
@@ -205,10 +207,11 @@ func (s *lr89Store) noteWrite(method, key string) {
 }
 
 // readRoot is run by every read of rootKey by Get or GetWithETag, after the
-// inner call has returned data and err and before the harness returns. If the
-// hold is armed it disarms it and holds the read: it records the loaded ETag,
-// signals entered, and waits until the hold is released or testCtx ends.
-func (s *lr89Store) readRoot(method string, data []byte, err error) {
+// inner call has returned and before the harness returns, with the loaded
+// ETag and the error the inner call returned. If the hold is armed it disarms
+// it and holds the read: it records the loaded ETag, signals entered, and
+// waits until the hold is released or testCtx ends.
+func (s *lr89Store) readRoot(method, loaded string, err error) {
 	s.mu.Lock()
 	h := s.armed
 	s.armed = nil
@@ -220,7 +223,7 @@ func (s *lr89Store) readRoot(method string, data []byte, err error) {
 	if err != nil {
 		h.readErr = err
 	} else {
-		h.loaded = lr89ETag(data)
+		h.loaded = loaded
 	}
 	close(h.entered)
 	select {
@@ -229,32 +232,33 @@ func (s *lr89Store) readRoot(method string, data []byte, err error) {
 	}
 }
 
+// Get passes through. A read of rootKey goes through the hold, whose loaded
+// ETag is then the MD5 of the body Get returned, since Get returns no ETag.
 func (s *lr89Store) Get(ctx context.Context, key string) ([]byte, error) {
 	data, err := s.inner.Get(ctx, key)
 	if key == rootKey {
-		s.readRoot("Get", data, err)
+		loaded := ""
+		if err == nil {
+			loaded = lr89ETag(data)
+		}
+		s.readRoot("Get", loaded, err)
 	}
 	return data, err
 }
 
-// GetWithETag answers as ADR 0020 section 6's first fact says: the body the
-// inner store's Get returned, and the lowercase hexadecimal MD5 of that body,
-// which is *store.Local's ETag for it. ErrNotFound and every other error are
-// passed through. It stands in for s.inner.GetWithETag until that method
-// exists (ADR 0020 Assumption 14). In the no-ETag mode it gives rootKey an
-// empty ETag.
+// GetWithETag passes through to the inner store's GetWithETag (ADR 0020
+// Assumption 14), errors included. A read of rootKey goes through the hold,
+// whose loaded ETag is the one the inner store returned; in the no-ETag mode
+// the harness then answers it with an empty ETag.
 func (s *lr89Store) GetWithETag(ctx context.Context, key string) ([]byte, string, error) {
-	data, err := s.inner.Get(ctx, key)
+	data, etag, err := s.inner.GetWithETag(ctx, key)
 	if key == rootKey {
-		s.readRoot("GetWithETag", data, err)
+		s.readRoot("GetWithETag", etag, err)
+		if s.noETag {
+			etag = ""
+		}
 	}
-	if err != nil {
-		return nil, "", err
-	}
-	if key == rootKey && s.noETag {
-		return data, "", nil
-	}
-	return data, lr89ETag(data), nil
+	return data, etag, err
 }
 
 func (s *lr89Store) GetRange(ctx context.Context, key string, off int64, n int64) ([]byte, error) {
@@ -566,9 +570,10 @@ func lr89CheckRemount(t *testing.T, ctx context.Context, local *store.Local, nam
 //     whichever method a build makes it with (Get at 55fc666, GetWithETag
 //     with ADR 0020), and not between GetRoot and HeadRoot: a test cannot hold
 //     HeadRoot, which the fix removes (ADR 0020 Assumption 14).
-//   - The harness computes *store.Local's ETag itself, as the MD5 of the body
-//     inner.Get returned, rather than calling inner.GetWithETag, which does not
-//     exist at 55fc666 (ADR 0020 Assumption 14).
+//   - The loaded ETag is the one inner.GetWithETag returned when the held
+//     read is by GetWithETag. When it is by Get, which returns no ETag, the
+//     harness takes *store.Local's ETag for the body Get returned, its MD5
+//     (ADR 0020 section 6, the first fact).
 //   - A's Mutate and PutSnapshot come after B's GetRoot here, where the trace
 //     has them before it (states 5 and 6). What the route rests on is that
 //     A's SwapOK falls between B's GetRoot and HeadRoot, which it does.
