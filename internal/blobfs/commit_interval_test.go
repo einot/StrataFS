@@ -50,8 +50,6 @@ package blobfs
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"fmt"
 	"math"
 	"sort"
@@ -153,20 +151,11 @@ func (s *ciStore) Name() string {
 	return s.inner.Name()
 }
 
-// GetWithETag counts the call, then answers as ADR 0020 section 6's first
-// fact says: the body the inner store's Get returned, and the lowercase
-// hexadecimal MD5 of that body, which is *store.Local's ETag for it, the store
-// every test here wraps; ErrNotFound and every other error are passed
-// through. It stands in for s.inner.GetWithETag until that method exists
-// (ADR 0020 Assumption 14).
+// GetWithETag counts the call, then passes it through to the inner store, as
+// ADR 0020 Assumption 14 asks once the method exists.
 func (s *ciStore) GetWithETag(ctx context.Context, key string) ([]byte, string, error) {
 	s.count("GetWithETag")
-	data, err := s.inner.Get(ctx, key)
-	if err != nil {
-		return nil, "", err
-	}
-	sum := md5.Sum(data)
-	return data, hex.EncodeToString(sum[:]), nil
+	return s.inner.GetWithETag(ctx, key)
 }
 
 // ciConfig is the Config every New in this file is given.
