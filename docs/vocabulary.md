@@ -14,7 +14,7 @@ Every entry has a status (ADR 0013 §5):
 
 - **exists**: its Go name is in the code now, or, for a `Fixes` member, the fix
   it names is. Every entry marked exists was confirmed in the code at
-  `043927f`.
+  `043927f`, or at the later commit its section or its entry names.
 - **reserved**, with the ADR named: it is not in the code, and that ADR
   introduces it. A name only the specs use, with no Go name, such as an
   action, a ghost, a property or a string a variable holds, is reserved by
@@ -112,7 +112,7 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 
 ## V3. Commit protocol
 
-`docs/tla/CommitProtocol.tla`, checked against `043927f`. Its Go sites exist:
+`docs/tla/CommitProtocol.tla`, checked against `cc38ca6`. Its Go sites exist:
 `Sync`, `loadOrInit`, `initEmpty`, `decodeSnapshot`, `commitLocked`,
 `schedulePrune` and `pruneSnapshots` in `internal/blobfs/commit.go`; `New`,
 `mutable`, `SetAttr`, `createEntry`, `unlink`, `Rename`, `bufferWrite`,
@@ -120,9 +120,10 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 `internal/blobfs/fs.go`; `ReadOnly.Put` and `ReadOnly.PutIfMatch` in
 `internal/store/store.go`; `S3.Put`, `S3.PutIfMatch` and `errorFor` in
 `internal/store/s3.go`; and `Local.PutIfMatch` in `internal/store/local.go`.
-`docs/tla/trace.tsv` gives each action's symbols. The entries ADR 0019 added
-(`PruneBelowCurrent`, `Below`, `Prunable`, and `prunable` in V7) exist, as of
-`cc38ca6`; `prunable` is in `internal/blobfs/commit.go`.
+`docs/tla/trace.tsv` gives each action's symbols. Of the entries ADR 0019
+added, `PruneBelowCurrent`, `Prunable`, and `prunable` in V7 exist, as of
+`cc38ca6`, `prunable` in `internal/blobfs/commit.go`; `Below`, which only the
+spec uses, is reserved by that ADR.
 
 **Actions.** All reserved, ADR 0013: an action's name is the spec's, whatever
 Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
@@ -236,11 +237,12 @@ machine's states (rule 3).
   epoch 1, written outside the model, which every mount has loaded.
 
 **Definitions.** The module's other definitions. All reserved, ADR 0013, but
-`Mutable`, which exists, and `Diverge`, which ADR 0014 reserves (V1).
+`Mutable` and `Prunable`, which exist, `Diverge`, which ADR 0014 reserves
+(V1), and `Below`, which ADR 0019 reserves.
 
 | Definition | Meaning |
 |---|---|
-| `AllFixes`, `AllFaults` | the four `Fixes` members, and the six `Faults` values |
+| `AllFixes`, `AllFaults` | the five `Fixes` members, and the six `Faults` values |
 | `Writers` | `Mounts` and `""`, a writer outside the model |
 | `Keys` | the snapshot keys, `snapshots/<epoch>-<nonce>.json.gz`, as records `[epoch, nonce]` whose nonce is in `Nonces` or is 0 |
 | `NoKey` | no key: epoch 0, nonce 0 |
@@ -253,7 +255,7 @@ machine's states (rule 3).
 | `KeyLess(a, b)` | the order of snapshot keys, by epoch and then by nonce, in which `pruneSnapshots` sorts them |
 | `Kept(L)` | the keys of `L` that a prune pass keeps: the `Retention` that sort last |
 | `Least(S)` | the lowest key of `S`: the next one a prune pass deletes |
-| `Below(L, k)` | the keys of `L` that sort below `k`; exists |
+| `Below(L, k)` | the keys of `L` that sort below `k`; reserved, ADR 0019 |
 | `Prunable(L, k)` | the keys a prune pass begun for `k` may delete, with `PruneBelowCurrent`: `Below(L, k)` less the `Retention` newest of them. Go `prunable`, under rule 4 (V7); exists |
 | `Mutable(m)` | V1 |
 | `Fenced(m)` | `m` is read-only and `ReadOnlyFence` is in `Fixes`: `store.ReadOnly` refuses `m`'s writes |
