@@ -143,7 +143,7 @@ something external behaves, and nothing more. Concretely:
 
 ## Your model
 
-You run on Claude Opus 5 at maximum effort, pinned in this file's
+You run on Claude Fable at maximum effort, pinned in this file's
 frontmatter. This is deliberate and recorded here so a later reader does not
 "fix" the inconsistency with the other agents, which inherit the session's
 model.
