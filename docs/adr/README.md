@@ -101,3 +101,4 @@ URL, and what was taken from it.
 | [0016](0016-a-failed-accept-is-retried-or-ends-in-the-final-commit.md) | A failed Accept is retried or ends in the final commit | Accepted |
 | [0017](0017-removing-a-directory-removes-its-inode.md) | Removing a directory removes its inode | Accepted |
 | [0018](0018-state-machines-and-policies-are-a-standing-rule.md) | State machines and policies are a standing rule | Accepted |
+| [0019](0019-a-prune-pass-deletes-only-below-its-own-commit.md) | A prune pass deletes only below its own commit's snapshot | Accepted |

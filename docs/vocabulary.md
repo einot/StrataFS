@@ -120,7 +120,10 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 `internal/blobfs/fs.go`; `ReadOnly.Put` and `ReadOnly.PutIfMatch` in
 `internal/store/store.go`; `S3.Put`, `S3.PutIfMatch` and `errorFor` in
 `internal/store/s3.go`; and `Local.PutIfMatch` in `internal/store/local.go`.
-`docs/tla/trace.tsv` gives each action's symbols.
+`docs/tla/trace.tsv` gives each action's symbols. The entries ADR 0019 added
+(`PruneBelowCurrent`, `Below`, `Prunable`, and `prunable` in V7) are reserved
+by that ADR until its code lands; `prunable` goes in
+`internal/blobfs/commit.go`.
 
 **Actions.** All reserved, ADR 0013: an action's name is the spec's, whatever
 Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
@@ -145,8 +148,8 @@ Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
 | `SwapUnsupported` | the same | `store.ErrUnsupported`, then `FallbackPut`, which `store.ReadOnly` refuses when the mount is fenced, and which otherwise is applied, not applied (`"PutFailed"`), or applied with an error returned (`"FallbackReplyLost"`) |
 | `FallbackPut` | `commitLocked`'s unconditional root `Put` after it | merged with `SwapUnsupported`: an operator of that action's success branch, not a step of its own |
 | `FallbackHead` | the `Head` after `FallbackPut` | |
-| `StartPrune` | `schedulePrune`'s guard, and its setting of `FS.pruning` | an operator that `SwapOK` and `FallbackHead` conjoin, since it runs in the same hold of `FS.mu`; not a step of its own |
-| `PruneList` | `pruneSnapshots`' `List` loop | |
+| `StartPrune` | `schedulePrune`'s guard, and its setting of `FS.pruning` | an operator that `SwapOK` and `FallbackHead` conjoin, since it runs in the same hold of `FS.mu`; not a step of its own. The pass is begun for the key the commit swapped the root pointer to (ADR 0019 §2) |
+| `PruneList` | `pruneSnapshots`' `List` loop, then `prunable` | with `PruneBelowCurrent`, what the pass deletes is `Prunable` (ADR 0019 §2) |
 | `PruneDelete` | `pruneSnapshots`' `Delete` loop | one `Delete` per step, in ascending key order |
 | `PruneEnd` | the final hold of `FS.mu` in `schedulePrune`'s goroutine, which clears `FS.pruning` | |
 | `Crash` | none; the restart is `New` | process death, or any exit skipping the final commit. The mount's memory and its prune goroutine are lost, and it restarts at `GetRoot` |
@@ -170,7 +173,8 @@ machine states, and the rest are named here. CommitProtocol leaves
 | `rpSnapshot[m]` | `loadOrInit`'s `rp.Snapshot` | the snapshot key the root pointer named when `GetRoot` read it, until `GetSnapshot`; `NoKey` otherwise | exists |
 | `base[m]` | `FS.inodes` | the set of commit ids the namespace in memory includes | exists |
 | `pruning[m]` | `FS.pruning` | in {`"Idle"`, `"Listing"`, `"Deleting"`}, which refine the bool: `FS.pruning` is true unless `"Idle"`. The three strings are reserved, ADR 0013 | exists |
-| `pruneCurrent[m]`, `pruneDoomed[m]` | `pruneSnapshots`' `current` and `doomed` | `pruneDoomed[m]` holds the keys the pass has still to delete: `doomed`, less the keys of the current epoch, which Go skips in its `Delete` loop and the spec at `PruneList` | exists |
+| `pruneCurrent[m]` | `schedulePrune`'s and `pruneSnapshots`' `current` | the snapshot key the pass's commit swapped the root pointer to, or `NoKey` while no pass has begun since `New` (ADR 0019 §2). At `13aebc4` Go's `current` is that key's epoch, which is all the pass then uses | exists |
+| `pruneDoomed[m]` | `pruneSnapshots`' `doomed` | the keys the pass has still to delete. With `PruneBelowCurrent` it is `Prunable`, which `prunable` computes; without it, `doomed` less the keys of the current epoch, which Go at `13aebc4` skips in its `Delete` loop and the spec at `PruneList` | exists |
 | `acked` | none: a ghost | the commits whose `commitLocked` returned nil, from `Sync` or from `initEmpty` | reserved, ADR 0013 |
 | `used` | none: a ghost | the snapshot keys named by a snapshot `Put` or a write of the root pointer that took effect. A fresh key is one not in it, which is how the spec takes the nonce never to repeat (ADR 0013 §4) | reserved, ADR 0013 |
 | `overtaken[m]` | none: a ghost | another mount has written the root pointer since this mount last set `rootETag[m]` | reserved, ADR 0013 |
@@ -250,6 +254,8 @@ machine's states (rule 3).
 | `KeyLess(a, b)` | the order of snapshot keys, by epoch and then by nonce, in which `pruneSnapshots` sorts them |
 | `Kept(L)` | the keys of `L` that a prune pass keeps: the `Retention` that sort last |
 | `Least(S)` | the lowest key of `S`: the next one a prune pass deletes |
+| `Below(L, k)` | the keys of `L` that sort below `k`; reserved, ADR 0019 |
+| `Prunable(L, k)` | the keys a prune pass begun for `k` may delete, with `PruneBelowCurrent`: `Below(L, k)` less the `Retention` newest of them. Go `prunable`, under rule 4 (V7); reserved, ADR 0019 |
 | `Mutable(m)` | V1 |
 | `Fenced(m)` | `m` is read-only and `ReadOnlyFence` is in `Fixes`: `store.ReadOnly` refuses `m`'s writes |
 | `CommitIdOf(m, k)` | the commit that `m` makes at `k`'s epoch |
@@ -280,6 +286,7 @@ machine's states (rule 3).
 | `Nonce` | `commitLocked` puts six random bytes in every snapshot key, so two writers committing one epoch cannot overwrite each other's snapshot | exists |
 | `ChunksFirst` | `Sync` stores every chunk before the snapshot that names it, and the snapshot before the swap | exists |
 | `ReadOnlyFence` | `New` puts a read-only mount's store behind `store.ReadOnly` (ADR 0011 §3) | exists |
+| `PruneBelowCurrent` | a prune pass deletes only the snapshot keys that sort below the one its commit swapped the root pointer to, and keeps the `Retention` newest of them, so the snapshot the root pointer names is never deleted (ADR 0019 §1, §2) | reserved, ADR 0019 |
 | `AtomicLoad` | the load-race fix: one read of the root pointer's body and its ETag | reserved, the load-race ADR |
 
 **Checked against rule 1.** Every name the CommitProtocol spec added here was
@@ -295,7 +302,11 @@ which are lower case, or a TLA+ reserved word, all of which are upper case.
 The new variables, `rpSnapshot`, `base`, `overtaken`, `roWrites` and
 `crashes`, are lowerCamel like every variable here, and none is a reserved
 word or an operator. `Diverge` is V1's, and was checked there. No name was
-renamed.
+renamed. ADR 0019 added `PruneBelowCurrent`, `Below` and `Prunable`, each
+UpperCamel ASCII letters, none equal to an operator above (`Below` and
+`Prunable` are not among them), a Go keyword or predeclared identifier, or a
+TLA+ reserved word; and the Go name `prunable`, lowerCamel, which is no Go
+keyword or predeclared identifier either.
 
 ## V4. Sync and file data
 
@@ -456,6 +467,12 @@ from its first access to the charge or to `of.bytes` until its last, and a
   (ADR 0014 §10).
 - Commit-protocol decisions, such as deleting a snapshot or writing the root
   unconditionally, are named by their ADRs, under rule 4.
+- `Prunable` = `prunable(keys, current, keep)`, a plain function in
+  `internal/blobfs/commit.go`: the one place that decides what a prune pass
+  may delete (ADR 0019 §2). It is not a `policy.Policy`: no caller asks for a
+  deletion, since a pass is a step the server takes on its own commit's
+  success, which ADR 0018 §2 keeps outside the policy rule. Reserved, ADR
+  0019.
 
 ## Operators of the standard modules
 

@@ -10,16 +10,18 @@ This file says what the directory holds, how to read it and how to run it.
 
 - **`CommitProtocol.tla`**: how a mount reads the root pointer, commits,
   prunes snapshots and diverges, against other mounts, failing store calls
-  and crashes (ADR 0013 §1, item 1). It is checked against `043927f`.
-- **Its 24 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
-  six MustHold and eighteen MustFail. Five of the MustFail ones each remove
-  a fix the code has, and thirteen each show an open defect: #88 by eight,
-  #89, #91, and #5 by three. Each opens with a comment giving its
-  expectation, its issue or the fix it removes, and the source of each
-  `Fixes` member. One, `CommitProtocol_PruneTwoWriters`, also sets a state
-  constraint, `PassApartFromOwnCommits`, for the reason its comment and the
-  module's Assumption J15 give, and `CommitProtocol_PruneOverlapTwoWriters`
-  is its twin without one (*Configuration files*).
+  and crashes (ADR 0013 §1, item 1). It is checked against `13aebc4`.
+- **Its 27 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
+  sixteen MustHold and eleven MustFail. Six of the MustFail ones each remove
+  a fix the code has, and five each show an open defect: #89, #91, and #5 by
+  three. Eight of the MustHold ones showed #88 until ADR 0019's fix flipped
+  them, and keep the two invariants they had (*MustHold and MustFail*). Each
+  opens with a comment giving its expectation, its issue or the fix it
+  removes, and the source of each `Fixes` member. One,
+  `CommitProtocol_PruneTwoWriters`, also sets a state constraint,
+  `PassApartFromOwnCommits`, for the reason its comment and the module's
+  Assumption J15 give, and `CommitProtocol_PruneOverlapTwoWriters` is its
+  twin without one (*Configuration files*).
 - **The three tables** (*Tables*): `trace.tsv`, `manifest.tsv` and
   `tools.tsv`. A row of `manifest.tsv` whose `exit` and `log` are `-` is not
   calibrated yet (*Running*).
@@ -57,8 +59,8 @@ Each module opens with a header comment that states:
   stand for a run of Go steps, and its **assumptions**: the judgement calls
   the model rests on, which no requirement made.
 
-`CommitProtocol.tla` has no `Revised:` line yet. Each action's comment names
-the Go symbols that `trace.tsv` gives it.
+`CommitProtocol.tla` has one `Revised:` line, for ADR 0019's fix of #88. Each
+action's comment names the Go symbols that `trace.tsv` gives it.
 
 Every module declares the constant `Fixes`, the set of fixes a configuration
 includes, and its actions consult it, so one module describes the code with
@@ -156,9 +158,10 @@ all three:
   same module whose lines, comments aside, are its own lines with the
   `CONSTRAINT` heading and its entries taken out, in the same order. That
   compares the specification, the constants, the invariants and the deadlock
-  check at once. When `CommitProtocol_PruneTwoWriters` flips,
-  `CommitProtocol_PruneOverlapTwoWriters` must flip with it, the same fix
-  added to both, or the gate fails.
+  check at once. `CommitProtocol_PruneTwoWriters` and
+  `CommitProtocol_PruneOverlapTwoWriters` flipped together with ADR 0019,
+  `PruneBelowCurrent` added to both, as this rule requires; the runner checks
+  the pair on every run.
 
 ## Counterexamples
 

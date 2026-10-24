@@ -10,7 +10,15 @@
 \* Go symbols that perform each action, and docs/vocabulary.md, V3, gives
 \* every name.
 \*
-\* Checked against 043927f
+\* Checked against 13aebc4
+\* Revised: 2026-10-24 -- ADR 0019 (#88): with the Fixes member
+\*   PruneBelowCurrent, a prune pass deletes only the keys that sort below the
+\*   one its commit swapped the root pointer to, and keeps the Retention newest
+\*   of them (Below, Prunable; PruneList consults the member). pruneCurrent now
+\*   holds that key, where it held its epoch, so StartPrune takes a key and
+\*   PassApartFromOwnCommits compares epochs through it. Without the member the
+\*   module describes pruneSnapshots as it is at 13aebc4, as before. J11, J14
+\*   and J15 are rewritten for the fix. Nothing else moved.
 \*
 \* Scope
 \*   - One bucket, and the mount processes in Mounts.
@@ -116,29 +124,45 @@
 \*   J9.  Crash also restarts a mount whose New failed, and every restart
 \*        counts against MaxCrashes.
 \*   J10. Deletes run in ascending key order, as pruneSnapshots sorts them.
-\*   J11. The MustHold envelope is a reading, not a measurement. Pruning is
-\*        shown safe only for one writer at Retention 2 with no fault at
-\*        all, within the bounds of CommitProtocol_PruneSingle. A fault that
-\*        leaves a snapshot the root pointer does not name sorting above the
-\*        one it names reaches #88: a failed swap's orphan by route 1
-\*        (CommitProtocol_PruneOrphan); the orphan of a snapshot Put that
-\*        takes effect and fails by route 4
-\*        (CommitProtocol_PruneSnapshotReply); and a root write that takes
-\*        effect and fails, whose retry sorts above it, by route 5
-\*        (CommitProtocol_PruneSwapReply, CommitProtocol_PruneFallbackReply).
-\*        Route 4 also reaches #88 at Retention 2, within PruneSingle's own
-\*        bounds, together with route 3's overlap: the pass outlives the
-\*        commit at epoch 2, and a snapshot Put at epoch 3 that takes effect
-\*        and fails, with the next commit's unswapped snapshot at epoch 3,
-\*        gives the two keys above the root's
-\*        (CommitProtocol_PruneSnapshotReplyRetention2). So a fix for #88
-\*        cannot rest on a Retention above 1.
+\*   J11. The MustHold envelope is a reading, not a measurement. Without
+\*        PruneBelowCurrent, pruning is shown safe only for one writer at
+\*        Retention 2 with no fault at all, within the bounds of
+\*        CommitProtocol_PruneSingle, and a fault that leaves a snapshot the
+\*        root pointer does not name sorting above the one it names reached
+\*        #88 by five routes, which eight configurations showed until ADR
+\*        0019 flipped them: a failed swap's orphan (route 1,
+\*        CommitProtocol_PruneOrphan); a losing writer's attempt (route 2,
+\*        CommitProtocol_PruneTwoWriters); the mount's own unswapped next
+\*        attempt (route 3, CommitProtocol_PruneOverlap); routes 2 and 3 at
+\*        once (CommitProtocol_PruneOverlapTwoWriters); the orphan of a
+\*        snapshot Put that takes effect and fails (route 4,
+\*        CommitProtocol_PruneSnapshotReply), also at Retention 2 within
+\*        PruneSingle's own bounds together with route 3's overlap
+\*        (CommitProtocol_PruneSnapshotReplyRetention2), so that no fix could
+\*        rest on a Retention above 1; and a root write that takes effect
+\*        and fails, whose retry sorts above it (route 5,
+\*        CommitProtocol_PruneSwapReply, CommitProtocol_PruneFallbackReply).
+\*        With PruneBelowCurrent, the eight hold, and pruning is also shown
+\*        safe with every property for one writer at Retention 1 with failed
+\*        swaps, failed Puts, a snapshot Put that takes effect and fails, and
+\*        a crash (CommitProtocol_PruneFaultsSingle), and for two writers that
+\*        loaded one root pointer with the same faults
+\*        (CommitProtocol_PruneTwoWritersFaults). The argument behind the
+\*        member is ADR 0019 section 1: the root pointer's key only rises
+\*        while every swap is conditional, or while one writer uses the
+\*        fallback, so nothing below the key a pass was begun for is named
+\*        again. Where that fails, two writers on the fallback or #89's
+\*        window, the model shows the loss by NoLostAck first.
 \*   J12. The configurations' bounds and tiers are judgement calls.
 \*   J13. Neither rootKnowledge nor AtomicLoad is modelled. Their ADRs add
 \*        them.
-\*   J14. Failed List and Delete calls are left out. A failed Delete can
-\*        leave an orphan above the root pointer's snapshot, so the ADR for
-\*        #88's fix adds them if its argument needs them.
+\*   J14. Failed List and Delete calls are left out, and ADR 0019's argument
+\*        does not need them: a List or a Delete that fails deletes nothing,
+\*        a Delete that takes effect and is sent again deletes the same key,
+\*        and no property here is harmed by a key that stays, since only a
+\*        Delete can make RootSnapshotExists false. A failed Delete leaves a
+\*        key below the one its pass was begun for, which a later pass
+\*        deletes. So no configuration widens for them (ADR 0019 section 4).
 \*   J15. CommitProtocol_PruneTwoWriters sets the state constraint
 \*        PassApartFromOwnCommits, and no other configuration sets one. Its
 \*        two writers also admit, at the same length as #88's route 2,
@@ -146,15 +170,16 @@
 \*        the trigger of routes 1 and 3, and TLC reported one of them, which
 \*        also ran through #89's window. No bound removes them, since the
 \*        mount whose pass it is can always commit at epoch 2. The
-\*        constraint assumes no fix: it only stops TLC taking a step from a
-\*        state that breaks it. CommitProtocol_PruneOverlapTwoWriters is the
-\*        same configuration without the constraint, so it checks what the
-\*        constraint cuts, a pass that overlaps its own mount's commit and
-\*        another mount's attempt at once. Both name #88 and flip together:
-\*        once a MustHold configuration sets a constraint, the runner fails
-\*        the gate unless a MustHold configuration whose lines are its own
-\*        without the constraint exists too (docs/tla/README.md,
-\*        Configuration files).
+\*        constraint only stops TLC taking a step from a state that breaks
+\*        it. CommitProtocol_PruneOverlapTwoWriters is the same configuration
+\*        without the constraint, so it checks what the constraint cuts, a
+\*        pass that overlaps its own mount's commit and another mount's
+\*        attempt at once. Both showed #88 and flipped together with ADR
+\*        0019, PruneBelowCurrent added to both: once a MustHold
+\*        configuration sets a constraint, the runner fails the gate unless a
+\*        MustHold configuration whose lines are its own without the
+\*        constraint exists too (docs/tla/README.md, Configuration files),
+\*        and the pair is what that rule was written for.
 \*   J16. ReadOnlyNeverWrites is about calls, as ADR 0011 sections 3 and 4
 \*        put "writes nothing": no Put, PutIfMatch or Delete of a read-only
 \*        mount reaches the bucket. A call that reaches it breaks the
@@ -197,7 +222,17 @@ CONSTANTS
 \*   Fault "FallbackReplyLost": the fallback's root Put is applied, and an
 \*     error is returned, in the same ways.
 
-AllFixes  == {"IfNoneMatchInit", "Nonce", "ChunksFirst", "ReadOnlyFence"}
+\* What the Fixes members mean (docs/vocabulary.md, V3, gives each one's Go):
+\*   IfNoneMatchInit, Nonce, ChunksFirst, ReadOnlyFence: in the code since
+\*     before this module (their configuration comments give each source).
+\*   PruneBelowCurrent: ADR 0019 section 2. A prune pass deletes only the
+\*     snapshot keys that sort below the one its commit swapped the root
+\*     pointer to, and keeps the Retention newest of them (Prunable). Without
+\*     it the pass deletes every listed key but the Retention newest, sparing
+\*     only the keys of the epoch it was begun for, as at 13aebc4.
+
+AllFixes  == {"IfNoneMatchInit", "Nonce", "ChunksFirst", "ReadOnlyFence",
+              "PruneBelowCurrent"}
 AllFaults == {"SwapReplyLost", "SwapFailed", "SwapConflict409", "PutFailed",
               "SnapshotReplyLost", "FallbackReplyLost"}
 
@@ -232,7 +267,8 @@ VARIABLES
   base,          \* the commits FS.inodes includes
   \* Each mount's prune pass.
   pruning,       \* "Idle", "Listing" or "Deleting"; FS.pruning is the last two
-  pruneCurrent,  \* pruneSnapshots' current
+  pruneCurrent,  \* pruneSnapshots' current: the key the pass's commit swapped
+                 \* the root pointer to (ADR 0019 section 2), or NoKey
   pruneDoomed,   \* pruneSnapshots' doomed, still to delete
   \* Ghosts, which trace to no Go symbol, and the crash bound.
   acked,         \* commits whose commitLocked returned nil
@@ -285,6 +321,15 @@ Kept(L) == {k \in L : Cardinality({j \in L : KeyLess(k, j)}) < Retention}
 
 \* The lowest key of S: the next one a prune pass deletes (Assumption J10).
 Least(S) == CHOOSE k \in S : \A j \in S : ~KeyLess(j, k)
+
+\* The keys of L that sort below k.
+Below(L, k) == {j \in L : KeyLess(j, k)}
+
+\* The keys a prune pass begun for k may delete, with PruneBelowCurrent (ADR
+\* 0019 section 2): those of the listing L that sort below k, less the
+\* Retention newest of them. Nothing at or above k is ever among them.
+\* Go (trace.tsv): prunable.
+Prunable(L, k) == Below(L, k) \ Kept(Below(L, k))
 
 -----------------------------------------------------------------------------
 \* Predicates and helpers.
@@ -373,12 +418,14 @@ Diverge(m) == mode' = [mode EXCEPT ![m] = "Diverged"]
 
 \* StartPrune: schedulePrune, in the hold of FS.mu of the success path that
 \* calls it (R8): unless pruning is off or a pass is running, a pass starts
-\* for epoch e.
+\* for k, the key the commit swapped the root pointer to (ADR 0019 section
+\* 2; at 13aebc4 schedulePrune is given k's epoch, which is all the pass then
+\* uses, so the variable holds the key either way).
 \* Go (trace.tsv): FS.schedulePrune.
-StartPrune(m, e) ==
+StartPrune(m, k) ==
   IF Retention > 0 /\ pruning[m] = "Idle"
     THEN /\ pruning' = [pruning EXCEPT ![m] = "Listing"]
-         /\ pruneCurrent' = [pruneCurrent EXCEPT ![m] = e]
+         /\ pruneCurrent' = [pruneCurrent EXCEPT ![m] = k]
          /\ UNCHANGED pruneDoomed
     ELSE UNCHANGED PruneVars
 
@@ -389,7 +436,7 @@ Committed(m, k, et) ==
   /\ nsDirty' = [nsDirty EXCEPT ![m] = FALSE]
   /\ base' = [base EXCEPT ![m] = @ \cup {CommitIdOf(m, k)}]
   /\ acked' = acked \cup {CommitIdOf(m, k)}
-  /\ StartPrune(m, k.epoch)
+  /\ StartPrune(m, k)
   /\ IF "ChunksFirst" \in Fixes
        THEN /\ pc' = [pc EXCEPT ![m] = "Ready"]
             /\ attempt' = [attempt EXCEPT ![m] = NoKey]
@@ -437,7 +484,7 @@ TypeOK ==
        /\ rpSnapshot[m] \in Keys \cup {NoKey}
        /\ base[m] \subseteq CommitIds
        /\ pruning[m] \in {"Idle", "Listing", "Deleting"}
-       /\ pruneCurrent[m] \in 0..MaxEpoch
+       /\ pruneCurrent[m] \in Keys \cup {NoKey}
        /\ pruneDoomed[m] \subseteq Keys
        /\ overtaken[m] \in BOOLEAN
   /\ acked \subseteq CommitIds
@@ -462,7 +509,7 @@ Init ==
   /\ attempt = [m \in Mounts |-> NoKey]
   /\ rpSnapshot = [m \in Mounts |-> NoKey]
   /\ pruning = [m \in Mounts |-> "Idle"]
-  /\ pruneCurrent = [m \in Mounts |-> 0]
+  /\ pruneCurrent = [m \in Mounts |-> NoKey]
   /\ pruneDoomed = [m \in Mounts |-> {}]
   /\ acked = {}
   /\ overtaken = [m \in Mounts |-> FALSE]
@@ -750,18 +797,24 @@ FallbackHead(m) ==
 -----------------------------------------------------------------------------
 \* Prune passes.
 
-\* PruneList: pruneSnapshots' List loop and its early return, with the skip
-\* of the current epoch's keys, which Go makes in its Delete loop (R9).
-\* Go (trace.tsv): FS.pruneSnapshots.
+\* PruneList: pruneSnapshots' List loop (R9), then what the pass will delete.
+\* With PruneBelowCurrent that is Prunable, which prunable computes (ADR 0019
+\* section 2). Without it, it is every listed key but the Retention newest,
+\* less the keys of the epoch the pass was begun for, which Go at 13aebc4
+\* skips in its Delete loop after an early return when the listing holds no
+\* more than Retention keys.
+\* Go (trace.tsv): FS.pruneSnapshots; prunable.
 PruneList(m) ==
   /\ pruning[m] = "Listing"
   /\ pruning' = [pruning EXCEPT ![m] = "Deleting"]
   /\ LET L == DOMAIN snapshots
      IN  pruneDoomed' = [pruneDoomed EXCEPT ![m] =
-                           IF Cardinality(L) <= Retention
-                             THEN {}
-                             ELSE {k \in L \ Kept(L) :
-                                     k.epoch # pruneCurrent[m]}]
+                           IF "PruneBelowCurrent" \in Fixes
+                             THEN Prunable(L, pruneCurrent[m])
+                             ELSE IF Cardinality(L) <= Retention
+                                    THEN {}
+                                    ELSE {k \in L \ Kept(L) :
+                                            k.epoch # pruneCurrent[m].epoch}]
   /\ UNCHANGED <<BucketVars, MountVars, pruneCurrent, GhostVars, crashes>>
 
 \* PruneDelete: one Delete of pruneSnapshots' Delete loop, in ascending order
@@ -807,7 +860,7 @@ Crash(m) ==
   /\ rpSnapshot' = [rpSnapshot EXCEPT ![m] = NoKey]
   /\ base' = [base EXCEPT ![m] = {}]
   /\ pruning' = [pruning EXCEPT ![m] = "Idle"]
-  /\ pruneCurrent' = [pruneCurrent EXCEPT ![m] = 0]
+  /\ pruneCurrent' = [pruneCurrent EXCEPT ![m] = NoKey]
   /\ pruneDoomed' = [pruneDoomed EXCEPT ![m] = {}]
   /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
   /\ UNCHANGED <<BucketVars, acked, used, roWrites>>
@@ -877,11 +930,12 @@ NoSelfDivergence ==
 \* CommitProtocol_PruneOverlapTwoWriters is its twin without it (Assumption
 \* J15). TLC checks the invariants of a state that breaks a constraint, and
 \* takes no step from it, so the second conjunct stops the mount's swap to a
-\* snapshot its own pass deleted before TLC can take that swap.
+\* snapshot its own pass deleted before TLC can take that swap. The epoch is
+\* read through the key the pass was begun for (ADR 0019).
 PassApartFromOwnCommits ==
   \A m \in Mounts :
     pruning[m] # "Idle" =>
-      /\ epoch[m] = pruneCurrent[m]
+      /\ epoch[m] = pruneCurrent[m].epoch
       /\ ((pc[m] = "Swap" /\ attempt[m] # NoKey) =>
             attempt[m] \in DOMAIN snapshots)
 
