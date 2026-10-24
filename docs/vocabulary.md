@@ -112,9 +112,10 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 
 ## V3. Commit protocol
 
-`docs/tla/CommitProtocol.tla`, checked against `c5068a0`. Its Go sites exist:
+`docs/tla/CommitProtocol.tla`, checked against `85dbfcf`. Its Go sites exist:
 `Sync`, `loadOrInit`, `initEmpty`, `decodeSnapshot`, `commitLocked`,
-`schedulePrune` and `pruneSnapshots` in `internal/blobfs/commit.go`; `New`,
+`fallbackAllowed`, `schedulePrune` and `pruneSnapshots` in
+`internal/blobfs/commit.go`; `New`,
 `mutable`, `SetAttr`, `createEntry`, `unlink`, `Rename`, `bufferWrite`,
 `truncate`, `flushAll`, `settleAll`, `flushOpen` and `putChunk` in
 `internal/blobfs/fs.go`; `ReadOnly.Put` and `ReadOnly.PutIfMatch` in
@@ -128,9 +129,9 @@ spec uses, is reserved by that ADR. ADR 0020 added no entry: `AtomicLoad`,
 which it lands, was reserved here already and exists as of `c5068a0`;
 `GetWithETag`, the `store.Store` method that `GetRoot` traces to, is a Go
 symbol `trace.tsv` names, not an entry. ADR 0021 added `FallbackOptIn` and
-`FallbackAllowed`, each reserved by it until its code lands; the Go names
-behind them, `Config.AllowUnconditionalRoot`, `FS.allowUnconditionalRoot`
-and `(*FS).fallbackAllowed`, are what `FallbackAllowed` traces to.
+`FallbackAllowed`, which exist as of `85dbfcf`; the Go names behind them,
+`Config.AllowUnconditionalRoot`, `FS.allowUnconditionalRoot` and
+`(*FS).fallbackAllowed`, are what `FallbackAllowed` traces to.
 
 **Actions.** All reserved, ADR 0013: an action's name is the spec's, whatever
 Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
@@ -245,9 +246,8 @@ machine's states (rule 3).
   epoch 1, written outside the model, which every mount has loaded.
 
 **Definitions.** The module's other definitions. All reserved, ADR 0013, but
-`Mutable` and `Prunable`, which exist, `Diverge`, which ADR 0014 reserves
-(V1), `Below`, which ADR 0019 reserves, and `FallbackAllowed`, which
-ADR 0021 reserves.
+`Mutable`, `Prunable` and `FallbackAllowed`, which exist, `Diverge`, which
+ADR 0014 reserves (V1), and `Below`, which ADR 0019 reserves.
 
 | Definition | Meaning |
 |---|---|
@@ -268,7 +268,7 @@ ADR 0021 reserves.
 | `Prunable(L, k)` | the keys a prune pass begun for `k` may delete, with `PruneBelowCurrent`: `Below(L, k)` less the `Retention` newest of them. Go `prunable`, under rule 4 (V7); exists |
 | `Mutable(m)` | V1 |
 | `Fenced(m)` | `m` is read-only and `ReadOnlyFence` is in `Fixes`: `store.ReadOnly` refuses `m`'s writes |
-| `FallbackAllowed` | the unconditional fallback follows a swap the store answered 501: `FallbackOptIn` is not in `Fixes`, which reads as a build without ADR 0021's fix or as mounts whose operator set `Config.AllowUnconditionalRoot`, which behave alike (the module's J17). Go `(*FS).fallbackAllowed`, under rule 4 (V7); reserved, ADR 0021 |
+| `FallbackAllowed` | the unconditional fallback follows a swap the store answered 501: `FallbackOptIn` is not in `Fixes`, which reads as a build without ADR 0021's fix or as mounts whose operator set `Config.AllowUnconditionalRoot`, which behave alike (the module's J17). Go `(*FS).fallbackAllowed`, under rule 4 (V7); exists, as of `85dbfcf` |
 | `CommitIdOf(m, k)` | the commit that `m` makes at `k`'s epoch |
 | `FreshKeys(m)` | the keys a new attempt by `m` may write: at the next epoch, with a nonce no write has named (`Nonce`), or with nonce 0 |
 | `KeyFor(m)` | the key of `m`'s attempt: `attempt[m]`, or else a fresh one |
@@ -299,7 +299,7 @@ ADR 0021 reserves.
 | `ReadOnlyFence` | `New` puts a read-only mount's store behind `store.ReadOnly` (ADR 0011 §3) | exists |
 | `PruneBelowCurrent` | a prune pass deletes only the snapshot keys that sort below the one its commit swapped the root pointer to, and keeps the `Retention` newest of them, so the snapshot the root pointer names is never deleted (ADR 0019 §1, §2) | exists |
 | `AtomicLoad` | `loadOrInit` reads the root pointer's body and its ETag with one call, `store.Store.GetWithETag`, so the ETag its first commit swaps against is the ETag of the body it loaded, and a commit by another mount between a mount's reads is refused, not overwritten (ADR 0020 §1, §2) | exists, as of `c5068a0` |
-| `FallbackOptIn` | `commitLocked`, after `store.ErrUnsupported` from the swap, writes the root pointer unconditionally only on a mount whose operator set `Config.AllowUnconditionalRoot`, and otherwise fails the commit with nothing more written, so one 501 never turns a conditional writer into an unconditional one (ADR 0021 §1, §2) | reserved, ADR 0021 |
+| `FallbackOptIn` | `commitLocked`, after `store.ErrUnsupported` from the swap, writes the root pointer unconditionally only on a mount whose operator set `Config.AllowUnconditionalRoot`, and otherwise fails the commit with nothing more written, so one 501 never turns a conditional writer into an unconditional one (ADR 0021 §1, §2) | exists, as of `85dbfcf` |
 
 **Checked against rule 1.** Every name the CommitProtocol spec added here was
 checked against rule 1 and against the operators listed at the end of this
@@ -500,7 +500,7 @@ from its first access to the charge or to `of.bytes` until its last, and a
   0021 §2). It is not a `policy.Policy`: no caller asks for the write, and
   the branch is a step the server takes on a store's answer, decided by the
   operator's configuration, which ADR 0018 §2 keeps outside the policy rule
-  (ADR 0021 §5). Reserved, ADR 0021.
+  (ADR 0021 §5). Exists, as of `85dbfcf`.
 
 ## Operators of the standard modules
 
