@@ -77,6 +77,8 @@ package blobfs
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -343,6 +345,20 @@ func (s *pr88Store) writeRoot(data []byte, write func() (string, error)) (string
 
 func (s *pr88Store) Get(ctx context.Context, key string) ([]byte, error) {
 	return s.inner.Get(ctx, key)
+}
+
+// GetWithETag answers as ADR 0020 section 6's first fact says: the body the
+// inner store's Get returned, and the lowercase hexadecimal MD5 of that body,
+// which is *store.Local's ETag for it; ErrNotFound and every other error are
+// passed through. It stands in for s.inner.GetWithETag until that method
+// exists (ADR 0020 Assumption 14).
+func (s *pr88Store) GetWithETag(ctx context.Context, key string) ([]byte, string, error) {
+	data, err := s.inner.Get(ctx, key)
+	if err != nil {
+		return nil, "", err
+	}
+	sum := md5.Sum(data)
+	return data, hex.EncodeToString(sum[:]), nil
 }
 
 func (s *pr88Store) GetRange(ctx context.Context, key string, off int64, n int64) ([]byte, error) {
