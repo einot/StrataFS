@@ -71,6 +71,10 @@ you so the architect or test-author can address it.
   0018 §2 says what the rules reach). If a brief asks for state or a
   permission check the rules reach to be written inline, and cites no ADR
   that exempts it, report that rather than write it.
-- Lock ordering is documented in `internal/blobfs/fs.go`: `openFile.mu`
-  before `FS.mu`, never the reverse, and object-store I/O never happens
-  while holding `FS.mu`. Violating this deadlocks the server.
+- Lock ordering is documented in `internal/blobfs/fs.go`, at `FS.mu`: the
+  commit gate, then `openFile.mu`, then `FS.mu`, never the reverse; the
+  budget's mutex is a leaf, and nothing waits on the budget while holding
+  any of the others. Violating this deadlocks the server. Do not add
+  object-store I/O under `FS.mu`. `commitLocked` does a snapshot `Put` and
+  the root-pointer swap while holding it, but that is a known defect (#43),
+  not a precedent.
