@@ -22,6 +22,12 @@ Focus on the diff or module(s) you were asked to look at. For each:
    `internal/store`, `internal/xdr`, `internal/vfs`.
 5. Test coverage: does the accompanying test (if any) actually exercise
    the behavior the spec requires, or just the happy path?
+6. State machines and policies (CLAUDE.md; ADR 0018 §2 says what the
+   rules reach): state the rules reach that a change adds or alters uses a
+   machine, permission decisions use a policy, and security-relevant
+   transitions are guarded by a policy's verdict, unless an ADR exempts the
+   code. An unexempted inline state field or permission check of that kind
+   is a finding.
 
 Do not comment on formatting/lint-fixable style — assume `gofmt` (plus `go vet`)
 handles that.

@@ -2,6 +2,15 @@
 
 **Status:** Accepted
 **Date:** 2026-10-12
+**Revised:** 2026-10-24 — cross-references only. ADR 0018 makes the rules this
+ADR applied to a fixed scope standing for new and changed code, lists every
+exemption in the register `exemptions.md`, and links each security-relevant
+transition to a policy. It replaces §1's scope for new and changed code: §1's
+ten places are that register's E1 to E10, and "Everything else keeps its
+present form" holds for each thing it covers until a change brings that thing
+under the rules (ADR 0018 §2, §3). §1, §3 and §9 each gain a sentence pointing
+to ADR 0018. Nothing else here changes, §1's text
+included, and every test this ADR pins stands.
 **Issue:** #114
 
 ## Context
@@ -152,6 +161,11 @@ Assumption 1, and not the owner's decision. It covers:
 These are flags or sets with one rule each, checks of arguments rather than
 callers, or pure checks already pinned by their ADRs.
 
+Since ADR 0018, the rules this section applies bind all new and changed code,
+the ten places above are exemptions E1 to E10 in the register
+`exemptions.md` (ADR 0018 §4), and what the paragraph above keeps as it is
+keeps it until a change brings it under the rules (ADR 0018 §2, §3).
+
 ### 2. The `fsm` API
 
 Pinned:
@@ -272,7 +286,8 @@ These bind owners; `fsm` does not check them.
   made once, by the constructor of what owns it, and is never reassigned.
 - Guards belong to the caller: it fires an event only when the condition the
   event names holds. Side effects follow a successful `Fire`, under the same
-  lock.
+  lock. ADR 0018 §5 says where the owner asks its policy for a
+  security-relevant transition.
 - An illegal transition is an error, which the owner logs at `Error` (§9) and
   returns. It is never a panic: a panic under `FS.mu`, in the committer or in
   `New` would take down the mount or leave a lock held.
@@ -649,6 +664,7 @@ var mountModes = fsm.NewTable("mode",
 - The mount mode adds no record of its own: `commitLocked`'s
   `"commit conflict"` `Error` record stays the record of `Diverge`.
 - A policy logs nothing.
+- ADR 0018 §5 says how a refused security-relevant transition is logged.
 
 ### 10. Names
 

@@ -2,7 +2,7 @@
 name: architect
 description: Owns the spec (`docs/`), ADRs (`docs/adr/`), the agent/wire protocol (`docs/` (the wire protocols themselves are RFC 1813 and RFC 5531)) and the JSON-schema interfaces (`internal/vfs/` — in Go the interface contract is code, and this package is it). Breaks a milestone into implementation/test/review work and hands the top-level session ready-to-dispatch briefs for coder, test-author, reviewer and security-auditor; it does not dispatch them itself. Use for spec changes, interface/schema design, resolving ambiguity between the spec and the code, and coordinating a milestone's epics.
 tools: Read, Grep, Glob, Edit, Write, WebFetch, WebSearch
-model: opus
+model: fable
 effort: max
 # Path guard: wired in .claude/settings.json, NOT here. `hooks:` is a
 # documented frontmatter field, but a guard declared there did not fire
@@ -89,6 +89,9 @@ it is a finding regardless of how good the reason seemed.
 - Every module docstring cites the spec section(s) it implements, e.g.
   `Spec: section 6, section 7`. Keep the spec's section index in sync when
   you touch what a section maps to.
+- When you design anything stateful or any authorization check, apply
+  CLAUDE.md's "State machines and policies". An exemption is yours to
+  grant, and only an ADR grants it.
 - The repo's GitHub issues are already grouped into milestones (v0.1 safe
   to run, v0.2 operable over time, v0.3 the WAFL redesign). Use an existing
   issue as your default unit of work rather than re-deriving scope; most
