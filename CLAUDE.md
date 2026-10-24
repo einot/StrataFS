@@ -171,7 +171,10 @@ bar also includes the model checks (ADR 0013 §10): `bash scripts/tla.sh full`
 must exit 0, run unpiped, and `git status --porcelain` must print the same
 before and after it, since the runner writes nothing in the tree. A row
 that is not yet calibrated fails the gate; recording its outcome is the
-architect's, from a run the session made.
+architect's, from a run the session made. The exit status alone is not
+enough (#127): its last line must read `tla.sh: N of N passed`, with N
+the number of rows in `docs/tla/manifest.tsv`, so that a run which
+checked nothing, such as one under `SHELLOPTS=noexec`, cannot pass.
 
 **Who merges.** By the repo owner's standing order, the session merges its
 own pull requests once all of these hold:
@@ -275,6 +278,38 @@ with `supervisor` itself. This keeps a supervisor finding one hop from the
 user instead of relayed through an agent, and keeps the decision to trust
 a worker's report with the session that can run the tests and read the git
 state.
+
+## State machines and policies
+
+By the repo owner's order of 2026-10-22, these rules bind every agent's
+design and code, and `reviewer` checks them.
+
+**State is a machine.** Code that holds state and moves it between named
+states expresses that state as an explicit transition table run by
+`internal/fsm` (ADR 0014). That covers a mode, a lifecycle, a connection,
+a protocol phase, or anything whose legal next step depends on where it
+is now. Every write of the state goes through the machine, and an illegal
+transition is an error, never a silent overwrite.
+
+**Who may act is a policy.** Every decision about whether a caller may do
+something is a pure policy in `internal/policy`, not an inline condition.
+That covers a permission check, an ownership or time rule, an access
+mask, and a gate on an operation.
+
+**A security transition asks a policy.** When a transition is
+security-relevant, as ADR 0014 §12 defines it, it is linked to a policy.
+The policy's verdict guards the transition, and the event fires only if
+the policy permits it. ADR 0014 §12 defines how the two connect.
+
+**Exceptions are decided, not assumed.** The architect may exempt code
+from any of these rules when it has a good reason. Examples: a hot path
+where a table costs more than it catches, state that another mechanism
+already pins and tests, or a flag with a single rule. Each exemption is
+recorded in an ADR that names the code and the reason. ADR 0014 §1 lists
+the current ones. Code without an exemption follows the rules.
+
+These rules apply to new and changed code. Existing code moves over as
+#114 plans.
 
 ## Dependencies
 
