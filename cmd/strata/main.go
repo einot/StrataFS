@@ -55,6 +55,8 @@ func run() (err error) {
 
 		verifyChunks = flag.Bool("verify-chunks", true, "verify each chunk fetched from the bucket against the hash that names it")
 
+		allowUnconditional = flag.Bool("allow-unconditional-root", false, "let a commit write the root pointer unconditionally when the store answers its conditional write with HTTP 501; a second mount of the bucket then goes undetected, so run exactly one")
+
 		uidFlag = flag.Int("uid", -1, "owner uid for a new filesystem (default: current user)")
 		gidFlag = flag.Int("gid", -1, "owner gid for a new filesystem (default: current user)")
 
@@ -108,7 +110,7 @@ func run() (err error) {
 	}
 
 	if *check {
-		return runCheck(context.Background(), bucket, os.Stdout)
+		return runCheck(context.Background(), bucket, os.Stdout, *allowUnconditional)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -124,6 +126,8 @@ func run() (err error) {
 		ReadOnly:          *readOnly,
 		SnapshotRetention: *retention,
 		MaxDirtyBytes:     maxDirtyBytes(*maxDirty),
+
+		AllowUnconditionalRoot: *allowUnconditional,
 
 		SkipChunkVerification: !*verifyChunks,
 		Log:                   log,

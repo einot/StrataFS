@@ -18,7 +18,11 @@ import (
 // for asking the cluster in front of you.
 //
 // Everything it writes is removed before it returns.
-func runCheck(ctx context.Context, s store.Store, out io.Writer) error {
+//
+// allowUnconditional is -allow-unconditional-root, so that the report and the
+// exit status say what a mount with the same flags would do on this endpoint
+// (ADR 0021 §2).
+func runCheck(ctx context.Context, s store.Store, out io.Writer, allowUnconditional bool) error {
 	prefix := fmt.Sprintf("strata-check/%d/", time.Now().UnixNano())
 	var results []result
 	defer cleanup(ctx, s, prefix)
@@ -34,8 +38,15 @@ func runCheck(ctx context.Context, s store.Store, out io.Writer) error {
 		checkList(ctx, s, prefix),
 		checkDelete(ctx, s, prefix),
 	)
-	cond := checkConditionalWrites(ctx, s, prefix)
+	cond := checkConditionalWrites(ctx, s, prefix, allowUnconditional)
 	results = append(results, cond...)
+
+	var condRequired bool
+	for _, r := range cond {
+		if !r.ok && r.required {
+			condRequired = true
+		}
+	}
 
 	var failed, required int
 	for _, r := range results {
@@ -57,6 +68,12 @@ func runCheck(ctx context.Context, s store.Store, out io.Writer) error {
 		return nil
 	case required > 0:
 		fmt.Fprintln(out, "This endpoint is missing behaviour strata requires. It will not work correctly.")
+		if condRequired {
+			fmt.Fprintln(out, "Without conditional writes strata cannot detect a second writer, so it refuses")
+			fmt.Fprintln(out, "to commit here rather than overwrite another mount's commits unseen. To run on")
+			fmt.Fprintln(out, "this endpoint anyway, guarantee a single writer yourself and pass")
+			fmt.Fprintln(out, "-allow-unconditional-root.")
+		}
 		return errors.New("endpoint failed a required check")
 	default:
 		fmt.Fprintln(out, "This endpoint works, with the caveats noted above.")
@@ -196,10 +213,12 @@ func checkDelete(ctx context.Context, s store.Store, prefix string) result {
 }
 
 // checkConditionalWrites probes the compare-and-swap that makes a commit
-// atomic. These are reported as optional, because strata falls back to an
-// unconditional write, but losing them means losing all protection against a
-// second mount of the same bucket.
-func checkConditionalWrites(ctx context.Context, s store.Store, prefix string) []result {
+// atomic. An endpoint that answers them as unsupported fails them as required,
+// since a mount there refuses to commit, unless allowUnconditional says the
+// operator allowed the unconditional write; then they are optional, but losing
+// them means losing all protection against a second mount of the same bucket
+// (ADR 0021 §1, §2). Every other outcome keeps the severity it had before.
+func checkConditionalWrites(ctx context.Context, s store.Store, prefix string, allowUnconditional bool) []result {
 	const (
 		nCreate = "conditional create (If-None-Match)"
 		nUpdate = "conditional update (If-Match)"
@@ -210,10 +229,11 @@ func checkConditionalWrites(ctx context.Context, s store.Store, prefix string) [
 	etag, err := s.PutIfMatch(ctx, key, []byte(`{"epoch":1}`), "")
 	if err != nil {
 		if errors.Is(err, store.ErrUnsupported) {
+			required := !allowUnconditional
 			return []result{
-				fail(nCreate, false, "not supported by this endpoint"),
-				fail(nUpdate, false, "not supported by this endpoint"),
-				fail(nReject, false, "not supported by this endpoint"),
+				fail(nCreate, required, "not supported by this endpoint"),
+				fail(nUpdate, required, "not supported by this endpoint"),
+				fail(nReject, required, "not supported by this endpoint"),
 			}
 		}
 		return []result{

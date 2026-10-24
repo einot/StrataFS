@@ -247,6 +247,14 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		f.log.Error("commit conflict: another writer owns this bucket",
 			"our_epoch", f.epoch, "attempted", epoch)
 		return errors.New("commit conflict: another writer owns this bucket; remount to continue")
+	case errors.Is(err, store.ErrUnsupported) && !f.fallbackAllowed():
+		// One 501 says nothing about the next request, and only the operator
+		// can assert that no second writer exists, so without the opt-in the
+		// commit fails here and writes nothing more. The mount stays writable
+		// and dirty, and its next commit tries the swap again (ADR 0021 §1, §2).
+		f.log.Error("commit refused: the store does not support conditional writes, and this mount may not write the root pointer unconditionally",
+			"our_epoch", f.epoch, "attempted", epoch)
+		return fmt.Errorf("swap root pointer: the store does not support conditional writes, and this mount may not write the root pointer unconditionally: %w", err)
 	case errors.Is(err, store.ErrUnsupported):
 		// A backend without conditional writes cannot give us safe single-writer
 		// detection. Fall back to an unconditional write and say so clearly.
@@ -276,6 +284,17 @@ func (f *FS) commitLocked(ctx context.Context) error {
 	// never stalls a write.
 	f.schedulePrune(key)
 	return nil
+}
+
+// fallbackAllowed reports whether a commit whose swap the store answered
+// store.ErrUnsupported may write the root pointer unconditionally: only when
+// the operator set Config.AllowUnconditionalRoot. It is a function of the
+// mount's configuration alone, and not a policy: no caller asks for the write
+// (ADR 0021 §2, §5).
+//
+// TLA+: docs/tla/CommitProtocol.tla SwapUnsupported
+func (f *FS) fallbackAllowed() bool {
+	return f.allowUnconditionalRoot
 }
 
 // schedulePrune starts a background pass that deletes superseded snapshots,

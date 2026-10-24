@@ -66,6 +66,15 @@ type Config struct {
 	// buffer grow without limit.
 	MaxDirtyBytes int64
 
+	// AllowUnconditionalRoot lets a commit write the root pointer without a
+	// condition when the store answers its compare-and-swap with
+	// store.ErrUnsupported (HTTP 501). Left false, such a commit fails and writes
+	// nothing more: the mount stays writable, and its next commit tries the swap
+	// again. An unconditional write cannot detect a second mount of the bucket and
+	// overwrites that mount's commits unseen, so set this only where exactly one
+	// mount writes the bucket (ADR 0021).
+	AllowUnconditionalRoot bool
+
 	Log *slog.Logger
 }
 
@@ -80,6 +89,11 @@ type FS struct {
 	ownerGID       uint32
 	readOnly       bool
 	skipVerify     bool
+
+	// allowUnconditionalRoot is Config.AllowUnconditionalRoot. New sets it
+	// before the first store call and nothing writes it afterwards, so it is
+	// read without a lock, and only by fallbackAllowed (ADR 0021 §2, §5).
+	allowUnconditionalRoot bool
 
 	// maxFileSize is the largest size a regular file may reach, maxFileChunks
 	// times the chunk size the mount adopted (ADR 0007 §1). New sets it once
@@ -275,6 +289,9 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 		writerID:       fmt.Sprintf("%s/%d", host, os.Getpid()),
 	}
 	rand.Read(f.writeVerf[:])
+	// Set before loadOrInit, since initEmpty's commit already asks for it
+	// (ADR 0021 §2).
+	f.allowUnconditionalRoot = cfg.AllowUnconditionalRoot
 
 	if err := f.loadOrInit(ctx); err != nil {
 		return nil, err
