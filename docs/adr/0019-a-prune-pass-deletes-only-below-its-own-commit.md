@@ -7,6 +7,12 @@ closing the load race §1 leaves to it; its `CommitProtocol_NoAtomicLoadPrune`
 shows the residual Assumption 4 names, and
 `CommitProtocol_PruneTwoWritersFromEmpty` shows it closed. The rule, the Go
 change and the configurations here are unchanged.
+**Revised:** 2026-10-25 — cross-reference only: ADR 0021 decided #91, which
+§1 leaves to it. The unconditional fallback now follows a swap answered 501
+only on a mount whose operator set `Config.AllowUnconditionalRoot`, so the
+case §1 names, two writers on the fallback, needs two such mounts; without
+the opt-in such a swap fails the commit and writes nothing. The rule, the Go
+change and the configurations here are unchanged.
 **Issue:** #88
 
 ## Context
@@ -141,7 +147,10 @@ key that sorts above K, and it never reads the root pointer.
 - Two writers on the unconditional fallback overwrite each other's root
   pointer at will (`docs/DESIGN.md` §2; #91), so the key the root pointer
   names can fall there. The rule's guarantee on the fallback is a single
-  writer's, as the fallback's own is.
+  writer's, as the fallback's own is. Since ADR 0021 the fallback follows a
+  swap answered 501 only on a mount whose operator set
+  `Config.AllowUnconditionalRoot`; without the opt-in such a swap fails the
+  commit and writes nothing, so the case needs two opted-in mounts.
 - A key below K that no root pointer names is garbage, whatever made it: a
   failed attempt's, a losing writer's, or an attempt whose swap can never
   succeed because its ETag is stale. Deleting it harms nothing.

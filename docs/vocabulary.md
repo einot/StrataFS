@@ -127,7 +127,10 @@ added, `PruneBelowCurrent`, `Prunable`, and `prunable` in V7 exist, as of
 spec uses, is reserved by that ADR. ADR 0020 added no entry: `AtomicLoad`,
 which it lands, was reserved here already and exists as of `c5068a0`;
 `GetWithETag`, the `store.Store` method that `GetRoot` traces to, is a Go
-symbol `trace.tsv` names, not an entry.
+symbol `trace.tsv` names, not an entry. ADR 0021 added `FallbackOptIn` and
+`FallbackAllowed`, each reserved by it until its code lands; the Go names
+behind them, `Config.AllowUnconditionalRoot`, `FS.allowUnconditionalRoot`
+and `(*FS).fallbackAllowed`, are what `FallbackAllowed` traces to.
 
 **Actions.** All reserved, ADR 0013: an action's name is the spec's, whatever
 Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
@@ -135,7 +138,7 @@ Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
 
 | Action | Go | Meaning |
 |---|---|---|
-| `Init` | `New` | the initial state. `New` sets `FS.readOnly` from `Config.ReadOnly` and puts a read-only mount's store behind `store.ReadOnly`. With `Start` `"Empty"` every mount is at `loadOrInit`'s first read; with `"Loaded"` every mount has loaded a filesystem at epoch 1 |
+| `Init` | `New` | the initial state. `New` sets `FS.readOnly` from `Config.ReadOnly` and puts a read-only mount's store behind `store.ReadOnly`, and sets `FS.allowUnconditionalRoot` from `Config.AllowUnconditionalRoot`, which `FallbackAllowed` stands for (ADR 0021 §4). With `Start` `"Empty"` every mount is at `loadOrInit`'s first read; with `"Loaded"` every mount has loaded a filesystem at epoch 1 |
 | `GetRoot` | `loadOrInit`'s read of the root pointer: `GetWithETag(rootKey)` with `AtomicLoad`, `Get(rootKey)` without it | reads the root pointer. With `AtomicLoad` the body and its ETag come from one response, and the ETag becomes `rootETag[m]` here (ADR 0020 §2, §4); without it the ETag waits for `HeadRoot` |
 | `HeadRoot` | `loadOrInit`'s `Head(rootKey)`, without `AtomicLoad` only | the load-race window (#89), which `AtomicLoad` closes (ADR 0020): with the member the action is never enabled, and no Go symbol performs it, so `trace.tsv` has no row for it |
 | `GetSnapshot` | `loadOrInit`'s `Get` of the snapshot the root names, and `decodeSnapshot` | a missing snapshot makes `New` fail, and `pc[m]` becomes `"Failed"` |
@@ -149,9 +152,9 @@ Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
 | `SwapReplyLost` | the same | applied, and an error is returned |
 | `SwapFailed` | the same | not applied, and an error is returned |
 | `SwapConflict` | the same | `store.ErrPrecondition`; fires `Diverge` (V1), on a read-only mount too at `043927f` |
-| `SwapUnsupported` | the same | `store.ErrUnsupported`, then `FallbackPut`, which `store.ReadOnly` refuses when the mount is fenced, and which otherwise is applied, not applied (`"PutFailed"`), or applied with an error returned (`"FallbackReplyLost"`) |
-| `FallbackPut` | `commitLocked`'s unconditional root `Put` after it | merged with `SwapUnsupported`: an operator of that action's success branch, not a step of its own |
-| `FallbackHead` | the `Head` after `FallbackPut` | |
+| `SwapUnsupported` | the same, and `fallbackAllowed` | `store.ErrUnsupported`. Unless `FallbackAllowed`, `commitLocked` returns an error and makes no further call (ADR 0021 §2). Otherwise `FallbackPut` follows, which `store.ReadOnly` refuses when the mount is fenced, and which otherwise is applied, not applied (`"PutFailed"`), or applied with an error returned (`"FallbackReplyLost"`) |
+| `FallbackPut` | `commitLocked`'s unconditional root `Put` after it | merged with `SwapUnsupported`: an operator of that action's fallback branches, taken only where `FallbackAllowed` (ADR 0021 §4), not a step of its own |
+| `FallbackHead` | the `Head` after `FallbackPut` | only where `FallbackAllowed` |
 | `StartPrune` | `schedulePrune`'s guard, and its setting of `FS.pruning` | an operator that `SwapOK` and `FallbackHead` conjoin, since it runs in the same hold of `FS.mu`; not a step of its own. The pass is begun for the key the commit swapped the root pointer to (ADR 0019 §2) |
 | `PruneList` | `pruneSnapshots`' `List` loop, then `prunable` | with `PruneBelowCurrent`, what the pass deletes is `Prunable` (ADR 0019 §2) |
 | `PruneDelete` | `pruneSnapshots`' `Delete` loop | one `Delete` per step, in ascending key order |
@@ -194,7 +197,7 @@ machine's states (rule 3).
 | `"Ready"` | loaded, with no commit in progress; `NextStep(m)` says whether one is due |
 | `"PutSnapshot"` | a commit's snapshot `Put` is due: `initEmpty`'s first, or without `ChunksFirst` any commit's, after its swap |
 | `"Swap"` | a commit's swap is due, after its snapshot `Put`, or without `ChunksFirst` as `initEmpty`'s first call. `SwapOK`, `SwapReplyLost`, `SwapFailed`, `SwapConflict` or `SwapUnsupported` takes it |
-| `"FallbackHead"` | the `Head` after the fallback's `Put` is due |
+| `"FallbackHead"` | the `Head` after the fallback's `Put` is due; reached only where `FallbackAllowed` (ADR 0021 §4) |
 | `"Flush"` | without `ChunksFirst`, a commit's flush is due, after its swap and its snapshot `Put` |
 | `"Failed"` | `New` returned an error; only `Crash` leaves it |
 
@@ -214,7 +217,8 @@ machine's states (rule 3).
 | `MaxCrashes` | a natural number | none | a bound on how many `Crash` steps a behaviour takes | reserved, ADR 0013 |
 
 - **`Capability`.** `"Conditional"` and `"Unconditional"` are `commitLocked`'s
-  two branches, the swap and the fallback after `store.ErrUnsupported`.
+  two branches, the swap and what follows `store.ErrUnsupported`: the
+  fallback where `FallbackAllowed`, and otherwise the refusal ADR 0021 adds.
   `"Conditional"` honours every conditional write, and `"Unconditional"`
   answers every one 501. `"Flaky"` honours them, but may answer any one of
   them 501.
@@ -242,11 +246,12 @@ machine's states (rule 3).
 
 **Definitions.** The module's other definitions. All reserved, ADR 0013, but
 `Mutable` and `Prunable`, which exist, `Diverge`, which ADR 0014 reserves
-(V1), and `Below`, which ADR 0019 reserves.
+(V1), `Below`, which ADR 0019 reserves, and `FallbackAllowed`, which
+ADR 0021 reserves.
 
 | Definition | Meaning |
 |---|---|
-| `AllFixes`, `AllFaults` | the five `Fixes` members, and the six `Faults` values |
+| `AllFixes`, `AllFaults` | the seven `Fixes` members, and the six `Faults` values |
 | `Writers` | `Mounts` and `""`, a writer outside the model |
 | `Keys` | the snapshot keys, `snapshots/<epoch>-<nonce>.json.gz`, as records `[epoch, nonce]` whose nonce is in `Nonces` or is 0 |
 | `NoKey` | no key: epoch 0, nonce 0 |
@@ -263,6 +268,7 @@ machine's states (rule 3).
 | `Prunable(L, k)` | the keys a prune pass begun for `k` may delete, with `PruneBelowCurrent`: `Below(L, k)` less the `Retention` newest of them. Go `prunable`, under rule 4 (V7); exists |
 | `Mutable(m)` | V1 |
 | `Fenced(m)` | `m` is read-only and `ReadOnlyFence` is in `Fixes`: `store.ReadOnly` refuses `m`'s writes |
+| `FallbackAllowed` | the unconditional fallback follows a swap the store answered 501: `FallbackOptIn` is not in `Fixes`, which reads as a build without ADR 0021's fix or as mounts whose operator set `Config.AllowUnconditionalRoot`, which behave alike (the module's J17). Go `(*FS).fallbackAllowed`, under rule 4 (V7); reserved, ADR 0021 |
 | `CommitIdOf(m, k)` | the commit that `m` makes at `k`'s epoch |
 | `FreshKeys(m)` | the keys a new attempt by `m` may write: at the next epoch, with a nonce no write has named (`Nonce`), or with nonce 0 |
 | `KeyFor(m)` | the key of `m`'s attempt: `attempt[m]`, or else a fresh one |
@@ -293,6 +299,7 @@ machine's states (rule 3).
 | `ReadOnlyFence` | `New` puts a read-only mount's store behind `store.ReadOnly` (ADR 0011 §3) | exists |
 | `PruneBelowCurrent` | a prune pass deletes only the snapshot keys that sort below the one its commit swapped the root pointer to, and keeps the `Retention` newest of them, so the snapshot the root pointer names is never deleted (ADR 0019 §1, §2) | exists |
 | `AtomicLoad` | `loadOrInit` reads the root pointer's body and its ETag with one call, `store.Store.GetWithETag`, so the ETag its first commit swaps against is the ETag of the body it loaded, and a commit by another mount between a mount's reads is refused, not overwritten (ADR 0020 §1, §2) | exists, as of `c5068a0` |
+| `FallbackOptIn` | `commitLocked`, after `store.ErrUnsupported` from the swap, writes the root pointer unconditionally only on a mount whose operator set `Config.AllowUnconditionalRoot`, and otherwise fails the commit with nothing more written, so one 501 never turns a conditional writer into an unconditional one (ADR 0021 §1, §2) | reserved, ADR 0021 |
 
 **Checked against rule 1.** Every name the CommitProtocol spec added here was
 checked against rule 1 and against the operators listed at the end of this
@@ -314,7 +321,12 @@ TLA+ reserved word; and the Go name `prunable`, lowerCamel, which is no Go
 keyword or predeclared identifier either. ADR 0020 added no bare name;
 `AtomicLoad` was checked when it was reserved. Its Go name `GetWithETag` is
 an exported method of `store.Store`, UpperCamel, and no Go keyword or
-predeclared identifier.
+predeclared identifier. ADR 0021 added `FallbackOptIn` and
+`FallbackAllowed`, each UpperCamel ASCII letters, neither equal to an
+operator above (`Head` is contained in neither), a Go keyword or
+predeclared identifier, or a TLA+ reserved word; and the Go names
+`AllowUnconditionalRoot`, `allowUnconditionalRoot` and `fallbackAllowed`,
+none a Go keyword or predeclared identifier.
 
 ## V4. Sync and file data
 
@@ -480,6 +492,15 @@ from its first access to the charge or to `of.bytes` until its last, and a
   may delete (ADR 0019 §2). It is not a `policy.Policy`: no caller asks for a
   deletion, since a pass is a step the server takes on its own commit's
   success, which ADR 0018 §2 keeps outside the policy rule. Exists.
+- `FallbackAllowed` = `(*FS).fallbackAllowed()`, a method in
+  `internal/blobfs/commit.go` that returns the mount's
+  `allowUnconditionalRoot`, set once by `New` from
+  `Config.AllowUnconditionalRoot`: the one place that decides whether a
+  swap the store answered 501 is followed by the unconditional write (ADR
+  0021 §2). It is not a `policy.Policy`: no caller asks for the write, and
+  the branch is a step the server takes on a store's answer, decided by the
+  operator's configuration, which ADR 0018 §2 keeps outside the policy rule
+  (ADR 0021 §5). Reserved, ADR 0021.
 
 ## Operators of the standard modules
 

@@ -103,3 +103,4 @@ URL, and what was taken from it.
 | [0018](0018-state-machines-and-policies-are-a-standing-rule.md) | State machines and policies are a standing rule | Accepted |
 | [0019](0019-a-prune-pass-deletes-only-below-its-own-commit.md) | A prune pass deletes only below its own commit's snapshot | Accepted |
 | [0020](0020-a-mount-loads-the-root-pointer-and-its-etag-in-one-read.md) | A mount loads the root pointer and its ETag in one read | Accepted |
+| [0021](0021-the-unconditional-root-write-needs-the-operators-opt-in.md) | The unconditional root write needs the operator's opt-in | Accepted |
