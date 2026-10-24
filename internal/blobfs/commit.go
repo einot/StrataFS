@@ -21,18 +21,27 @@ import (
 // there, and a read-only mount refuses it, having written nothing (ADR 0011
 // §1, §2).
 //
-// TLA+: docs/tla/CommitProtocol.tla GetRoot, RefuseEmpty, InitEmpty, HeadRoot, GetSnapshot
+// TLA+: docs/tla/CommitProtocol.tla GetRoot, RefuseEmpty, InitEmpty, GetSnapshot
 func (f *FS) loadOrInit(ctx context.Context) error {
-	raw, err := f.store.Get(ctx, rootKey)
+	// Name the store as the embedder gave it, not New's wrapper, whose name
+	// only adds " (read-only)" to it.
+	storeName := func() string {
+		if ro, ok := f.store.(store.ReadOnly); ok {
+			return ro.Store.Name()
+		}
+		return f.store.Name()
+	}
+
+	// The body and the ETag come from one response (ADR 0020 §1). The next
+	// commit compare-and-swaps against this ETag, so it must be the ETag of
+	// the root pointer this namespace descends from: one taken from a second
+	// read could belong to a newer root pointer another mount swapped in
+	// meanwhile, and our swap would then silently replace that mount's commit
+	// instead of failing and diverging.
+	raw, etag, err := f.store.GetWithETag(ctx, rootKey)
 	if errors.Is(err, store.ErrNotFound) {
 		if f.readOnly {
-			// Name the store as the embedder gave it, not New's wrapper, whose
-			// name only adds " (read-only)" to it.
-			name := f.store.Name()
-			if ro, ok := f.store.(store.ReadOnly); ok {
-				name = ro.Store.Name()
-			}
-			return fmt.Errorf("blobfs: %s holds no filesystem, and a read-only mount does not create one", name)
+			return fmt.Errorf("blobfs: %s holds no filesystem, and a read-only mount does not create one", storeName())
 		}
 		return f.initEmpty(ctx)
 	}
@@ -48,12 +57,12 @@ func (f *FS) loadOrInit(ctx context.Context) error {
 		return fmt.Errorf("bucket holds format version %d, this build speaks %d", rp.Version, snapshotVersion)
 	}
 
-	// Record the ETag we loaded from; the next commit compare-and-swaps against
-	// it, so a second mount writing concurrently is detected rather than
-	// silently clobbering us.
-	info, err := f.store.Head(ctx, rootKey)
-	if err != nil {
-		return fmt.Errorf("stat root pointer: %w", err)
+	// An empty rootETag means "no root", so keeping an empty ETag here would
+	// make the first commit create-only against a root that exists,
+	// misreporting a second writer. Nothing is at stake yet, so refuse and name the cause
+	// (ADR 0020 §2, Assumption 3).
+	if etag == "" {
+		return fmt.Errorf("blobfs: %s returned no ETag for the root pointer, so commits cannot be compare-and-swapped", storeName())
 	}
 
 	snapRaw, err := f.store.Get(ctx, rp.Snapshot)
@@ -76,7 +85,7 @@ func (f *FS) loadOrInit(ctx context.Context) error {
 	f.nextIno = snap.NextIno
 	f.epoch = snap.Epoch
 	f.fsid = rp.FSID
-	f.rootETag = info.ETag
+	f.rootETag = etag
 
 	if _, ok := f.inodes[rootInodeID]; !ok {
 		return errors.New("snapshot has no root inode")
