@@ -23,6 +23,15 @@ against. A decision that only affects one function does not.
   corrected in place, with a `**Revised:** YYYY-MM-DD` line in the header
   recording what moved, why, and what did not. Superseding is for a decision
   that turned out wrong, not for a fact that moved underneath one.
+- A later ADR may replace one part of an earlier decision and leave the rest
+  standing. It says which part it replaces. The earlier ADR keeps its status,
+  its text stays as the record, and a `Revised` line, cross-references only,
+  names the part and the ADR that replaced it.
+- [`exemptions.md`](exemptions.md) is a register, not an ADR. It lists every
+  exemption from ADR 0018's rules that an ADR has granted, in force or
+  revoked. The PR that carries an ADR granting or revoking one adds or marks
+  its row there, as it adds the ADR's own row to the index below, and revises
+  no ADR for it.
 - `Status` is one of `Proposed`, `Accepted`, `Rejected`, or
   `Superseded by NNNN`.
 - The normative text lives in `docs/DESIGN.md`. An ADR may restate a format
@@ -90,3 +99,4 @@ URL, and what was taken from it.
 | [0015](0015-every-mount-command-carries-nosuid.md) | Every mount command carries nosuid and nodev | Accepted |
 | [0016](0016-a-failed-accept-is-retried-or-ends-in-the-final-commit.md) | A failed Accept is retried or ends in the final commit | Accepted |
 | [0017](0017-removing-a-directory-removes-its-inode.md) | Removing a directory removes its inode | Accepted |
+| [0018](0018-state-machines-and-policies-are-a-standing-rule.md) | State machines and policies are a standing rule | Accepted |

@@ -66,9 +66,11 @@ you so the architect or test-author can address it.
 - Comments explain *why*, not *what*, and match the density of the file
   they are in.
 - Implement state as an `internal/fsm` machine and permission decisions as
-  `internal/policy` policies (CLAUDE.md, "State machines and policies").
-  If a brief asks for an inline state field or an inline check and cites
-  no ADR that exempts it, report that rather than write it.
+  `internal/policy` policies, and fire a security-relevant transition only
+  on its policy's permit (CLAUDE.md, "State machines and policies"; ADR
+  0018 §2 says what the rules reach). If a brief asks for state or a
+  permission check the rules reach to be written inline, and cites no ADR
+  that exempts it, report that rather than write it.
 - Lock ordering is documented in `internal/blobfs/fs.go`: `openFile.mu`
   before `FS.mu`, never the reverse, and object-store I/O never happens
   while holding `FS.mu`. Violating this deadlocks the server.

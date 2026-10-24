@@ -297,16 +297,16 @@ That covers a permission check, an ownership or time rule, an access
 mask, and a gate on an operation.
 
 **A security transition asks a policy.** When a transition is
-security-relevant, as ADR 0014 §12 defines it, it is linked to a policy.
+security-relevant, as ADR 0018 §5 defines it, it is linked to a policy.
 The policy's verdict guards the transition, and the event fires only if
-the policy permits it. ADR 0014 §12 defines how the two connect.
+the policy permits it. ADR 0018 §5 defines how the two connect.
 
 **Exceptions are decided, not assumed.** The architect may exempt code
 from any of these rules when it has a good reason. Examples: a hot path
 where a table costs more than it catches, state that another mechanism
 already pins and tests, or a flag with a single rule. Each exemption is
-recorded in an ADR that names the code and the reason. ADR 0014 §1 lists
-the current ones. Code without an exemption follows the rules.
+recorded in an ADR that names the code and the reason.
+`docs/adr/exemptions.md` lists the current ones. Code without an exemption follows the rules.
 
 These rules apply to new and changed code. Existing code moves over as
 #114 plans.
