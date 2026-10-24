@@ -413,7 +413,13 @@ A consistency point is:
    whose hash already exists are skipped, which is dedup and crash-recovery
    reuse in the same step.
 4. **Swap.** Once *every* block is durable, compare-and-swap `fsinfo` with
-   `If-Match` on the ETag read at mount.
+   `If-Match` on the ETag of the `fsinfo` this mount's tree descends from:
+   the one its last successful swap returned, or, before any, the one it
+   loaded. The loaded ETag comes from the same response as the `fsinfo` body
+   it describes, never from a separate `HEAD`, which could belong to a newer
+   `fsinfo` than the body and let this swap replace another mount's commit
+   undetected
+   ([ADR 0020](adr/0020-a-mount-loads-the-root-pointer-and-its-etag-in-one-read.md)).
 
 Step 4 after step 3 is WAFL's one ordering constraint from §3.6: all blocks of
 the consistency point reach storage before the root does. Violating it is the
@@ -712,3 +718,4 @@ it is not this one.
 | [0017](adr/0017-removing-a-directory-removes-its-inode.md) | Removing a directory's name removes the directory, whatever its count; every link-count change `unlink` and `Rename` make goes through one function; buckets earlier builds wrote are not repaired | none — it constrains `internal/blobfs`, which section 14 replaces, and adds to the `vfs.FS` contract that an object left with no name is gone, which the backend replacing `blobfs` implements too |
 | [0018](adr/0018-state-machines-and-policies-are-a-standing-rule.md) | New and changed stateful code expresses its state as an explicit transition table run by `internal/fsm`, and every decision about whether a caller may do something is a pure policy in `internal/policy`, unless an ADR exempts the code, and the register `docs/adr/exemptions.md` lists every exemption; a security-relevant transition fires only once its policy permits it, in one hold that holds the lock serializing its machine exclusively | 14 — the code of every phase is new code under these rules; otherwise it constrains how every package expresses state and decisions about callers, and replaces ADR 0014's fixed scope |
 | [0019](adr/0019-a-prune-pass-deletes-only-below-its-own-commit.md) | A prune pass deletes only snapshots whose keys sort below the one its commit swapped the root pointer to, keeping the newest `-snapshot-retention` of them, and never reads the root pointer, so the snapshot the root pointer names is never deleted; `prunable` in `internal/blobfs` is the one place that decides what a pass deletes | none — it constrains `internal/blobfs`, which section 14 replaces; the sweeper of section 8, specified before its code (ADR 0013), inherits the rule that nothing the active root names is deleted |
+| [0020](adr/0020-a-mount-loads-the-root-pointer-and-its-etag-in-one-read.md) | A mount loads the root pointer and its ETag in one read: `loadOrInit` takes both from one store call, `GetWithETag`, never from a separate `Head`, so the ETag its first commit compare-and-swaps against is the ETag of the namespace it loaded, and a root pointer read that returns no ETag fails the mount | 5 — step 4's `If-Match` ETag, which the `fsinfo` load inherits; otherwise `internal/store`'s `Store` interface and `internal/blobfs`, which section 14 replaces |

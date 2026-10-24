@@ -56,6 +56,26 @@ func (l *Local) Get(ctx context.Context, key string) ([]byte, error) {
 	return b, err
 }
 
+// GetWithETag hashes the bytes it returns rather than reading the file again,
+// as Head does, so the ETag is always that of this body. It needs no lock:
+// Put renames a whole file into place, so one read sees one whole body.
+//
+// TLA+: docs/tla/CommitProtocol.tla GetRoot
+func (l *Local) GetWithETag(ctx context.Context, key string) ([]byte, string, error) {
+	p, err := l.path(key)
+	if err != nil {
+		return nil, "", err
+	}
+	b, err := os.ReadFile(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, "", ErrNotFound
+	} else if err != nil {
+		return nil, "", err
+	}
+	s := md5.Sum(b)
+	return b, hex.EncodeToString(s[:]), nil
+}
+
 func (l *Local) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {
 	p, err := l.path(key)
 	if err != nil {

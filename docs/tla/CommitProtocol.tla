@@ -10,7 +10,7 @@
 \* Go symbols that perform each action, and docs/vocabulary.md, V3, gives
 \* every name.
 \*
-\* Checked against cc38ca6
+\* Checked against c5068a0
 \* Revised: 2026-10-24 -- ADR 0019 (#88): with the Fixes member
 \*   PruneBelowCurrent, a prune pass deletes only the keys that sort below the
 \*   one its commit swapped the root pointer to, and keeps the Retention newest
@@ -19,6 +19,12 @@
 \*   PassApartFromOwnCommits compares epochs through it. Without the member the
 \*   module describes pruneSnapshots as it is at 13aebc4, as before. J11, J14
 \*   and J15 are rewritten for the fix. Nothing else moved.
+\* Revised: 2026-10-24 -- ADR 0020 (#89): with the Fixes member AtomicLoad,
+\*   GetRoot records the root pointer's ETag with the key it names, from one
+\*   read, and goes straight to GetSnapshot, so HeadRoot, #89's window, is
+\*   never due. Without the member the module describes loadOrInit as it is
+\*   at 55fc666, as before. R2, J11 and J13 are reworded, and the Leaves-out
+\*   list names a read that returns no ETag. Nothing else moved.
 \*
 \* Scope
 \*   - One bucket, and the mount processes in Mounts.
@@ -38,8 +44,10 @@
 \* Leaves out
 \*   - File data, the commit gate and its settle pass: FileData's.
 \*   - The write budget, and NFS acknowledgements: NfsDurability's.
-\*   - rootKnowledge, which the ADR for #5 adds, and AtomicLoad, which the
-\*     load-race ADR adds (Assumption J13).
+\*   - rootKnowledge, which the ADR for #5 adds (Assumption J13).
+\*   - A read of the root pointer that returns no ETag, which with AtomicLoad
+\*     makes New fail (ADR 0020 section 2). Here every root pointer has an
+\*     ETag (Assumption J3).
 \*   - Failed reads: a Get or a Head of the root pointer, or a Get of the
 \*     snapshot it names, failing other than with not-found. Each only makes
 \*     New fail.
@@ -59,8 +67,9 @@
 \* Reductions (ADR 0013 section 4)
 \*   R1.  InitEmpty and RefuseEmpty are outcomes of GetRoot's Get, and their
 \*        work is local, so each is one action with that Get.
-\*   R2.  HeadRoot assigns rootETag[m], which Go does at the end of
-\*        loadOrInit. Nothing reads FS.rootETag before New returns.
+\*   R2.  GetRoot, with AtomicLoad, or HeadRoot, without it, assigns
+\*        rootETag[m], which Go does at the end of loadOrInit. Nothing reads
+\*        FS.rootETag before New returns.
 \*   R3.  mutable() is folded into Mutate (ADR 0013 Assumption 9).
 \*   R4.  Mutate is enabled only at "Ready", because FS.mu is held across
 \*        commitLocked (#43).
@@ -152,10 +161,19 @@
 \*        while every swap is conditional, or while one writer uses the
 \*        fallback, so nothing below the key a pass was begun for is named
 \*        again. Where that fails, two writers on the fallback or #89's
-\*        window, the model shows the loss by NoLostAck first.
+\*        window, the model shows the loss by NoLostAck first. AtomicLoad
+\*        closes the window (ADR 0020): CommitProtocol_PruneTwoWritersFromEmpty
+\*        shows every property for two writers from an empty bucket, each
+\*        pruning at Retention 1, with three nonces, failed swaps, failed
+\*        Puts, a snapshot Put that takes effect and fails, and a crash; and
+\*        CommitProtocol_NoAtomicLoadPrune, without the member, shows the
+\*        residual ADR 0019 Assumption 4 left: a swap through the window
+\*        names a key below the one a pass was begun for, a failed attempt's
+\*        orphan above it fills the retention, and the pass deletes the root
+\*        pointer's snapshot.
 \*   J12. The configurations' bounds and tiers are judgement calls.
-\*   J13. Neither rootKnowledge nor AtomicLoad is modelled. Their ADRs add
-\*        them.
+\*   J13. rootKnowledge is not modelled; the ADR for #5 adds it. AtomicLoad
+\*        is, since ADR 0020: GetRoot consults it.
 \*   J14. Failed List and Delete calls are left out, and ADR 0019's argument
 \*        does not need them: a List or a Delete that fails deletes nothing,
 \*        a Delete that takes effect and is sent again deletes the same key,
@@ -230,9 +248,13 @@ CONSTANTS
 \*     pointer to, and keeps the Retention newest of them (Prunable). Without
 \*     it the pass deletes every listed key but the Retention newest, sparing
 \*     only the keys of the epoch it was begun for, as at 13aebc4.
+\*   AtomicLoad: ADR 0020 section 2. loadOrInit reads the root pointer's body
+\*     and its ETag with one call, GetWithETag, so GetRoot records both and
+\*     HeadRoot is never due. Without it loadOrInit reads the body with Get
+\*     and the ETag with a later Head, as at 55fc666.
 
 AllFixes  == {"IfNoneMatchInit", "Nonce", "ChunksFirst", "ReadOnlyFence",
-              "PruneBelowCurrent"}
+              "PruneBelowCurrent", "AtomicLoad"}
 AllFaults == {"SwapReplyLost", "SwapFailed", "SwapConflict409", "PutFailed",
               "SnapshotReplyLost", "FallbackReplyLost"}
 
@@ -536,16 +558,25 @@ Init ==
 -----------------------------------------------------------------------------
 \* Loading.
 
-\* GetRoot: loadOrInit's Get of the root pointer, and its parse, when the
-\* bucket holds one. It records the snapshot key the root pointer names.
-\* Go (trace.tsv): FS.loadOrInit.
+\* GetRoot: loadOrInit's read of the root pointer, and its parse, when the
+\* bucket holds one. It records the snapshot key the root pointer names. With
+\* AtomicLoad the read is GetWithETag, whose ETag comes in the same response
+\* as the body, so it becomes FS.rootETag here (R2) and the next read is the
+\* snapshot's. Without it the read is Get, and the ETag waits for HeadRoot:
+\* #89's window.
+\* Go (trace.tsv): FS.loadOrInit; S3.GetWithETag; Local.GetWithETag.
 GetRoot(m) ==
   /\ pc[m] = "GetRoot"
   /\ bucketRoot.key # NoKey
   /\ rpSnapshot' = [rpSnapshot EXCEPT ![m] = bucketRoot.key]
-  /\ pc' = [pc EXCEPT ![m] = "HeadRoot"]
-  /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty, attempt, base,
-                 PruneVars, GhostVars, crashes>>
+  /\ IF "AtomicLoad" \in Fixes
+       THEN /\ rootETag' = [rootETag EXCEPT ![m] = bucketRoot.etag]
+            /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
+            /\ pc' = [pc EXCEPT ![m] = "GetSnapshot"]
+       ELSE /\ pc' = [pc EXCEPT ![m] = "HeadRoot"]
+            /\ UNCHANGED <<rootETag, overtaken>>
+  /\ UNCHANGED <<BucketVars, mode, epoch, nsDirty, attempt, base, PruneVars,
+                 acked, used, roWrites, crashes>>
 
 \* RefuseEmpty: loadOrInit's not-found branch on a read-only mount, which
 \* makes New fail, having written nothing (ADR 0011 section 2).
@@ -574,10 +605,13 @@ InitEmpty(m) ==
   /\ UNCHANGED <<BucketVars, mode, attempt, rpSnapshot, PruneVars, acked,
                  used, roWrites, crashes>>
 
-\* HeadRoot: loadOrInit's Head of the root pointer, whose ETag becomes
-\* FS.rootETag (R2). Another writer's swap between GetRoot and HeadRoot is
-\* #89's window.
-\* Go (trace.tsv): FS.loadOrInit.
+\* HeadRoot: without AtomicLoad, loadOrInit's Head of the root pointer, whose
+\* ETag becomes FS.rootETag (R2). Another writer's swap between GetRoot and
+\* HeadRoot is #89's window. With AtomicLoad, GetRoot never leaves pc at
+\* "HeadRoot", so this action is never enabled, and since ADR 0020 no Go
+\* symbol performs it: loadOrInit makes no Head of the root pointer.
+\* Go: none since ADR 0020 (FS.loadOrInit at 55fc666 and before); trace.tsv
+\* has no row for it.
 HeadRoot(m) ==
   /\ pc[m] = "HeadRoot"
   /\ rootETag' = [rootETag EXCEPT ![m] = bucketRoot.etag]

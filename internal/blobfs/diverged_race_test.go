@@ -89,6 +89,12 @@ func (s *dr48Store) Get(ctx context.Context, key string) ([]byte, error) {
 	return s.inner.Get(ctx, key)
 }
 
+// GetWithETag passes the call through to the inner store, as ADR 0020
+// Assumption 14 asks once the method exists.
+func (s *dr48Store) GetWithETag(ctx context.Context, key string) ([]byte, string, error) {
+	return s.inner.GetWithETag(ctx, key)
+}
+
 func (s *dr48Store) GetRange(ctx context.Context, key string, off int64, n int64) ([]byte, error) {
 	return s.inner.GetRange(ctx, key, off, n)
 }

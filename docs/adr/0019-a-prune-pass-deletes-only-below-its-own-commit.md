@@ -2,6 +2,11 @@
 
 **Status:** Accepted
 **Date:** 2026-10-24
+**Revised:** 2026-10-24 — cross-reference only: ADR 0020 landed `AtomicLoad`,
+closing the load race §1 leaves to it; its `CommitProtocol_NoAtomicLoadPrune`
+shows the residual Assumption 4 names, and
+`CommitProtocol_PruneTwoWritersFromEmpty` shows it closed. The rule, the Go
+change and the configurations here are unchanged.
 **Issue:** #88
 
 ## Context
@@ -129,7 +134,10 @@ key that sorts above K, and it never reads the root pointer.
   behaviour loses an acknowledged commit first (`NoLostAck`,
   `CommitProtocol_LoadRace`), and `AtomicLoad`, the fix the vocabulary
   reserves for #89, closes it. Within the bounds of the eight configurations
-  it does not reach `RootSnapshotExists` (Assumption 4).
+  it does not reach `RootSnapshotExists` (Assumption 4). ADR 0020 landed
+  `AtomicLoad`: `loadOrInit` takes the body and the ETag from one read,
+  `CommitProtocol_NoAtomicLoadPrune` shows the residual without the member,
+  and `CommitProtocol_PruneTwoWritersFromEmpty` shows it closed with it.
 - Two writers on the unconditional fallback overwrite each other's root
   pointer at will (`docs/DESIGN.md` §2; #91), so the key the root pointer
   names can fall there. The rule's guarantee on the fallback is a single
@@ -561,7 +569,14 @@ Each is mine unless it says otherwise.
    `Nonces = {1, 2}` and `Retention` 1 such an attempt is the newest key
    below the root and so is kept. Beyond those bounds, with three nonces, the
    residual exists, and `AtomicLoad` removes it. TLC, not this tracing, is
-   the check; the session's runs decide.
+   the check; the session's runs decide. ADR 0020 §4 traced the residual
+   exactly: it needs a key between the swapped-in one and the pass's, so
+   three nonces *and* a failed attempt, or a third mount, and not three
+   nonces alone. `CommitProtocol_NoAtomicLoadPrune` shows it: TLC reported a
+   route in which the orphan is the pruning writer's own failed attempt and
+   the pass deletes the other writer's snapshot before that writer's swap
+   names it, and ADR 0020 §4 records the hand-traced route beside it.
+   `AtomicLoad` closes both.
 5. **No read of the root pointer in the pass** (§2). The committing mount
    knows the key the root pointer names at the instant the pass begins, so a
    `Get` would add a call whose failure needs a rule, for no safety; and a
@@ -672,7 +687,8 @@ Each is mine unless it says otherwise.
   lost (#79, #10). This ADR only stops making more of them.
 - The lost-reply and 409 routes of #5, whose InDoubt resolution is its own
   ADR, and the snapshots such a mount leaves above the root (§3).
-- `AtomicLoad` for #89, and the residual §1 names until it lands.
+- `AtomicLoad` for #89, and the residual §1 names until it lands. Decided by
+  ADR 0020.
 - Whether `FS.pruning` becomes a machine or an exemption under #114 (§5,
   Assumption 9).
 - Chunk garbage collection (`docs/DESIGN.md` §8), and whether the redesign

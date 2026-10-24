@@ -5,6 +5,11 @@
 **Revised:** 2026-10-08 — cross-references only. The bullet on #64, the commit
 window, under *What this does not decide* now ends by saying that ADR 0012
 decides it. Nothing else changed.
+**Revised:** 2026-10-24 — cross-reference only: since ADR 0020, `loadOrInit`
+reads the root pointer with `GetWithETag`, one call for the body and its
+ETag, and makes no `Head` of it; §1's lead-in and table now say so, and the
+table gains a row for a root pointer read with no ETag, which mounted in both
+modes until ADR 0020 §2 refused it. The decision is unchanged.
 **Issue:** #68
 
 ## Context
@@ -99,17 +104,20 @@ ADR 0010 list #68 under *What this does not decide*.
 
 ### 1. A bucket that holds no filesystem
 
-A bucket holds no filesystem when `Get` of the root pointer's key, `root`,
+A bucket holds no filesystem when the read of the root pointer's key, `root`,
 returns an error for which `errors.Is(err, store.ErrNotFound)` holds. That is
-the test `loadOrInit` already makes. Nothing else in the bucket is consulted.
+the test `loadOrInit` already makes; at `3dc7c11` the read was `Get`, and
+since ADR 0020 it is `GetWithETag`, one call for the body and its ETag.
+Nothing else in the bucket is consulted.
 
-| What the bucket holds | `Get` of `root` | Writable `New` (unchanged) | Read-only `New` before this ADR | Read-only `New` now |
+| What the bucket holds | The read of `root` | Writable `New` (unchanged) | Read-only `New` before this ADR | Read-only `New` now |
 |---|---|---|---|---|
 | nothing | `store.ErrNotFound` | creates a filesystem and commits it | the same, and serves it | refused (§2) |
 | objects, but no root pointer: a first commit cut short, a filesystem whose root pointer was deleted, unrelated objects | `store.ErrNotFound` | creates a new filesystem among them and commits it | the same; its pruning can delete some of the snapshots there (*Context*) | refused (§2) |
 | a root pointer and the snapshot it names | the pointer | mounts it | mounts it | mounts it |
-| a root pointer that does not parse or gives another format version, or that `Head` fails on, or that names a snapshot that cannot be read or decoded or that has no root inode | the pointer | fails, writing nothing | the same | the same |
-| anything, when `Get` of `root` fails another way (a 403, a network error) | that error | fails, writing nothing | the same | the same |
+| a root pointer that does not parse or gives another format version, or that `Head` failed on, until ADR 0020 removed that read, or that names a snapshot that cannot be read or decoded or that has no root inode | the pointer | fails, writing nothing | the same | the same |
+| a root pointer that comes with no ETag | the pointer | since ADR 0020 §2, fails, writing nothing; at `3dc7c11`, and until that ADR, mounted it with an empty `rootETag` | the same as the writable column, at each date | the same |
+| anything, when the read of `root` fails another way (a 403, a network error) | that error | fails, writing nothing | the same | the same |
 
 A local directory that does not exist is created by `store.NewLocal` before
 `New` runs, and then holds nothing. An S3 bucket that does not exist answers

@@ -10,9 +10,10 @@ package blobfs
 //     FS.commitInterval, with Config.ReadOnly set and not;
 //   - §2, New refuses a negative interval before it touches the store: a nil
 //     *FS, a non-nil error whose text contains "commit interval" and
-//     d.String(), no call of any of the eight store.Store methods, Name
-//     included, and a bucket left exactly as it was, with Config.ReadOnly set
-//     and not, over an empty bucket and over one that holds a filesystem;
+//     d.String(), no call of any of the nine store.Store methods (the eight
+//     ADR 0009 §5 restates, Name included, and GetWithETag from ADR 0020
+//     §2), and a bucket left exactly as it was, with Config.ReadOnly set and
+//     not, over an empty bucket and over one that holds a filesystem;
 //   - §4 and §5, Run on a writable mount, for every interval New accepts,
 //     returns once its context is cancelled, without panicking.
 //
@@ -67,14 +68,16 @@ import (
 // once (ADR 0009, Context).
 const ciRunFor = 20 * time.Millisecond
 
-// ciMethods names the eight store.Store methods, in the order ADR 0009 §5
-// restates them.
-var ciMethods = []string{"Get", "GetRange", "Head", "Put", "Delete", "List", "PutIfMatch", "Name"}
+// ciMethods names the nine store.Store methods: the eight ADR 0009 §5
+// restates, in the order it restates them, and then GetWithETag, from
+// ADR 0020 §2.
+var ciMethods = []string{"Get", "GetRange", "Head", "Put", "Delete", "List", "PutIfMatch", "Name", "GetWithETag"}
 
 // ciStore is a store.Store that wraps another and counts every call of each of
-// its eight methods, Name included, before it delegates the call. It is safe
-// for concurrent use. It does not embed store.Store, so that every method it
-// has is one that counts.
+// its nine methods, the eight ADR 0009 §5 restates, Name included, and
+// GetWithETag from ADR 0020 §2, before it delegates the call. It is safe for
+// concurrent use. It does not embed store.Store, so that every method it has
+// is one that counts.
 type ciStore struct {
 	inner store.Store
 	mu    sync.Mutex
@@ -96,7 +99,8 @@ func (s *ciStore) count(method string) {
 }
 
 // counts returns a copy of the counts so far, with an entry for each of the
-// eight methods.
+// nine methods, the eight ADR 0009 §5 restates and GetWithETag from ADR 0020
+// §2.
 func (s *ciStore) counts() map[string]int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -145,6 +149,13 @@ func (s *ciStore) PutIfMatch(ctx context.Context, key string, data []byte, etag 
 func (s *ciStore) Name() string {
 	s.count("Name")
 	return s.inner.Name()
+}
+
+// GetWithETag counts the call, then passes it through to the inner store, as
+// ADR 0020 Assumption 14 asks once the method exists.
+func (s *ciStore) GetWithETag(ctx context.Context, key string) ([]byte, string, error) {
+	s.count("GetWithETag")
+	return s.inner.GetWithETag(ctx, key)
 }
 
 // ciConfig is the Config every New in this file is given.

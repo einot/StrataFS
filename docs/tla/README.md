@@ -10,12 +10,13 @@ This file says what the directory holds, how to read it and how to run it.
 
 - **`CommitProtocol.tla`**: how a mount reads the root pointer, commits,
   prunes snapshots and diverges, against other mounts, failing store calls
-  and crashes (ADR 0013 §1, item 1). It is checked against `cc38ca6`.
-- **Its 27 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
-  sixteen MustHold and eleven MustFail. Six of the MustFail ones each remove
-  a fix the code has, and five each show an open defect: #89, #91, and #5 by
-  three. Eight of the MustHold ones showed #88 until ADR 0019's fix flipped
-  them, and keep the two invariants they had (*MustHold and MustFail*). Each
+  and crashes (ADR 0013 §1, item 1). It is checked against `c5068a0`.
+- **Its 30 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
+  eighteen MustHold and twelve MustFail. Eight of the MustFail ones each
+  remove a fix the code has, and four each show an open defect: #91, and #5
+  by three. Nine of the MustHold ones showed a defect until its fix flipped
+  them, eight #88 (ADR 0019) and one #89 (ADR 0020), and keep the two
+  invariants they had (*MustHold and MustFail*). Each
   opens with a comment giving its expectation, its issue or the fix it
   removes, and the source of each `Fixes` member. One,
   `CommitProtocol_PruneTwoWriters`, also sets a state constraint,
@@ -59,8 +60,9 @@ Each module opens with a header comment that states:
   stand for a run of Go steps, and its **assumptions**: the judgement calls
   the model rests on, which no requirement made.
 
-`CommitProtocol.tla` has one `Revised:` line, for ADR 0019's fix of #88. Each
-action's comment names the Go symbols that `trace.tsv` gives it.
+`CommitProtocol.tla` has two `Revised:` lines, for ADR 0019's fix of #88 and
+ADR 0020's fix of #89. Each action's comment names the Go symbols that
+`trace.tsv` gives it.
 
 Every module declares the constant `Fixes`, the set of fixes a configuration
 includes, and its actions consult it, so one module describes the code with
@@ -148,7 +150,7 @@ all three:
   The runner asks no more, because a defect's configuration keeps its two
   invariants when it flips, and the flip may change nothing else (ADR 0013
   §7). A configuration written as MustHold lists every property its module
-  defines, as the six here do; review holds it to that, since the runner
+  defines, as the nine here do; review holds it to that, since the runner
   cannot tell the two kinds apart.
 - **A MustHold configuration with a state constraint has a twin.** A
   constraint stops TLC taking a step from a state that breaks it

@@ -190,15 +190,30 @@ func errorFor(method, key string, resp *http.Response) error {
 }
 
 func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
+	data, _, err := s.GetWithETag(ctx, key)
+	return data, err
+}
+
+// GetWithETag takes the ETag from the response that carried the body, never
+// from a separate HEAD, so a write landing between two requests cannot pair
+// one body with another's ETag. A retried GET returns a later body with that
+// body's own ETag, so retrying keeps the pair consistent.
+//
+// TLA+: docs/tla/CommitProtocol.tla GetRoot
+func (s *S3) GetWithETag(ctx context.Context, key string) ([]byte, string, error) {
 	resp, err := s.do(ctx, http.MethodGet, s.url(key, nil), nil, nil, true)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, errorFor("GET", key, resp)
+		return nil, "", errorFor("GET", key, resp)
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, cleanETag(resp.Header.Get("ETag")), nil
 }
 
 func (s *S3) GetRange(ctx context.Context, key string, off, n int64) ([]byte, error) {

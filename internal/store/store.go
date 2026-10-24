@@ -51,6 +51,13 @@ type Store interface {
 
 	// Name identifies the backend in logs and errors.
 	Name() string
+
+	// GetWithETag returns the whole object together with the ETag of the body it
+	// returns, both taken from one response, so that the pair is consistent
+	// however the object is being replaced meanwhile: the ETag is the one a later
+	// PutIfMatch of the key compares against for exactly this body. A missing key
+	// is ErrNotFound. A backend that gives no ETag returns "" and no error.
+	GetWithETag(ctx context.Context, key string) (data []byte, etag string, err error)
 }
 
 // ReadOnly wraps a Store and rejects every mutation. A filesystem opened
