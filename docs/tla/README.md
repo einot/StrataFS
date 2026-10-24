@@ -232,15 +232,23 @@ before TLC runs.
    command.
    - A directory lies inside a guard when it, or any directory on its path
      up to `/`, is the guard itself by device and inode, as bash's
-     `test -ef` compares them. So no spelling of the path hides it: a
-     firmlink such as macOS's `/System/Volumes/Data`, a bind mount, or a
-     change of case. The runner also refuses, as it did before, a path that
-     begins with a guard's path, ignoring case.
+     `test -ef` compares them. So a path that reaches a guard by another
+     spelling is caught: a firmlink such as macOS's `/System/Volumes/Data`,
+     a bind mount of a guard or of a directory above one, or a change of
+     case. The runner also refuses, as it did before, a path that begins
+     with a guard's path, ignoring case.
    - If it cannot examine a directory on either path, it refuses the run.
    - It also refuses a `<tmp>` whose path holds `:`.
-   - Its limits: a linked worktree that git placed outside its main checkout
-     does not guard that checkout, since only git knows of it, and a network
-     mount of the tree reports another device.
+   - Its limits:
+     - a linked worktree that git placed outside its main checkout does not
+       guard that checkout, since only git knows of it;
+     - a bind mount of a directory inside a guard is not caught, since no
+       directory on the mount's own path is the guard;
+     - a network or FUSE mount of the tree, such as NFS, SMB or bindfs,
+       reports another device, so it is not caught either.
+
+     Each needs the caller both to have made such a worktree or mount and
+     to choose a `$TMPDIR` that relies on it.
 4. **The tools**, before TLC runs:
    - `tools.tsv` keeps the layout in *Tables*, which allows exactly two
      rows;
