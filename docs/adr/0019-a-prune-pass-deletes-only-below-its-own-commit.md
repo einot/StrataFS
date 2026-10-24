@@ -572,8 +572,11 @@ Each is mine unless it says otherwise.
    the check; the session's runs decide. ADR 0020 §4 traced the residual
    exactly: it needs a key between the swapped-in one and the pass's, so
    three nonces *and* a failed attempt, or a third mount, and not three
-   nonces alone; `CommitProtocol_NoAtomicLoadPrune` is that route, and
-   `AtomicLoad` closes it.
+   nonces alone. `CommitProtocol_NoAtomicLoadPrune` shows it: TLC reported a
+   route in which the orphan is the pruning writer's own failed attempt and
+   the pass deletes the other writer's snapshot before that writer's swap
+   names it, and ADR 0020 §4 records the hand-traced route beside it.
+   `AtomicLoad` closes both.
 5. **No read of the root pointer in the pass** (§2). The committing mount
    knows the key the root pointer names at the instant the pass begins, so a
    `Get` would add a call whose failure needs a rule, for no safety; and a

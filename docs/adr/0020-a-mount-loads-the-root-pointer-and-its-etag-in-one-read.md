@@ -2,6 +2,13 @@
 
 **Status:** Accepted
 **Date:** 2026-10-24
+**Revised:** 2026-10-24 — on review, before merge: §4 records the route TLC
+reported for `CommitProtocol_NoAtomicLoadPrune` and labels the hand trace;
+§6's count of `Head` calls at `55fc666` is one, not two; Assumption 3 no
+longer claims that `-check` catches every store the refusal reaches, and
+Assumption 4 makes the `CHANGES` entry `BREAKING:`; *What this does not
+decide* names a proxy that rewrites a `GET`'s ETag, with its sources. The
+rule, the Go change and the configurations are unchanged.
 **Issue:** #89
 
 ## Context
@@ -16,8 +23,8 @@ gave them. Nothing in this ADR claims any approval beyond them.
    are allowed until release." This change adds a method to `store.Store`, an
    interface inside the module that nothing outside it implements, and a
    refusal at mount for a store that gives the root pointer no ETag.
-   Assumption 4 says why neither gets a `BREAKING:` entry; the words would
-   cover both if review reads them otherwise.
+   Assumption 4 says why the refusal gets a `BREAKING:` entry and the
+   interface change does not.
 
 **What the code has.** Every statement about the code in this ADR was checked
 by reading it at `55fc666`, the commit this ADR's branch was cut from
@@ -231,13 +238,19 @@ In `docs/tla/CommitProtocol.tla`, under a `Revised: 2026-10-24` line:
   the bounds of the one above, narrowed to the fault `SwapFailed` and no
   crash, without `AtomicLoad`. It shows the residual ADR 0019 §1 and
   Assumption 4 left to this fix, and that three nonces alone do not reach it.
-  Its route: A initialises `[1,1]`, and its pass lists and ends with nothing
-  to delete; B runs `GetRoot`; A commits `[2,3]` and begins a pass for it; B
-  runs `HeadRoot`, taking A's ETag, and `GetSnapshot`, loading epoch 1; B puts
-  `[2,2]`, whose swap fails without taking effect, then puts `[2,1]`, which
-  swaps in below A's key; A's pass lists, keeps `[2,2]` as the newest key
-  below `[2,3]`, and deletes `[1,1]` and then `[2,1]`, which the root pointer
-  names. `NoLostAck` fails earlier on the same behaviour, at B's swap; the
+  The route TLC reported, at `0282bbf`, in 20 states: A initialises `[1,1]`,
+  which begins a pass; A's attempt `[2,2]` fails its swap without taking
+  effect, and A puts its retry `[2,3]`; A's first pass lists and ends with
+  nothing to delete; B runs `GetRoot`; A's swap to `[2,3]` lands and begins a
+  pass for it; B runs `HeadRoot`, taking A's ETag, and `GetSnapshot`, loading
+  epoch 1, then puts `[2,1]`; A's pass lists, keeps `[2,2]`, A's own orphan,
+  as the newest key below `[2,3]`, and deletes `[1,1]` and then `[2,1]`; B's
+  swap then names `[2,1]`, which is gone. A hand-traced route of the same
+  length, which TLC did not report first, has the orphan as B's own failed
+  attempt `[2,2]` and B's retry `[2,1]` swapping in before the pass lists, so
+  that the pass deletes the snapshot the root pointer already names; on that
+  route `NoLostAck` fails first, at B's swap, while on TLC's it never fails,
+  since the root pointer names a key the bucket no longer holds. The
   configuration checks `RootSnapshotExists` because that is the residual
   ADR 0019 named (Assumption 9).
 - **No other existing configuration changes its `Fixes`.** ADR 0013 §7 keeps
@@ -440,9 +453,10 @@ fresh name in the root directory, by `vfs.Caller{UID: 501, GID: 20}`, then
    directory succeeds.
 
 At `55fc666` steps 5, 6, 7 and 8 fail: B's `Sync` returns nil, the last swap
-carries A's ETag, `Head` of `rootKey` was called twice, and the root
-pointer's snapshot holds `b2` and not `a2`. Where the test deviates from the
-trace, and why its hold is where it is, is Assumption 14.
+carries A's ETag, `Head` of `rootKey` was called once, by B's load (A's
+`New` found no root pointer and made no `Head`), and the root pointer's
+snapshot holds `b2` and not `a2`. Where the test deviates from the trace,
+and why its hold is where it is, is Assumption 14.
 
 **The refusal** (`TestNewRefusesRootPointerWithoutETag`, same file; red at
 `55fc666`). Seed a filesystem: `New` on the inner `*store.Local` with
@@ -537,17 +551,27 @@ Each is mine unless it says otherwise.
    412, so the mount diverges, blaming "another writer" that does not exist,
    and a backend without them takes through the fallback. Refusing at `New`
    costs nothing, since nothing is yet at stake, and names the cause.
-   `-check` already fails such an endpoint on a required probe, so no
-   endpoint `-check` passes is affected. `commitLocked` keeps storing a swap
+   `-check` fails an endpoint whose `HEAD` gives no ETag, on a required
+   probe, but it does not probe `GET`'s, so an endpoint, or a proxy in front
+   of one, that gives an ETag on `HEAD` and none on `GET` passes `-check`,
+   mounted at `55fc666`, and is refused now (Assumption 4; #133 asks for the
+   `GET` probe). `commitLocked` keeps storing a swap
    reply's ETag as it is, empty included: after a swap that took effect the
    commit is durable, and refusing it would be wrong; what the mount should
    do then is #103's question, with #5's in-doubt knowledge the likely tool,
    and this ADR decides neither. The asymmetry is deliberate.
-4. **Not breaking, and the `CHANGES` entry.** No client, flag, wire format
-   or object format changes, and the only deployment the refusal reaches is
-   one on a backend that `-check` already calls unsupported; so the entry is
-   not prefixed `BREAKING:`, and the report says so for the owner to
-   overrule. The `store.Store` change is inside the module.
+4. **`BREAKING:`, and the `CHANGES` entry.** No client, flag, wire format or
+   object format changes, and the `store.Store` change is inside the module.
+   The refusal, though, reaches a running deployment whose store, or a proxy
+   in front of it, gives the root pointer an ETag on `HEAD` and none on
+   `GET`: it mounted at `55fc666`, read-only or not, and fails at start-up
+   now, and nothing in `-check` tells such a deployment apart until #133
+   lands (Assumption 3). CLAUDE.md prefixes `BREAKING:` when a running
+   deployment needs action to keep working; one on such a store does, so the
+   entry is prefixed, and it says what to check. That no such deployment is
+   known is not a reason to leave the prefix off: the rule asks whether
+   action is needed, not whether we know who needs it. A first draft of this
+   ADR left it off on the claim Assumption 3 now narrows; review caught it.
 5. **The ETag a `GET` returns is the one `If-Match` compares against**
    (§1; *Sources*). HTTP defines `ETag` as "the current entity tag for the
    selected representation" and evaluates `If-Match` against "the entity tag
@@ -557,8 +581,8 @@ Each is mine unless it says otherwise.
    except that there is no response body", and `PutObject`'s `If-Match` as
    matching "the ETag of the object in S3". That S3 and the target cluster
    answer a `PUT` conditioned on a `GET`'s ETag as they do on a `HEAD`'s is
-   the judgement; `-check` probes `HEAD`'s ETag today, and *What this does
-   not decide* proposes a probe for `GET`'s.
+   the judgement; `-check` probes `HEAD`'s ETag today, and #133 asks for a
+   probe of `GET`'s.
 6. **`Local.GetWithETag` takes no lock** (§2). `Local.PutIfMatch` holds
    `Local.mu` so that its `Head` and its `Put` are one step against other
    conditional writes; a read needs no such pairing, since `Put` renames a
@@ -579,11 +603,12 @@ Each is mine unless it says otherwise.
 9. **`CommitProtocol_NoAtomicLoadPrune`'s property and bounds** (§4). It
    checks `RootSnapshotExists`, not `NoLostAck`, because the point is the
    residual ADR 0019 §1 left, which `CommitProtocol_NoAtomicLoad` does not
-   show; a MustFail configuration checks one property, so the earlier
-   `NoLostAck` violation on the same behaviour is not reported. Its bounds
-   are the smallest I traced the route in: `SwapFailed` alone, no crash,
-   tier `smoke`. The route is traced by hand through the module's
-   definitions (Assumption 13); TLC decides.
+   show; a MustFail configuration checks one property, and on the route TLC
+   reported `NoLostAck` does not fail at all. Its bounds are the smallest I
+   traced a route in: `SwapFailed` alone, no crash, tier `smoke`. The route I
+   traced by hand was a prediction (Assumption 13); TLC confirmed the
+   violation at the same depth by another interleaving, and §4 records both,
+   TLC's as the configuration's.
 10. **No landed fix is added to an existing MustHold configuration** (§4).
     ADR 0013 §7 says the flip is the only change an existing configuration
     takes, this ADR's write scope does not include ADR 0013, and ADR 0019
@@ -595,7 +620,7 @@ Each is mine unless it says otherwise.
 11. **`-check` is unchanged** (§3). The brief pins this fix to
     `internal/store` and `loadOrInit`. A probe that conditions a `PUT` on a
     `GET`'s ETag would check Assumption 5 against the endpoint in front of
-    the operator; *What this does not decide* proposes it.
+    the operator; #133, filed from this ADR's report, asks for it.
 12. **`HeadRoot`'s trace row goes now** (§4). The trace describes the code
     this branch lands, spec first, as ADR 0019's `prunable` row did: the
     tripwire checks that each named symbol exists, and will fail on
@@ -670,9 +695,10 @@ Each is mine unless it says otherwise.
   carries a residual; the model shows the residual without the member and its
   absence with it.
 - `store.Store` has nine methods, and every fake of it implements one more.
-- A bucket whose store gives the root pointer no ETag cannot be mounted,
-  where before it mounted and then either misreported a second writer or
-  wrote unconditionally.
+- A bucket whose store gives the root pointer no ETag on `GET` cannot be
+  mounted, read-only or not, where before it mounted and then, if `HEAD`
+  gave none either, misreported a second writer at its first commit or wrote
+  unconditionally, and, if `HEAD` gave one, worked (Assumption 4).
 - Hard to change later: that `GetWithETag` is the only read a mount takes its
   first ETag from, which the redesign's `fsinfo` load (`docs/DESIGN.md` §5)
   inherits.
@@ -685,17 +711,31 @@ Each is mine unless it says otherwise.
 - The fallback's policy on a backend without conditional writes (#91).
 - A `-check` probe that conditions a `PUT` on the ETag a `GET` returned, so
   that Assumption 5 is checked on the endpoint in front of the operator
-  (Assumption 11). The report proposes the issue.
+  (Assumption 11): #133.
+- A proxy between strata and its store that rewrites or removes the ETag of
+  a compressed `GET` response. Go's transport asks for `gzip` on a `GET` it
+  sends and not on a `HEAD` (*Sources*), so a proxy that compresses the
+  reply and alters its ETag, as Apache's `mod_deflate` does by default,
+  appending the compression method, hands the mount an ETag the store does
+  not recognise, and one that removes the header hands it none. The first
+  makes the mount's first `If-Match` fail, so it diverges with no other
+  writer: fail-closed, with the wrong cause named. The second is §2's
+  refusal (Assumption 4). #133's probe covers both if it conditions a `PUT`
+  on the ETag of a `GET` made through the same client the mount uses;
+  whether the client should ask for identity encoding instead is that
+  issue's, or a new one's. security-auditor raised the case; the two
+  sources confirm its mechanism.
 - Whether ADR 0013 §7 should let a landed fix join an existing MustHold
   configuration (Assumption 10).
 - Multi-writer operation beyond detection (`docs/DESIGN.md` §15).
 
 ## Sources
 
-Each was fetched on 2026-10-24, while this ADR was written, through a tool
-that summarises what it fetches and reads a long page 100,000 characters at
-a time, and quoted as it returned them when asked for verbatim text. Where
-the tool shortened a quotation to about 125 characters, the entry says so.
+Each was fetched on 2026-10-24, while this ADR was written or revised,
+through a tool that summarises what it fetches and reads a long page 100,000
+characters at a time, and quoted as it returned them when asked for verbatim
+text. Where the tool shortened a quotation to about 125 characters, the
+entry says so.
 
 - AWS, *Amazon S3 API Reference*, `GetObject`:
   <https://docs.aws.amazon.com/AmazonS3/latest/API/API_GetObject.html>. The
@@ -740,6 +780,25 @@ the tool shortened a quotation to about 125 characters, the entry says so.
   Assumption 5) **Honesty note:** the tool quoted at most about 125
   characters at a time, so the two cut sentences are cited as far as it
   quoted them.
+- Go, `net/http`'s `transport.go` at `master`:
+  <https://raw.githubusercontent.com/golang/go/master/src/net/http/transport.go>.
+  In `persistConn.roundTrip`: `if !pc.t.DisableCompression &&
+  req.Header.Get("Accept-Encoding") == "" && req.Header.Get("Range") == "" &&
+  req.Method != "HEAD" {`, then `req.extraHeaders().Set("Accept-Encoding",
+  "gzip")`, under the comment "Ask for a compressed version if the caller
+  didn't set their own value for Accept-Encoding." and, inside the block,
+  "Note that we don't request this for HEAD requests, due to a bug in nginx".
+  (*What this does not decide*) **Honesty note:** `master`, not the Go
+  version the module builds with; the tool summarised the file and quoted
+  these lines on request.
+- Apache HTTP Server 2.4, `mod_deflate`:
+  <https://httpd.apache.org/docs/2.4/mod/mod_deflate.html>. The directive
+  `DeflateAlterETag AddSuffix|NoChange|Remove`, default `AddSuffix`: "Append
+  the compression method onto the end of the ETag, causing compressed and
+  uncompressed representations to have unique ETags. This has been the
+  default since 2.4.0"; and `Remove`: "Remove the ETag header from compressed
+  responses." The page does not spell the suffix. (*What this does not
+  decide*)
 
 Cited as earlier ADRs quote them, and not fetched again: AWS's statements
 that updates to a single key are atomic and that an `If-Match` write whose

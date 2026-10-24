@@ -112,7 +112,7 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 
 ## V3. Commit protocol
 
-`docs/tla/CommitProtocol.tla`, checked against `55fc666`. Its Go sites exist:
+`docs/tla/CommitProtocol.tla`, checked against `c5068a0`. Its Go sites exist:
 `Sync`, `loadOrInit`, `initEmpty`, `decodeSnapshot`, `commitLocked`,
 `schedulePrune` and `pruneSnapshots` in `internal/blobfs/commit.go`; `New`,
 `mutable`, `SetAttr`, `createEntry`, `unlink`, `Rename`, `bufferWrite`,
@@ -124,9 +124,9 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 added, `PruneBelowCurrent`, `Prunable`, and `prunable` in V7 exist, as of
 `cc38ca6`, `prunable` in `internal/blobfs/commit.go`; `Below`, which only the
 spec uses, is reserved by that ADR. ADR 0020 added no entry: `AtomicLoad`,
-which it lands, was reserved here already and stays reserved until its Go
-change is on the branch; `GetWithETag`, the `store.Store` method that
-`GetRoot` then traces to, is a Go symbol `trace.tsv` names, not an entry.
+which it lands, was reserved here already and exists as of `c5068a0`;
+`GetWithETag`, the `store.Store` method that `GetRoot` traces to, is a Go
+symbol `trace.tsv` names, not an entry.
 
 **Actions.** All reserved, ADR 0013: an action's name is the spec's, whatever
 Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
@@ -291,7 +291,7 @@ machine's states (rule 3).
 | `ChunksFirst` | `Sync` stores every chunk before the snapshot that names it, and the snapshot before the swap | exists |
 | `ReadOnlyFence` | `New` puts a read-only mount's store behind `store.ReadOnly` (ADR 0011 §3) | exists |
 | `PruneBelowCurrent` | a prune pass deletes only the snapshot keys that sort below the one its commit swapped the root pointer to, and keeps the `Retention` newest of them, so the snapshot the root pointer names is never deleted (ADR 0019 §1, §2) | exists |
-| `AtomicLoad` | `loadOrInit` reads the root pointer's body and its ETag with one call, `store.Store.GetWithETag`, so the ETag its first commit swaps against is the ETag of the body it loaded, and a commit by another mount between a mount's reads is refused, not overwritten (ADR 0020 §1, §2) | reserved, ADR 0020, until its Go change is on the branch |
+| `AtomicLoad` | `loadOrInit` reads the root pointer's body and its ETag with one call, `store.Store.GetWithETag`, so the ETag its first commit swaps against is the ETag of the body it loaded, and a commit by another mount between a mount's reads is refused, not overwritten (ADR 0020 §1, §2) | exists, as of `c5068a0` |
 
 **Checked against rule 1.** Every name the CommitProtocol spec added here was
 checked against rule 1 and against the operators listed at the end of this
