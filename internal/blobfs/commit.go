@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"sort"
-	"strings"
 	"time"
 
 	"strata/internal/store"
@@ -266,15 +265,17 @@ func (f *FS) commitLocked(ctx context.Context) error {
 	// of snapshots in a minute. Older ones are kept only as a short rollback
 	// window, and reclaiming them happens off the commit path so a slow bucket
 	// never stalls a write.
-	f.schedulePrune(epoch)
+	f.schedulePrune(key)
 	return nil
 }
 
 // schedulePrune starts a background pass that deletes superseded snapshots,
-// unless one is already running. Caller must hold mu.
+// unless one is already running. current is the snapshot key the calling
+// commit swapped the root pointer to; the pass deletes only below it (ADR 0019
+// §1, §2). Caller must hold mu.
 //
 // TLA+: docs/tla/CommitProtocol.tla StartPrune, PruneEnd
-func (f *FS) schedulePrune(current uint64) {
+func (f *FS) schedulePrune(current string) {
 	if f.retention == 0 || f.pruning {
 		return
 	}
@@ -291,16 +292,27 @@ func (f *FS) schedulePrune(current uint64) {
 	}()
 }
 
-// pruneSnapshots deletes snapshots older than the retention window.
+// pruneSnapshots deletes superseded snapshots for a pass begun by the commit
+// that swapped the root pointer to the key current. It deletes only keys that
+// sort below current, keeping the newest retention of them, and never deletes
+// current or any key above it (ADR 0019 §1, §2).
 //
-// Snapshot keys are zero-padded with the epoch, so lexicographic order is
-// epoch order and the newest entries are simply the last ones listed. The
-// snapshot the root pointer currently names is never a candidate: it is inside
-// the retention window by construction, and the check below is belt and braces.
+// That cannot delete the snapshot the root pointer names, at any retention and
+// however commits, failed swaps and lost replies overlap the pass. When the
+// pass begins the root pointer names current, and from then on the key it
+// names never falls below current: a conditional write of the root pointer
+// takes effect only against the ETag of the root it matched, and the writer's
+// epoch is that root's, so the key it names is at the next epoch and sorts
+// above current. Every key the pass deletes therefore sorts below the key the
+// root pointer names, then and afterwards. The guarantee on the unconditional
+// fallback is a single writer's, as the fallback's own is (ADR 0019 §1).
+//
+// So the pass never reads the root pointer: the committing mount already knows
+// the key it named, and a key read later could only be higher.
 //
 // TLA+: docs/tla/CommitProtocol.tla PruneList, PruneDelete
-func (f *FS) pruneSnapshots(ctx context.Context, current uint64) error {
-	var all []store.ObjectInfo
+func (f *FS) pruneSnapshots(ctx context.Context, current string) error {
+	var keys []string
 	after := ""
 	for {
 		batch, err := f.store.List(ctx, snapshotPrefix, after, 1000)
@@ -310,37 +322,56 @@ func (f *FS) pruneSnapshots(ctx context.Context, current uint64) error {
 		if len(batch) == 0 {
 			break
 		}
-		all = append(all, batch...)
+		for _, o := range batch {
+			keys = append(keys, o.Key)
+		}
 		after = batch[len(batch)-1].Key
 		if len(batch) < 1000 {
 			break
 		}
 	}
 
-	if len(all) <= f.retention {
-		return nil
-	}
-	sort.Slice(all, func(i, j int) bool { return all[i].Key < all[j].Key })
-	doomed := all[:len(all)-f.retention]
-
-	currentPrefix := fmt.Sprintf("%s%020d-", snapshotPrefix, current)
+	doomed := prunable(keys, current, f.retention)
 	deleted := 0
-	for _, o := range doomed {
-		if strings.HasPrefix(o.Key, currentPrefix) {
-			continue // never delete the snapshot the root pointer names
-		}
-		if err := f.store.Delete(ctx, o.Key); err != nil {
-			// A failed delete only leaves garbage behind; it is not a
-			// correctness problem, so log and keep going.
-			f.log.Debug("could not delete superseded snapshot", "key", o.Key, "err", err)
+	for _, key := range doomed {
+		if err := f.store.Delete(ctx, key); err != nil {
+			// A failed delete only leaves garbage below current for a later
+			// pass; it is not a correctness problem, so log and keep going.
+			f.log.Debug("could not delete superseded snapshot", "key", key, "err", err)
 			continue
 		}
 		deleted++
 	}
 	if deleted > 0 {
-		f.log.Debug("pruned superseded snapshots", "deleted", deleted, "kept", f.retention)
+		f.log.Debug("pruned superseded snapshots",
+			"deleted", deleted, "below", current, "retention", f.retention)
 	}
 	return nil
+}
+
+// prunable returns the keys a prune pass begun for the snapshot key current
+// may delete, in ascending order: of the keys that sort below current, every
+// one but the newest keep (ADR 0019 §2). String order is epoch order, then
+// nonce order, since the epoch is zero-padded and the nonce has a fixed width.
+// A negative keep counts as 0. keys are taken as distinct, as a listing's are,
+// and neither keys nor its elements are modified.
+//
+// TLA+: docs/tla/CommitProtocol.tla PruneList
+func prunable(keys []string, current string, keep int) []string {
+	if keep < 0 {
+		keep = 0
+	}
+	var below []string
+	for _, k := range keys {
+		if k < current {
+			below = append(below, k)
+		}
+	}
+	if len(below) <= keep {
+		return nil
+	}
+	sort.Strings(below)
+	return below[:len(below)-keep]
 }
 
 func encodeSnapshot(s *snapshot) ([]byte, error) {

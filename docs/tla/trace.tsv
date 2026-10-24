@@ -43,8 +43,9 @@ CommitProtocol	FallbackPut	internal/blobfs/commit.go	FS.commitLocked	commitGate 
 CommitProtocol	FallbackPut	internal/store/store.go	ReadOnly.Put	none of its own; called holding commitLocked's locks	ADR 0011 section 3
 CommitProtocol	FallbackPut	internal/store/s3.go	S3.Put	none of its own; called holding commitLocked's locks	-
 CommitProtocol	FallbackHead	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	docs/DESIGN.md section 2
-CommitProtocol	StartPrune	internal/blobfs/commit.go	FS.schedulePrune	FS.mu (write) from Sync's commitLocked; none from initEmpty's	README.md How a commit works
-CommitProtocol	PruneList	internal/blobfs/commit.go	FS.pruneSnapshots	none	README.md How a commit works
-CommitProtocol	PruneDelete	internal/blobfs/commit.go	FS.pruneSnapshots	none	README.md How a commit works
+CommitProtocol	StartPrune	internal/blobfs/commit.go	FS.schedulePrune	FS.mu (write) from Sync's commitLocked; none from initEmpty's	README.md How a commit works; ADR 0019 section 2
+CommitProtocol	PruneList	internal/blobfs/commit.go	FS.pruneSnapshots	none	README.md How a commit works; ADR 0019 section 2
+CommitProtocol	PruneList	internal/blobfs/commit.go	prunable	none: a pure function of its arguments	ADR 0019 section 2
+CommitProtocol	PruneDelete	internal/blobfs/commit.go	FS.pruneSnapshots	none	README.md How a commit works; ADR 0019 section 2
 CommitProtocol	PruneEnd	internal/blobfs/commit.go	FS.schedulePrune	FS.mu (write), the goroutine's final hold	README.md How a commit works
 CommitProtocol	Crash	internal/blobfs/fs.go	New	none (the restart)	ADR 0013 section 4
