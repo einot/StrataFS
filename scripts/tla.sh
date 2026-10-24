@@ -140,7 +140,8 @@ check_paths() {
     die "cannot enter $tla_dir"
   fi
   if [ "$resolved" != "$root/docs/tla" ]; then
-    die "docs/tla resolves to $resolved, not $root/docs/tla"
+    printable "$resolved"
+    die "docs/tla resolves to $printable_out, not $root/docs/tla"
   fi
   if ! out=$(find "$tla_dir" -type l -print); then
     die "find failed under $tla_dir"
@@ -1035,7 +1036,7 @@ scan_log() {
 judge_row() {
   local i=$1
   local config=${m_config[$i]} expect=${m_expect[$i]}
-  local want_exit=${m_exit[$i]} want_log=${m_log[$i]} clean verdict found
+  local want_exit=${m_exit[$i]} want_log=${m_log[$i]} clean verdict found shown_error
   if [ "$want_exit" = - ] || [ "$want_log" = - ]; then
     printf 'FAIL %s %s: not calibrated (exit or log is "-" in docs/tla/manifest.tsv)\n' "$config" "$expect"
     return 1
@@ -1058,7 +1059,10 @@ judge_row() {
   if [ "$verdict" = PASS ]; then
     return 0
   fi
-  printf '  reason: %s\n' "${log_error:-the log has no line beginning \"Error:\"}"
+  # The line can carry text from a committed module, so nothing in it may
+  # reach the terminal as a control character.
+  shown_error=${log_error//[![:print:]]/?}
+  printf '  reason: %s\n' "${shown_error:-the log has no line beginning \"Error:\"}"
   printf '  wanted: status %s and the line "%s", which was %s\n' "$want_exit" "$want_log" "$found"
   printf '  log: %s\n' "$row_log"
   return 1
