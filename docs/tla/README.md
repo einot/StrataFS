@@ -10,7 +10,7 @@ This file says what the directory holds, how to read it and how to run it.
 
 - **`CommitProtocol.tla`**: how a mount reads the root pointer, commits,
   prunes snapshots and diverges, against other mounts, failing store calls
-  and crashes (ADR 0013 §1, item 1). It is checked against `13aebc4`.
+  and crashes (ADR 0013 §1, item 1). It is checked against `cc38ca6`.
 - **Its 27 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
   sixteen MustHold and eleven MustFail. Six of the MustFail ones each remove
   a fix the code has, and five each show an open defect: #89, #91, and #5 by

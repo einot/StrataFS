@@ -121,9 +121,8 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 `internal/store/store.go`; `S3.Put`, `S3.PutIfMatch` and `errorFor` in
 `internal/store/s3.go`; and `Local.PutIfMatch` in `internal/store/local.go`.
 `docs/tla/trace.tsv` gives each action's symbols. The entries ADR 0019 added
-(`PruneBelowCurrent`, `Below`, `Prunable`, and `prunable` in V7) are reserved
-by that ADR until its code lands; `prunable` goes in
-`internal/blobfs/commit.go`.
+(`PruneBelowCurrent`, `Below`, `Prunable`, and `prunable` in V7) exist, as of
+`cc38ca6`; `prunable` is in `internal/blobfs/commit.go`.
 
 **Actions.** All reserved, ADR 0013: an action's name is the spec's, whatever
 Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
@@ -254,8 +253,8 @@ machine's states (rule 3).
 | `KeyLess(a, b)` | the order of snapshot keys, by epoch and then by nonce, in which `pruneSnapshots` sorts them |
 | `Kept(L)` | the keys of `L` that a prune pass keeps: the `Retention` that sort last |
 | `Least(S)` | the lowest key of `S`: the next one a prune pass deletes |
-| `Below(L, k)` | the keys of `L` that sort below `k`; reserved, ADR 0019 |
-| `Prunable(L, k)` | the keys a prune pass begun for `k` may delete, with `PruneBelowCurrent`: `Below(L, k)` less the `Retention` newest of them. Go `prunable`, under rule 4 (V7); reserved, ADR 0019 |
+| `Below(L, k)` | the keys of `L` that sort below `k`; exists |
+| `Prunable(L, k)` | the keys a prune pass begun for `k` may delete, with `PruneBelowCurrent`: `Below(L, k)` less the `Retention` newest of them. Go `prunable`, under rule 4 (V7); exists |
 | `Mutable(m)` | V1 |
 | `Fenced(m)` | `m` is read-only and `ReadOnlyFence` is in `Fixes`: `store.ReadOnly` refuses `m`'s writes |
 | `CommitIdOf(m, k)` | the commit that `m` makes at `k`'s epoch |
@@ -286,7 +285,7 @@ machine's states (rule 3).
 | `Nonce` | `commitLocked` puts six random bytes in every snapshot key, so two writers committing one epoch cannot overwrite each other's snapshot | exists |
 | `ChunksFirst` | `Sync` stores every chunk before the snapshot that names it, and the snapshot before the swap | exists |
 | `ReadOnlyFence` | `New` puts a read-only mount's store behind `store.ReadOnly` (ADR 0011 §3) | exists |
-| `PruneBelowCurrent` | a prune pass deletes only the snapshot keys that sort below the one its commit swapped the root pointer to, and keeps the `Retention` newest of them, so the snapshot the root pointer names is never deleted (ADR 0019 §1, §2) | reserved, ADR 0019 |
+| `PruneBelowCurrent` | a prune pass deletes only the snapshot keys that sort below the one its commit swapped the root pointer to, and keeps the `Retention` newest of them, so the snapshot the root pointer names is never deleted (ADR 0019 §1, §2) | exists |
 | `AtomicLoad` | the load-race fix: one read of the root pointer's body and its ETag | reserved, the load-race ADR |
 
 **Checked against rule 1.** Every name the CommitProtocol spec added here was
@@ -471,8 +470,7 @@ from its first access to the charge or to `of.bytes` until its last, and a
   `internal/blobfs/commit.go`: the one place that decides what a prune pass
   may delete (ADR 0019 §2). It is not a `policy.Policy`: no caller asks for a
   deletion, since a pass is a step the server takes on its own commit's
-  success, which ADR 0018 §2 keeps outside the policy rule. Reserved, ADR
-  0019.
+  success, which ADR 0018 §2 keeps outside the policy rule. Exists.
 
 ## Operators of the standard modules
 
