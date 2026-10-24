@@ -21,8 +21,8 @@ Every entry has a status (ADR 0013 §5):
   ADR 0013, which introduces it, unless its entry names another ADR.
 
 A status given to a group, a list or a section holds for every entry in it.
-The lifecycle ADR, the load-race ADR and the ADR for #5 are not yet written;
-their entries hold the names those ADRs will use. The operators of
+The lifecycle ADR and the ADR for #5 are not yet written; their entries hold
+the names those ADRs will use. The load-race ADR is ADR 0020. The operators of
 the standard modules, listed at the end, are not entries: they are the names
 rule 1 rules out.
 
@@ -112,7 +112,7 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 
 ## V3. Commit protocol
 
-`docs/tla/CommitProtocol.tla`, checked against `cc38ca6`. Its Go sites exist:
+`docs/tla/CommitProtocol.tla`, checked against `55fc666`. Its Go sites exist:
 `Sync`, `loadOrInit`, `initEmpty`, `decodeSnapshot`, `commitLocked`,
 `schedulePrune` and `pruneSnapshots` in `internal/blobfs/commit.go`; `New`,
 `mutable`, `SetAttr`, `createEntry`, `unlink`, `Rename`, `bufferWrite`,
@@ -123,7 +123,10 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 `docs/tla/trace.tsv` gives each action's symbols. Of the entries ADR 0019
 added, `PruneBelowCurrent`, `Prunable`, and `prunable` in V7 exist, as of
 `cc38ca6`, `prunable` in `internal/blobfs/commit.go`; `Below`, which only the
-spec uses, is reserved by that ADR.
+spec uses, is reserved by that ADR. ADR 0020 added no entry: `AtomicLoad`,
+which it lands, was reserved here already and stays reserved until its Go
+change is on the branch; `GetWithETag`, the `store.Store` method that
+`GetRoot` then traces to, is a Go symbol `trace.tsv` names, not an entry.
 
 **Actions.** All reserved, ADR 0013: an action's name is the spec's, whatever
 Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
@@ -132,8 +135,8 @@ Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
 | Action | Go | Meaning |
 |---|---|---|
 | `Init` | `New` | the initial state. `New` sets `FS.readOnly` from `Config.ReadOnly` and puts a read-only mount's store behind `store.ReadOnly`. With `Start` `"Empty"` every mount is at `loadOrInit`'s first read; with `"Loaded"` every mount has loaded a filesystem at epoch 1 |
-| `GetRoot` | `loadOrInit`'s `Get(rootKey)` | reads the root pointer; with the load-race fix, one read of its body and its ETag |
-| `HeadRoot` | `loadOrInit`'s `Head(rootKey)` | the load-race window, which that fix removes (`Fixes` member `AtomicLoad`) |
+| `GetRoot` | `loadOrInit`'s read of the root pointer: `GetWithETag(rootKey)` with `AtomicLoad`, `Get(rootKey)` without it | reads the root pointer. With `AtomicLoad` the body and its ETag come from one response, and the ETag becomes `rootETag[m]` here (ADR 0020 §2, §4); without it the ETag waits for `HeadRoot` |
+| `HeadRoot` | `loadOrInit`'s `Head(rootKey)`, without `AtomicLoad` only | the load-race window (#89), which `AtomicLoad` closes (ADR 0020): with the member the action is never enabled, and no Go symbol performs it, so `trace.tsv` has no row for it |
 | `GetSnapshot` | `loadOrInit`'s `Get` of the snapshot the root names, and `decodeSnapshot` | a missing snapshot makes `New` fail, and `pc[m]` becomes `"Failed"` |
 | `RefuseEmpty` | `loadOrInit`'s read-only branch | a read-only mount refuses a bucket with no root (ADR 0011 §2) |
 | `InitEmpty` | `initEmpty` | then `PutSnapshot` and an If-None-Match swap |
@@ -186,7 +189,7 @@ machine's states (rule 3).
 
 | String | Meaning |
 |---|---|
-| `"GetRoot"`, `"HeadRoot"`, `"GetSnapshot"` | the read of `loadOrInit` that the action of that name makes is due |
+| `"GetRoot"`, `"HeadRoot"`, `"GetSnapshot"` | the read of `loadOrInit` that the action of that name makes is due; `"HeadRoot"` is reached only without `AtomicLoad` (ADR 0020 §4) |
 | `"Ready"` | loaded, with no commit in progress; `NextStep(m)` says whether one is due |
 | `"PutSnapshot"` | a commit's snapshot `Put` is due: `initEmpty`'s first, or without `ChunksFirst` any commit's, after its swap |
 | `"Swap"` | a commit's swap is due, after its snapshot `Put`, or without `ChunksFirst` as `initEmpty`'s first call. `SwapOK`, `SwapReplyLost`, `SwapFailed`, `SwapConflict` or `SwapUnsupported` takes it |
@@ -288,7 +291,7 @@ machine's states (rule 3).
 | `ChunksFirst` | `Sync` stores every chunk before the snapshot that names it, and the snapshot before the swap | exists |
 | `ReadOnlyFence` | `New` puts a read-only mount's store behind `store.ReadOnly` (ADR 0011 §3) | exists |
 | `PruneBelowCurrent` | a prune pass deletes only the snapshot keys that sort below the one its commit swapped the root pointer to, and keeps the `Retention` newest of them, so the snapshot the root pointer names is never deleted (ADR 0019 §1, §2) | exists |
-| `AtomicLoad` | the load-race fix: one read of the root pointer's body and its ETag | reserved, the load-race ADR |
+| `AtomicLoad` | `loadOrInit` reads the root pointer's body and its ETag with one call, `store.Store.GetWithETag`, so the ETag its first commit swaps against is the ETag of the body it loaded, and a commit by another mount between a mount's reads is refused, not overwritten (ADR 0020 §1, §2) | reserved, ADR 0020, until its Go change is on the branch |
 
 **Checked against rule 1.** Every name the CommitProtocol spec added here was
 checked against rule 1 and against the operators listed at the end of this
@@ -307,7 +310,10 @@ renamed. ADR 0019 added `PruneBelowCurrent`, `Below` and `Prunable`, each
 UpperCamel ASCII letters, none equal to an operator above (`Below` and
 `Prunable` are not among them), a Go keyword or predeclared identifier, or a
 TLA+ reserved word; and the Go name `prunable`, lowerCamel, which is no Go
-keyword or predeclared identifier either.
+keyword or predeclared identifier either. ADR 0020 added no bare name;
+`AtomicLoad` was checked when it was reserved. Its Go name `GetWithETag` is
+an exported method of `store.Store`, UpperCamel, and no Go keyword or
+predeclared identifier.
 
 ## V4. Sync and file data
 
