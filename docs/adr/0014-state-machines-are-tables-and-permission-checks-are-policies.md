@@ -2,6 +2,24 @@
 
 **Status:** Accepted
 **Date:** 2026-10-12
+**Revised:** 2026-10-24 — the owner's decision 4 (*Context*) makes the rules
+standing. §1 now states them for new and changed code, with exemptions only by
+ADR. It keeps its table; makes the ten places it left as they were exemptions
+E1 to E10, each with its reason and now its code; adds E11 and E12 for the
+mount gate and `ACCESS`'s read-only mask, which §6 and §7 already keep out of
+`internal/policy`; replaces "Everything else keeps its present form" with what
+the rules do not reach and what has not moved yet; and says how an ADR grants
+or revokes an exemption. A new §12 says which transitions are
+security-relevant and links each to a policy by where its owner asks, with no
+change to `fsm` or `policy`. §3 and §9 point to it, and §11 adds T1 to T3 and
+three review items. *Context* gains decision 4 and the commit the revision was
+checked against, its *What this constrains* now covers every package and §12,
+and it says the revision changes no code; the preamble to the Assumptions and
+Assumption 1 follow, and Assumptions 36 to 46 are new. *Consequences* replaces
+"Every later machine and permission rule follows this ADR" and gains entries,
+*What this does not decide* widens its NFSv4 entry and gains entries, and
+*Alternatives considered* and *Sources* gain entries. §2, §4 to §8 and §10 are
+unchanged, and so is every test the first version pins.
 **Issue:** #114
 
 ## Context
@@ -13,7 +31,7 @@ policy pattern everywhere when the code needs to check authorisation or if
 some operation is allowed." #114 is a tracking issue for it, as #109 is for
 the instruction behind ADR 0013.
 
-**The owner's decisions.** Three, recorded in the owner's words as the session
+**The owner's decisions.** Four, recorded in the owner's words as the session
 gave them. Nothing in this ADR claims any approval beyond them.
 
 1. **Scope.** On 2026-10-10 the owner said: "Go with architect's
@@ -30,10 +48,27 @@ gave them. Nothing in this ADR claims any approval beyond them.
    tracking issue for the instruction, as #109 is for ADR 0013.
 3. **Breaking changes.** The owner said: "We don't have any clients yet so any
    breaking changes are allowed until release."
+4. **The rules are standing.** On 2026-10-22 the owner said: "1. Propose a
+   wording that will keep the idea that state machines ought to be used for
+   any stateful code unless there's a good reason to do it otherwise. All
+   exceptions should be backed with a relevat ADR. 2. Same applies here.
+   Whenever the state machine is security or related to authorisations of
+   some kind the transitions should be linked to a policy engine unless
+   there's a solid reason to do it differently. Exceptions need to be backed
+   up with a relevant ADR. 3. Use some generalized wording that would allow
+   exceptions whenever architect has a good reason for it as I wrote
+   earlier." Of the wording the session then proposed, the owner said: "Go
+   ahead with that wording." The session gave this revision that wording, as
+   the text it adds to CLAUDE.md under "State machines and policies". §1
+   restates its rules, and §12 is the link the third of them leaves to this
+   ADR. "Same applies here" answers a question of the session's that this
+   revision was not given, so the revision follows the approved wording, not
+   a reading of that question.
 
 **What the code has.** Every statement about the code in this ADR was checked
 by reading it at `a607410`, the commit this ADR's branch was cut from
-(Assumption 30). Code is cited by symbol.
+(Assumption 30). The revision's own statements were checked by reading it at
+`2d7ff34` (Assumption 36). Code is cited by symbol.
 
 - The mount mode is two fields of `FS`:
   - `readOnly`, a `bool` that `New` sets from `Config.ReadOnly`;
@@ -88,21 +123,87 @@ this ADR:
 **What this constrains.**
 
 - `internal/fsm` and `internal/policy`, which it adds;
-- how `internal/blobfs`, `internal/sunrpc`, `internal/nfs` and `cmd/strata`
-  express state and permission checks from now on;
+- how new and changed code in every package expresses state and decisions
+  about who may act (§1), and how a security-relevant transition asks a
+  policy (§12);
 - `docs/vocabulary.md`.
 
 The PR that carries this ADR also carries the two packages and their tests
 (§2, §5, §11), and changes no other code. Two later PRs wire them in: one
 converts the mount mode (§7), and one has `blobfs` evaluate the policy (§6).
+The revision of 2026-10-24 changes no code and no test.
 
 ## Decision
 
 ### 1. Scope
 
-Decision 1, in the owner's words: "Go with architect's recommendations. I took
-a look on the report and it was well argued." It accepts the narrower set,
-which this table and the two lists after it give.
+**The rules.** By the owner's decision 4, they bind new and changed code.
+Here they are in the wording the owner approved, with its references made
+local:
+
+- **State is a machine.** Code that holds state and moves it between named
+  states expresses that state as an explicit transition table run by
+  `internal/fsm` (§2, §3). That covers a mode, a lifecycle, a connection, a
+  protocol phase, or anything whose legal next step depends on where it is
+  now. Every write of the state goes through the machine, and an illegal
+  transition is an error, never a silent overwrite.
+- **Who may act is a policy.** Every decision about whether a caller may do
+  something is a pure policy in `internal/policy` (§5), not an inline
+  condition. That covers a permission check, an ownership or time rule, an
+  access mask, and a gate on an operation.
+- **A security transition asks a policy.** When a machine is
+  security-relevant, or one of its transitions depends on an authorization
+  decision, that transition is linked to a policy. The policy's verdict
+  guards the transition, and the event fires only if the policy permits it.
+  §12 defines how the two connect.
+- **Exceptions are decided, not assumed.** The architect may exempt code from
+  any of these rules when it has a good reason. Examples: a hot path where a
+  table costs more than it catches, state that another mechanism already
+  pins and tests, or a flag with a single rule. Each exemption is recorded in
+  an ADR that names the code and the reason. *Exemptions*, below, lists the
+  current ones. Code without an exemption follows the rules.
+
+The rest of this ADR calls the first three the state rule, the policy rule
+and the link.
+
+**What they reach.**
+
+- A *caller* is whoever a request comes from: the `vfs.Caller` of a
+  filesystem call, or, at another layer, the credential a call carries or the
+  operator who gives a command. A step the server takes on a store's answer,
+  a signal or a timer comes from no caller, even when a call led to it.
+- The state rule reaches state that has named states. A count, a size, an
+  epoch or a time is a value, not a named state. A cache, which may gain or
+  lose any entry at any step, has no state of its own.
+- The policy rule reaches a decision that allows or refuses a well-formed
+  request, or for `ACCESS` says what it would allow:
+  - by who the caller is or what it holds: a permission check, an ownership
+    or time rule, an access mask; or
+  - by what the mount allows, whoever asks: a gate on an operation, as
+    `mutable()` is at §6's stage A, and as `ACCESS`'s read-only mask is
+    (E11, E12).
+
+  A check of whether a request is well formed (§6's stage B), or of what it
+  names (stage E), says what the operation is, not who may perform it, and
+  the policy rule does not reach it (Assumption 18).
+- §12 says what the link reaches.
+
+**New and changed code.** The rules bind a change that adds state or a
+decision about who may act, or that changes how existing state moves (its
+states, its events, its transitions, or the places that write it) or what an
+existing decision allows. Such a change brings that state, or that decision,
+under the rules whole, so every write of the state goes through its machine
+from then on. A change that only moves, renames or reformats such code, or
+edits the code beside it, does not (Assumption 37).
+
+**Existing code** moves over as #114 plans. This ADR plans §6 and §7, and
+gives §8's machines to their own ADRs. Until code moves, it is not exempt by
+that fact: a change to it, as above, brings it under the rules, unless an ADR
+exempts it first.
+
+**What the first version converts.** Decision 1, in the owner's words: "Go
+with architect's recommendations. I took a look on the report and it was well
+argued." It accepted the narrower set that this table and E1 to E10 give.
 
 | Item | Form | Why | Decided in |
 |---|---|---|---|
@@ -114,43 +215,120 @@ which this table and the two lists after it give.
 | `ACCESS` | `policy.AccessBits`, with the mount's mask | `ACCESS` becomes derivable from the same rules (#97 later) | §5, §6 |
 | The mount gate, `mutable()` | a predicate over the mount mode | V1's `Mutable`: nil exactly when the mode is `Writable` | §7 |
 
-**The ten places left as they are**, each with its reason. The reasons are
-mine (Assumption 1).
+Link counts are values, not named states, so the state rule asks no table of
+them: §8's lighter form is this ADR's decision for them until pins add
+states. The mount gate, and `ACCESS`'s read-only mask, stay in `blobfs`,
+which E11 and E12 record.
 
-1. **The write budget.** It is already the most precisely specified machine
-   here (ADR 0003 §4, with its failure contract G1 to G3). Rewriting it risks
-   that contract for nothing, and the Budget spec checks it (ADR 0013 §1).
-2. **The duplicate request cache.** ADR 0002 §6 pins its three states and §8
-   its API. Another representation would change the memory bound its
-   *Consequences* compute.
-3. **`Sync`'s phases and the commit gate.** The sequential code already is the
-   machine, and the gate is a lock. FileData models both.
-4. **The per-index buffered state.** It is a hot path, and invariants I1 to I4
-   are pinned and tested (ADR 0006 §2). A table lookup per index would catch
-   nothing new.
-5. **The unsettled mark.** Every (state, event) pair is legal, so a table
-   would refuse nothing (ADR 0012 §3).
-6. **The XDR reader's sticky error.** It is an idiomatic sticky error over a
-   bounded reader.
-7. **The store's retries.** They are a bounded loop (`S3.do`).
-8. **The flag validators.** They are pure checks that ADRs 0008 to 0010 pin.
-9. **`-check`.** It is a linear script of probes.
-10. **The `MaxFileSize` clamp.** A clamp is not an allow or a deny (ADR 0007
-    §4).
+**Exemptions.** Each names its code, the rule it is exempt from, and the
+reason. E1 to E10 are the ten places decision 1 accepted leaving as they
+were, with the reasons the first version gave, which are mine
+(Assumption 1); their rules and code are named as they stand at `2d7ff34`
+(Assumption 39). E11 and E12 record forms that §6 and §7 already decide, so
+that this ADR keeps its own rules (Assumption 40). None of them is exempt
+from the link, which none of them needs (§12).
 
-**Everything else keeps its present form.** This is my judgement, recorded as
-Assumption 1, and not the owner's decision. It covers:
+- **E1. The write budget**: `budget`, in `internal/blobfs/budget.go`; from
+  the state rule. It is already the most precisely specified machine here
+  (ADR 0003 §4, with its failure contract G1 to G3). Rewriting it risks that
+  contract for nothing, and the Budget spec checks it (ADR 0013 §1).
+- **E2. The duplicate request cache**: `replyCache` and its `cacheState`, in
+  `internal/sunrpc/cache.go`; from the state rule. ADR 0002 §6 pins its three
+  states and §8 its API. Another representation would change the memory
+  bound its *Consequences* compute.
+- **E3. `Sync`'s phases and the commit gate**: `(*FS).Sync`, in
+  `internal/blobfs/commit.go`, and `FS.commitGate`, in
+  `internal/blobfs/fs.go`; from the state rule. The sequential code already
+  is the machine, and the gate is a lock. FileData models both.
+- **E4. The per-index buffered state**: `openFile.dirty` and
+  `openFile.pendingTrim`, in `internal/blobfs/fs.go`; from the state rule. It
+  is a hot path, and invariants I1 to I4 are pinned and tested (ADR 0006 §2).
+  A table lookup per index would catch nothing new.
+- **E5. The unsettled mark**: `openFile.unsettled`, in
+  `internal/blobfs/fs.go`; from the state rule. Every (state, event) pair is
+  legal, so a table would refuse nothing (ADR 0012 §3).
+- **E6. The XDR reader's sticky error**: `xdr.Reader`'s `err`, read through
+  `Err`, in `internal/xdr/xdr.go`; from the state rule. It is an idiomatic
+  sticky error over a bounded reader.
+- **E7. The store's retries**: `(*S3).do`, in `internal/store/s3.go`; from
+  the state rule. They are a bounded loop.
+- **E8. The flag validators**: `chunkSizeBytes` and `cacheBytes`
+  (ADR 0008), `commitInterval` (ADR 0009) and `ownerID` (ADR 0010), in
+  `cmd/strata/main.go`; from the policy rule. They are pure checks that those
+  ADRs pin.
+- **E9. `-check`**: `runCheck` and its probes, in `cmd/strata/check.go`;
+  from the state rule. It is a linear script of probes.
+- **E10. The `MaxFileSize` clamp**: in `(*FS).Write`, in
+  `internal/blobfs/fs.go`, which shortens a write that crosses
+  `FS.maxFileSize`; from the policy rule. A clamp is not an allow or a deny
+  (ADR 0007 §4).
+- **E11. The mount gate**: `(*FS).mutable`, in `internal/blobfs/fs.go`; from
+  the policy rule's "in `internal/policy`". It judges the mount, not the
+  caller, so it has no `Request` to read. Its one input is the mount mode,
+  whose type `blobfs` keeps unexported (§7), and `policy` could name that
+  type only by importing `blobfs`, which imports `policy` once §6 is done. It
+  fails closed, as a policy does (Assumption 24). Its form is §7's.
+- **E12. `ACCESS`'s read-only mask**: in `(*FS).Access`, in
+  `internal/blobfs/fs.go`, which on a read-only mount drops
+  `vfs.AccessModify`, `vfs.AccessExtend` and `vfs.AccessDelete` from what the
+  mode bits give; from the policy rule's "in `internal/policy`". The mask is the mount's, not the caller's, and the
+  caller's part is `policy.AccessBits` (Assumption 21). Its form is §6's.
 
-- `FS.dirty`, the pruner's flag, the chunk cache, the known-chunk set and the
-  open-file entry (#42);
-- credential parsing, the export match, the idempotency list, RPC admission
-  and `store.ReadOnly`;
-- `validName`, the empty-write rule and `Symlink`'s empty-target check;
-- the namespace preconditions;
-- `COMMIT`'s lack of a permission check (`vfs.FS.Commit` has no `Caller`).
+**Granting and revoking** (Assumption 41):
 
-These are flags or sets with one rule each, checks of arguments rather than
-callers, or pure checks already pinned by their ADRs.
+- Only an ADR grants an exemption. It names the code, by symbol and file; the
+  rule it is exempt from; and the reason. The PR that carries it adds the
+  exemption to the list above under the next E number, citing that ADR, with
+  a `Revised` line in this ADR. E numbers are never reused.
+- An ADR revokes an exemption by saying so, and either moves the code in the
+  same PR or says which change will. The entry stays above, marked "revoked
+  by ADR NNNN", with a `Revised` line in this ADR.
+- An exemption holds while its reason does. A change that removes the
+  reason, such as one that supersedes the ADR an exemption cites, restates
+  the exemption in its own ADR with a reason that still holds, or revokes it.
+
+**What the rules do not reach.** These are the things the first version kept
+as they were, apart from the three under *Not yet moved*. None is an
+exemption. A change that gives one of them named states, or makes its answer
+turn on who asks or on what the mount allows, brings it under the rules
+(Assumption 38).
+
+- `validName`, the empty-write rule and `Symlink`'s empty-target check:
+  whether a request is well formed.
+- The namespace preconditions: what a request names, against the namespace
+  (Assumption 18).
+- Credential parsing, `readCred` in `internal/sunrpc/rpc.go` and
+  `callerFrom` in `internal/nfs/nfs3.go`: who a call says it comes from. It
+  decides nothing about what that caller may do. Root squash is not decided
+  here (*What this does not decide*).
+- The export match, `(*MountServer).accepts` in `internal/nfs/mount.go`: a
+  path that names no export gets `MNT3ERR_NOENT`, whoever asks.
+- RPC admission, `(*Server).dispatch`'s checks of the RPC version, the
+  program, its version and the procedure, and of the encoding of the
+  credential and the verifier, in `internal/sunrpc/rpc.go`: whether a call is
+  well formed for this server, whoever sends it.
+- The idempotency list, `Handler.Idempotent`: a fixed property of each
+  procedure.
+- `store.ReadOnly`: it refuses every write the mount itself makes, whatever a
+  caller asked, so no caller's request reaches it as a decision. A caller's
+  change is refused above it, at the mount gate (E11; ADR 0011 §3).
+- The chunk cache, `chunkCache`, and the known-chunk set, `FS.knownChunks`:
+  caches.
+- `COMMIT`'s lack of a permission check (`vfs.FS.Commit` has no `Caller`):
+  there is no check to express. One added later is new code.
+
+**Not yet moved.** These are in the state rule's reach, are not exempt, and
+are not among the conversions of §6 to §8:
+
+- `FS.dirty`: a flag that every change sets and a successful commit clears.
+- `FS.pruning`: set by `schedulePrune` and cleared by its goroutine, both
+  under `FS.mu`. CommitProtocol refines it into three phases (`pruning[m]`,
+  vocabulary V3).
+- The open-file entry (#42): an `openFile`'s life in `FS.open`, which it
+  enters only through `getOpen` and leaves only through `dropOpen`.
+
+Each moves when a change reaches it, as *New and changed code* says, or as
+#114 plans if that comes first, unless an ADR exempts it.
 
 ### 2. The `fsm` API
 
@@ -272,7 +450,8 @@ These bind owners; `fsm` does not check them.
   made once, by the constructor of what owns it, and is never reassigned.
 - Guards belong to the caller: it fires an event only when the condition the
   event names holds. Side effects follow a successful `Fire`, under the same
-  lock.
+  lock. When the condition is a policy's permit, §12 says where the owner
+  asks for it.
 - An illegal transition is an error, which the owner logs at `Error` (§9) and
   returns. It is never a panic: a panic under `FS.mu`, in the committer or in
   `New` would take down the mount or leave a lock held.
@@ -649,6 +828,8 @@ var mountModes = fsm.NewTable("mode",
 - The mount mode adds no record of its own: `commitLocked`'s
   `"commit conflict"` `Error` record stays the record of `Diverge`.
 - A policy logs nothing.
+- A refused security-relevant transition is logged at `Debug` at most, with
+  the keys above (§12).
 
 ### 10. Names
 
@@ -836,6 +1017,18 @@ which a filed defect will change:
 - **W5.** `GetAttr`, `ReadLink`, `FSStat`, `Commit` and `Access` never consult
   `f.perm`.
 
+**For a PR that adds or changes a security-relevant transition** that a
+caller's request causes (§12), in its owner's package (Assumption 46):
+
+- **T1.** With a recording policy that refuses with a status no row of
+  `Unix()` returns, such as `vfs.ErrNXIO` (as in W2), the request gets that
+  status. The machine's `State()` is unchanged, nothing else changes, and the
+  policy has recorded exactly the request the transition's ADR names.
+- **T2.** With a policy that allows everything, the same request makes the
+  transition: `State()` is the edge's `To`. Its objects are of the type the
+  operation needs, as the safety rule below asks of `blobfs`.
+- **T3.** A refused request makes no log record at `Info` or above.
+
 **Safety rules for `blobfs` tests**: ADR 0011 §7 and ADR 0012 §9, and one
 more. A test that replaces `f.perm` with a policy that allows what `Unix()`
 refuses with `vfs.ErrIsDir` or `vfs.ErrNotDir` makes no call on an object of
@@ -851,7 +1044,109 @@ the wrong type, since `blobfs` relies on those refusals (§6).
 - that a policy allocates nothing when it allows;
 - that nothing is exported beyond §2 and §5;
 - that `f.perm` is written only by `New`;
-- that a failed `Fire` is logged.
+- that a failed `Fire` is logged;
+- that a security-relevant transition's policy is asked in the hold that
+  fires it (§12);
+- that no path fires its event without asking;
+- that every `Fire` on an `Atomic` with a security-relevant transition holds
+  the lock its doc comment names.
+
+### 12. A security-relevant transition asks a policy
+
+This is the link of §1, which the owner's decision 4 asks for. It changes
+neither `fsm` nor `policy`: it says where and when an owner asks its policy
+(Assumption 43).
+
+**What is security-relevant** (Assumption 42).
+
+- A machine is security-relevant when a policy's request or a gate (§1)
+  reads its state, or when its state records authority a caller holds, such
+  as a lock, a lease or a share reservation.
+- A transition is security-relevant when:
+  1. a caller's request causes it, in a security-relevant machine;
+  2. a caller's request asks for it, and whether that caller may have it
+     depends on who the caller is or on what it holds; or
+  3. it widens what callers may do: in the state it enters, a policy or a
+     gate allows a request that it refuses in the state it leaves, or a
+     caller holds authority it did not hold before.
+- No other transition needs a policy. In particular:
+  - one that only follows a change a caller's request was allowed to make, in
+    a machine that is not security-relevant, such as setting a dirty flag,
+    dropping a link count or opening a buffer, is part of that change. The
+    change's own check guards it, where §6 places that check; whether that
+    place is right for `Write` and `truncate` is #101's question;
+  - one that no caller causes, and that only narrows what callers may do,
+    fails safe. It can only take something away, and there is no caller
+    whose right to it a policy could judge.
+
+**The link.** For each security-relevant transition:
+
+- **Its ADR names the request.** The ADR that adds or changes the transition
+  names the request that guards it: the `Op`, and where each field of the
+  `Request` comes from, as §6 does for each method. A transition of the third
+  kind that no caller causes has no caller to judge, so its ADR names the
+  policy that decides it, or exempts it (§1).
+- **The owner asks in the hold that fires.** It builds the request from the
+  state as it stands, asks its policy, and fires the event only if the
+  policy returns nil. All three happen in one hold of the lock that
+  serializes the machine's `Fire` calls and guards what the request reads, so
+  the verdict still holds when the event fires (Assumption 44).
+  - For a `Machine`, that lock is the one its doc comment names (§2).
+  - For an `Atomic`, every `Fire` on it, of any event, holds one lock, which
+    its doc comment names. Its readers may still read it without that lock.
+- **In a `vfs.FS` method**, the request is made at stage D (§6), and the
+  event fires with the change that follows stage E, in the hold that C to E
+  ran in. So a refusal comes before the namespace preconditions, in
+  ADR 0007 §4's order of errors.
+- **On a refusal**, the owner fires nothing and changes nothing, and returns
+  the policy's error unchanged: for `Unix()`'s rows, the bare `vfs.Status`
+  (§5).
+- **On a permit**, it checks its other guards (§3), fires, and applies the
+  side effects in the same hold. A `Fire` that fails then is an illegal
+  transition (§3, §9).
+- **The policy** is the owner's installed one: `f.perm` in `blobfs`, with
+  `Unix()` in front (§6).
+- **Cost.** A policy takes no lock and waits for nothing (§4, §5), so asking
+  it inside the hold changes no lock order. Where the call already makes its
+  request at stage D, the link adds nothing to it.
+
+**Logs** (Assumption 45). A refusal is the caller's answer, not the server's
+fault. The owner makes no record of it at `Info` or above. If it makes one at
+`Debug`, the record carries §9's keys `machine`, `from` and `event`, and the
+policy's error under `err`, and no `to`, since nothing moved. A policy still
+logs nothing.
+
+**Specs.** A spec that models such a machine conjoins the policy's predicate,
+under its rule-4 name (`UnixAllows` for `Unix()`, vocabulary V7), with the
+event's action, so the action is enabled only where the policy permits. A
+refusal is no step of the machine, and leaves its variable as it was. Whether
+the machine is specified in TLA+ at all is its ADR's question under
+ADR 0013 §1, which gives permission rules to exhaustive tests of the policy
+and to review. This section adds no name to `docs/vocabulary.md`.
+
+**The machines this ADR names.**
+
+- **The mount mode** is security-relevant, since `mutable()` and `Access`'s
+  mask read it. Its one edge, `Diverge`, only narrows, and a store's answer
+  causes it, so it needs no policy. An edge added later that leaves
+  `ReadOnly` or `Diverged` widens, and is linked. Its one transition today is
+  made in `commitLocked`, which runs holding `FS.mu` for writing, or from
+  `initEmpty` before the FS is shared, so the one lock such an edge would need
+  is already held.
+- **Root-pointer knowledge and the lifecycle machines**: their ADRs (§8)
+  apply this section. Root-pointer knowledge is security-relevant if the ADR
+  for #5 has `mutable()` read it, and `ProbeOurs` and `ProbeUnchanged` would
+  then widen.
+- **Link counts** are not security-relevant. `relink`'s changes only follow
+  the removals and renames that `OpRemoveEntry` and `OpRename` allow, and run
+  after stage E in the hold of `FS.mu` in which that check is made
+  (ADR 0017 §2).
+- **E1 to E10** have no security-relevant transition. No policy's request or
+  gate reads their state, none records authority a caller holds, and nothing
+  about who a caller is guards any of their transitions. The duplicate
+  request cache (E2) does tell connections apart, but only to give a
+  connection the reply to its own call (ADR 0002 §2), which grants it nothing
+  its call did not.
 
 ## Assumptions
 
@@ -860,12 +1155,18 @@ required, except where it says otherwise. Assumption 1 records the owner's
 decision 1 and says which part of it is mine. Assumptions 2 to 5 record the
 choices the owner delegated to the architect's recommendation (decision 2),
 and say so. The owner's decision 3 is recorded in *Context*, and Assumption 31
-says how it bears on this ADR.
+says how it bears on this ADR. Decision 4 is recorded in *Context* too, and
+Assumptions 36 to 46 are the revision's judgement calls.
 
 1. **The scope.** Decision 1, in the owner's words: "Go with architect's
-   recommendations. I took a look on the report and it was well argued." The
-   reasons in §1's table and for each place left as it is are mine, and so is
-   the list of other things left as they are.
+   recommendations. I took a look on the report and it was well argued." It
+   accepted §1's table and the ten places that are now E1 to E10. The
+   reasons in the table and for E1 to E10 are mine. Decision 4 made the rules
+   standing: §1 gives them in the wording the owner approved, and the rest of
+   §1, and §12, are mine (Assumptions 37 to 45). The first version also kept
+   a list of other things as they were, as my judgement. That list is gone:
+   §1 says instead which of them the rules do not reach and which have not
+   moved yet.
 2. **`internal/fsm` rather than a switch per machine.** Delegated (decision
    2). My reasons: one tested mechanism; a table that can be listed and
    compared with a spec's Next relation; and a place for the atomic form.
@@ -1000,6 +1301,84 @@ says how it bears on this ADR.
     `err` is the key the repository's other `Error` records use for an error
     (ADR 0003 §7; the committer's records). The message is left open because
     only review checks the record (§11).
+36. **The revision: read, not run.** Every statement the revision of
+    2026-10-24 makes about the code was checked by reading it at `2d7ff34`,
+    the commit its branch was cut from. Nothing was run. The first version's
+    statements stand as checked at `a607410` (Assumption 30). The revision
+    changes no code and no test, so nothing a client or a deployment sees
+    changes, and it needs no `CHANGES` entry.
+37. **What "new and changed code" means** (§1). The approved wording does not
+    say. I took a change to count when it alters the state or the decision
+    itself: its states, events, transitions or writers, or what it allows. So
+    a fix that changes how a flag moves cannot avoid the rules, and a
+    refactor that only moves code cannot force a conversion. Such a change
+    takes the whole state, since the state rule has every write go through
+    the machine, and half a machine would leave writes that bypass it.
+38. **What the rules reach** (§1). The state rule's "named states" leaves out
+    values and caches. The policy rule's "whether a caller may do something"
+    leaves out checks of whether a request is well formed and of what it
+    names, which §6 already puts in stages B and E, apart from the gate in
+    stage A and the policy in stage D; Assumption 18 already kept the
+    namespace preconditions and the validators out. The first version's list
+    of other things left as they were is sorted on those lines. Where each
+    falls is my reading of the rules' words, and nothing on either side is
+    exempt.
+39. **E1 to E10** (§1). The first version left them as they were, each with a
+    reason and no rule named. I gave each the rule its reason answers: the
+    state rule for the machines and the state, and the policy rule for the
+    validators and the clamp. By §1's terms the policy rule does not reach
+    those two at all. They stay listed so that the list is the one decision 1
+    accepted. Their code is named as it stands at `2d7ff34`.
+40. **E11 and E12** (§1). §6 and §7 keep the mount gate and `ACCESS`'s
+    read-only mask in `blobfs`, and the policy rule names "an access mask" and
+    "a gate on an operation", so without these two this ADR would break its
+    own rule. I recorded them rather than move either into `policy`: both
+    judge the mount, not the caller (Assumption 21), and `policy` cannot name
+    the mount mode's type without an import cycle. They are the only
+    exemptions the revision adds. It grants none to the three things *Not yet
+    moved*, which the approved wording leaves to #114's plan.
+41. **Granting and revoking** (§1). One list, kept whole, is what makes the
+    approved wording's "ADR 0014 §1 lists the current ones" true, so an
+    exemption granted by another ADR is listed here as well. E numbers are
+    never reused, as ADR numbers are not, and a revoked entry stays, as a
+    superseded ADR does. An exemption whose reason a change removes is
+    restated or revoked by that change's ADR, so that none outlives its
+    reason.
+42. **What is security-relevant** (§12). The approved wording leaves the
+    definition to this ADR. I based it on the owner's "security or related to
+    authorisations of some kind": a machine whose state a policy's request or
+    a gate reads, or which records authority; a transition a caller causes in
+    such a machine, or asks for under a decision about who may have it; and
+    one that widens what callers may do. Two things are left out on purpose:
+    - a transition that only follows an allowed change, in a machine that is
+      not security-relevant, such as one of `FS.dirty`, a link count or an
+      open-file entry. Its change's check already guards it. Counting it in
+      would make almost every piece of state security-relevant, and its
+      question, where that check is made, is #101's;
+    - a transition that no caller causes and that only narrows, such as
+      `Diverge`. It fails safe, and there is no caller to judge.
+
+    The locks, leases and share reservations of §12 are illustrations: no
+    such machine exists.
+43. **The link is a convention, not an API** (§12). An owner asks its policy
+    where it fires, as §6's methods ask theirs at stage D. So `fsm` and
+    `policy` stay as §2 and §5 pin them, and no code or test changes. It is
+    enforced by T1 to T3 and by review, not by construction; *Alternatives
+    considered* gives the forms that would enforce it, and why each lost.
+44. **One hold, and one lock for an `Atomic`** (§12). A verdict is about the
+    state and the attributes as they stood when it was given, and firing in
+    the same hold keeps them so. An `Atomic` lets one `Fire` race another, so
+    one with a security-relevant transition has every `Fire` hold one lock,
+    which leaves its readers lock-free. The mount mode's one transition is
+    already made holding `FS.mu`, or before the FS is shared (§12).
+45. **A refusal is not logged above `Debug`** (§12). A client can send refused
+    requests at will, and a record of each at `Info` or above would let it
+    fill the log, as ADR 0016 Assumption 9 weighed for its own record. §9's
+    keys are reused so that a record that is made reads like a transition's.
+    An audit record is not decided (*What this does not decide*).
+46. **T1 to T3** (§11) carry W2 and W3 over from a method to a transition.
+    `vfs.ErrNXIO` serves for the reason it does in W2: no row of `Unix()`
+    returns it, so it can only be the recording policy's.
 
 ## Alternatives considered
 
@@ -1035,12 +1414,49 @@ says how it bears on this ADR.
   `blobfs` would have to repeat the rows. What it would buy, a policy that
   cannot break `blobfs`'s invariants, costs one rule in §6 instead
   (Assumption 34).
+- **An edge that names its policy, which `Fire` asks.** A request is the
+  call's, not the edge's: its `Object`, `Dst`, `UID` and `GID` come from the
+  call, so `Fire` would need the whole request, and `fsm` would import
+  `policy` and, through it, `vfs`, where §2 gives it the standard library
+  alone. Asked inside `Fire`, the policy would answer after stage E's
+  preconditions, or the event would fire before them with no way back, and
+  either breaks ADR 0007 §4's order of errors. In `Atomic`'s loop it could be
+  asked more than once.
+- **A guard function passed to `Fire`.** It needs no import, but the order of
+  errors and the loop are as above, and it enforces nothing the convention
+  does not unless the table also marks the guarded edges, which is the
+  alternative above again.
+- **A permit value that `Fire` requires**, which only a policy's allow could
+  make. Within one package anything can make one, a kept permit could be
+  spent in a later hold, and no machine needs one yet. If review finds a
+  security-relevant `Fire` without its check, this is the next step.
+- **Linking every transition of a security-relevant machine.** A transition
+  that no caller causes and that only narrows has no caller to judge, and the
+  mount mode's `Diverge` would need a policy that always allows.
+- **Counting every transition that an allowed change causes.** `FS.dirty`,
+  link counts and buffers would each need a request of their own for a change
+  already checked, and #101 would become a breach of §12 before its own
+  decision (Assumption 42).
+- **Keeping the first version's fixed list.** Decision 4 makes the rules
+  standing.
+- **Treating code that has not moved as exempt until it moves.** It would keep
+  the old blanket as an exemption that no ADR names, which decision 4 rules
+  out.
 
 ## Consequences
 
 - Two pure standard-library packages arrive, and they change no behaviour in
   this PR.
-- Every later machine and permission rule follows this ADR.
+- New and changed state, and new and changed decisions about who may act,
+  follow this ADR unless an ADR exempts them, and §1 lists every exemption in
+  force.
+- A change to state that has not moved, such as `FS.dirty`, can grow into its
+  conversion, or wait on an ADR that exempts it (§1).
+- A security-relevant transition is checked in the hold that fires it, at a
+  call's stage D and before its preconditions, so a refusal never leaves a
+  machine moved (§12).
+- The link is enforced by T1 to T3 and by review, not by `fsm`
+  (Assumption 43).
 - The vocabulary binds Go, logs and specs together.
 - The fixes for #93, #94, #97, #100 and #69 turn unpinned rows into pinned
   ones, each under its own decision. Decision 3 allows those changes to be
@@ -1057,10 +1473,24 @@ says how it bears on this ADR.
 - Whether the commit protocol's decisions become named functions (their ADRs;
   vocabulary V7).
 - The codes a diverged mount answers (ADR 0003 §5).
-- NFSv4 state.
+- NFSv4 state. Its open state, share reservations and locks stay in
+  `internal/nfs` (`vfs.Pinner`'s doc comment), so a security-relevant machine
+  there whose request reads state behind `vfs.FS` cannot hold the backend's
+  lock (§12); its ADR decides where the check is made.
+- A request for a caller that is not a `vfs.Caller` acting on a filesystem
+  object, such as one at the RPC layer. The ADR of the first machine that
+  needs one extends §5, under its *Growth* rule.
+- Whether each thing *Not yet moved* (§1) is converted or exempted.
+- An audit record of refusals.
+- Limits on what one caller may hold or use up, such as the budget,
+  connections and calls in flight. They decide nothing about who may act, and
+  §12 does not cover them.
 - Any TLA+ spec.
 
 ## Sources
+
+The revision of 2026-10-24 fetched nothing. It cites only this repository's
+own code and documents, and the entries below are the first version's.
 
 Fetched on 2026-10-12 through a tool that summarises what it fetches, and
 quoted as it returned them when asked for verbatim text. It reads a long page
