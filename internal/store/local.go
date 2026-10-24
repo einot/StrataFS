@@ -140,6 +140,7 @@ func (l *Local) Delete(ctx context.Context, key string) error {
 	return err
 }
 
+// TLA+: docs/tla/CommitProtocol.tla SwapOK, SwapFailed, SwapConflict
 func (l *Local) PutIfMatch(ctx context.Context, key string, data []byte, etag string) (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

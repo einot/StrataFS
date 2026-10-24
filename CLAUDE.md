@@ -166,6 +166,13 @@ Before merging, the full suite must pass: `gofmt -l .` (must print nothing), `go
 commands so a failing one is actually visible — piping each to `tail`
 hides its exit status and will report a red gate as green.
 
+For a PR that changes anything under `docs/tla/` or `scripts/tla.sh`, the
+bar also includes the model checks (ADR 0013 §10): `bash scripts/tla.sh full`
+must exit 0, run unpiped, and `git status --porcelain` must print the same
+before and after it, since the runner writes nothing in the tree. A row
+that is not yet calibrated fails the gate; recording its outcome is the
+architect's, from a run the session made.
+
 **Who merges.** By the repo owner's standing order, the session merges its
 own pull requests once all of these hold:
 - the merge bar has passed on the PR's head commit;

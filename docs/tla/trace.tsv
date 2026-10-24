@@ -1,0 +1,50 @@
+#spec	action	file	symbol	locks	decided
+CommitProtocol	Init	internal/blobfs/fs.go	New	none	ADR 0011 section 3
+CommitProtocol	GetRoot	internal/blobfs/commit.go	FS.loadOrInit	none: New runs it before the FS is shared	ADR 0011 section 1
+CommitProtocol	RefuseEmpty	internal/blobfs/commit.go	FS.loadOrInit	none: New runs it before the FS is shared	ADR 0011 section 2
+CommitProtocol	InitEmpty	internal/blobfs/commit.go	FS.loadOrInit	none: New runs it before the FS is shared	ADR 0011 section 1
+CommitProtocol	InitEmpty	internal/blobfs/commit.go	FS.initEmpty	none	-
+CommitProtocol	HeadRoot	internal/blobfs/commit.go	FS.loadOrInit	none: New runs it before the FS is shared	-
+CommitProtocol	GetSnapshot	internal/blobfs/commit.go	FS.loadOrInit	none: New runs it before the FS is shared	ADR 0011 section 1
+CommitProtocol	GetSnapshot	internal/blobfs/commit.go	decodeSnapshot	none	-
+CommitProtocol	Mutate	internal/blobfs/fs.go	FS.mutable	none: readOnly is set once by New and diverged is atomic	ADR 0011 section 4; ADR 0003 section 5
+CommitProtocol	Mutate	internal/blobfs/fs.go	FS.SetAttr	FS.mu (write)	-
+CommitProtocol	Mutate	internal/blobfs/fs.go	FS.createEntry	FS.mu (write)	-
+CommitProtocol	Mutate	internal/blobfs/fs.go	FS.unlink	FS.mu (write)	-
+CommitProtocol	Mutate	internal/blobfs/fs.go	FS.Rename	FS.mu (write)	-
+CommitProtocol	Mutate	internal/blobfs/fs.go	FS.bufferWrite	openFile.mu, then FS.mu (write)	ADR 0003 section 3
+CommitProtocol	Mutate	internal/blobfs/fs.go	FS.truncate	commitGate (read), openFile.mu, FS.mu (write)	ADR 0012 section 2
+CommitProtocol	Flush	internal/blobfs/commit.go	FS.Sync	none for flushAll; commitGate (write) from settleAll on	ADR 0012 section 2; README.md How a commit works
+CommitProtocol	Flush	internal/blobfs/fs.go	FS.flushAll	FS.mu (read) for its listing	ADR 0012 section 2
+CommitProtocol	Flush	internal/blobfs/fs.go	FS.settleAll	commitGate (write), held by Sync; FS.mu (read) for its listing	ADR 0012 section 2
+CommitProtocol	Flush	internal/blobfs/fs.go	FS.flushOpen	openFile.mu; FS.mu (write) for the repoint	ADR 0006 section 5; ADR 0012 section 3
+CommitProtocol	Flush	internal/blobfs/fs.go	FS.putChunk	openFile.mu, held by flushOpen	README.md How a commit works
+CommitProtocol	PutSnapshot	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	README.md How a commit works; ADR 0012 section 4
+CommitProtocol	PutSnapshot	internal/store/store.go	ReadOnly.Put	none of its own; called holding commitLocked's locks	ADR 0011 section 3
+CommitProtocol	PutSnapshot	internal/store/s3.go	S3.Put	none of its own; called holding commitLocked's locks	-
+CommitProtocol	SwapOK	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	README.md How a commit works
+CommitProtocol	SwapOK	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitLocked's locks	README.md How a commit works
+CommitProtocol	SwapOK	internal/store/local.go	Local.PutIfMatch	Local.mu, inside commitLocked's locks	README.md How a commit works
+CommitProtocol	SwapReplyLost	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	-
+CommitProtocol	SwapReplyLost	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitLocked's locks	-
+CommitProtocol	SwapReplyLost	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	-
+CommitProtocol	SwapFailed	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	-
+CommitProtocol	SwapFailed	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitLocked's locks	-
+CommitProtocol	SwapFailed	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	-
+CommitProtocol	SwapFailed	internal/store/local.go	Local.PutIfMatch	Local.mu, inside commitLocked's locks	-
+CommitProtocol	SwapConflict	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0003 section 5
+CommitProtocol	SwapConflict	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	-
+CommitProtocol	SwapConflict	internal/store/local.go	Local.PutIfMatch	Local.mu, inside commitLocked's locks	-
+CommitProtocol	Diverge	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0003 section 5
+CommitProtocol	SwapUnsupported	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	docs/DESIGN.md section 2
+CommitProtocol	SwapUnsupported	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	-
+CommitProtocol	SwapUnsupported	internal/store/store.go	ReadOnly.PutIfMatch	none of its own; called holding commitLocked's locks	ADR 0011 section 3
+CommitProtocol	FallbackPut	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	docs/DESIGN.md section 2
+CommitProtocol	FallbackPut	internal/store/store.go	ReadOnly.Put	none of its own; called holding commitLocked's locks	ADR 0011 section 3
+CommitProtocol	FallbackPut	internal/store/s3.go	S3.Put	none of its own; called holding commitLocked's locks	-
+CommitProtocol	FallbackHead	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	docs/DESIGN.md section 2
+CommitProtocol	StartPrune	internal/blobfs/commit.go	FS.schedulePrune	FS.mu (write) from Sync's commitLocked; none from initEmpty's	README.md How a commit works
+CommitProtocol	PruneList	internal/blobfs/commit.go	FS.pruneSnapshots	none	README.md How a commit works
+CommitProtocol	PruneDelete	internal/blobfs/commit.go	FS.pruneSnapshots	none	README.md How a commit works
+CommitProtocol	PruneEnd	internal/blobfs/commit.go	FS.schedulePrune	FS.mu (write), the goroutine's final hold	README.md How a commit works
+CommitProtocol	Crash	internal/blobfs/fs.go	New	none (the restart)	ADR 0013 section 4
