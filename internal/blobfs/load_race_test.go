@@ -57,12 +57,14 @@ package blobfs
 //   - when armed, holds the next read of rootKey, by Get or by GetWithETag,
 //     once, after the inner call has returned and before the harness returns:
 //     it records the loaded ETag, signals that it is held, and waits until
-//     released or until the test's context ends. For GetWithETag the loaded
-//     ETag is the ETag inner.GetWithETag returned. For Get, which returns no
-//     ETag, it is the lowercase hexadecimal MD5 of the body Get returned,
-//     *store.Local's ETag for that body (section 6's first fact), so that a
-//     build which still loads the root pointer by Get is held there too and
-//     its swap is compared with the body it loaded;
+//     released or until the test's context ends. It also records the body's
+//     own ETag, the lowercase hexadecimal MD5 of the body it is about to
+//     return, *store.Local's ETag for that body (section 6's first fact), so
+//     that the route test checks the store's ETag against the body. For
+//     GetWithETag the loaded ETag is the ETag inner.GetWithETag returned. For
+//     Get, which returns no ETag, it is the body's own ETag, so that a build
+//     which still loads the root pointer by Get is held there too and its
+//     swap is compared with the body it loaded;
 //   - records the etag argument of every PutIfMatch of rootKey, in call order,
 //     counts every Head of rootKey, and records every Put, Delete and
 //     PutIfMatch of any key;
@@ -111,16 +113,16 @@ import (
 const lr89Bound = 10 * time.Second
 
 // lr89ETag is *store.Local's ETag for body: the lowercase hexadecimal MD5 of
-// it (ADR 0020 section 6, the first fact). Only the hold on a read of rootKey
-// by Get uses it, since Get returns no ETag.
+// it (ADR 0020 section 6, the first fact). The hold on a read of rootKey uses
+// it to record the held body's own ETag.
 func lr89ETag(body []byte) string {
 	sum := md5.Sum(body)
 	return hex.EncodeToString(sum[:])
 }
 
 // lr89Hold is the harness's one-shot hold on a read of rootKey. method,
-// loaded and readErr are written by the held call before it closes entered,
-// and may be read once entered is closed.
+// loaded, bodyETag and readErr are written by the held call before it closes
+// entered, and may be read once entered is closed.
 type lr89Hold struct {
 	entered chan struct{}
 	release chan struct{}
@@ -134,6 +136,11 @@ type lr89Hold struct {
 	// GetWithETag returned; for Get, the lowercase hexadecimal MD5 of the body
 	// the held read is about to return; "" if the read failed.
 	loaded string
+
+	// bodyETag is the body's own ETag: the lowercase hexadecimal MD5 of the
+	// body the held read is about to return, *store.Local's ETag for it
+	// (ADR 0020 section 6, the first fact); "" if the read failed.
+	bodyETag string
 
 	// readErr is what the inner store returned as the held read's error.
 	readErr error
@@ -208,10 +215,11 @@ func (s *lr89Store) noteWrite(method, key string) {
 
 // readRoot is run by every read of rootKey by Get or GetWithETag, after the
 // inner call has returned and before the harness returns, with the loaded
-// ETag and the error the inner call returned. If the hold is armed it disarms
-// it and holds the read: it records the loaded ETag, signals entered, and
-// waits until the hold is released or testCtx ends.
-func (s *lr89Store) readRoot(method, loaded string, err error) {
+// ETag, the body and the error the inner call returned. If the hold is armed
+// it disarms it and holds the read: it records the loaded ETag and the body's
+// own ETag, signals entered, and waits until the hold is released or testCtx
+// ends.
+func (s *lr89Store) readRoot(method, loaded string, data []byte, err error) {
 	s.mu.Lock()
 	h := s.armed
 	s.armed = nil
@@ -224,6 +232,7 @@ func (s *lr89Store) readRoot(method, loaded string, err error) {
 		h.readErr = err
 	} else {
 		h.loaded = loaded
+		h.bodyETag = lr89ETag(data)
 	}
 	close(h.entered)
 	select {
@@ -241,19 +250,21 @@ func (s *lr89Store) Get(ctx context.Context, key string) ([]byte, error) {
 		if err == nil {
 			loaded = lr89ETag(data)
 		}
-		s.readRoot("Get", loaded, err)
+		s.readRoot("Get", loaded, data, err)
 	}
 	return data, err
 }
 
 // GetWithETag passes through to the inner store's GetWithETag (ADR 0020
 // Assumption 14), errors included. A read of rootKey goes through the hold,
-// whose loaded ETag is the one the inner store returned; in the no-ETag mode
-// the harness then answers it with an empty ETag.
+// whose loaded ETag is the one the inner store returned, recorded beside the
+// MD5 of the body it returned so that the route test can check the one
+// against the other; in the no-ETag mode the harness then answers it with an
+// empty ETag.
 func (s *lr89Store) GetWithETag(ctx context.Context, key string) ([]byte, string, error) {
 	data, etag, err := s.inner.GetWithETag(ctx, key)
 	if key == rootKey {
-		s.readRoot("GetWithETag", etag, err)
+		s.readRoot("GetWithETag", etag, data, err)
 		if s.noETag {
 			etag = ""
 		}
@@ -563,7 +574,12 @@ func lr89CheckRemount(t *testing.T, ctx context.Context, local *store.Local, nam
 //
 // Step 6 compares the loaded ETag with the last PutIfMatch of rootKey, which
 // the test requires to be one of B's Sync, and not with any matching one: A's
-// own swap in step 3 carries the same ETag, the epoch-1 root pointer's.
+// own swap in step 3 carries the same ETag, the epoch-1 root pointer's. Beside
+// it, the test checks the store's ETag against the body: the loaded ETag must
+// equal the lowercase hexadecimal MD5 of the body the held read returned,
+// *store.Local's ETag for that body (ADR 0020 section 6, the first fact), so
+// that a store which answered with another read's ETag is caught at step 6
+// too.
 //
 // Where it deviates from the trace:
 //   - The hold sits on the way out of the first read of the root pointer,
@@ -633,6 +649,13 @@ func TestCommitBetweenMountReadsIsRefusedNotOverwritten(t *testing.T) {
 	}
 
 	// 6 and 7. The harness's records, read before the bucket is inspected.
+	// First, the store's ETag for the loaded body is that body's own ETag.
+	if loaded != hold.bodyETag {
+		t.Errorf("B's %s of the root pointer %q returned the ETag %q with a body whose lowercase hexadecimal "+
+			"MD5 is %q: on a *store.Local an object's ETag is the MD5 of the bytes returned with it, so the "+
+			"ETag B loaded does not belong to the body B loaded (ADR 0020 section 1; section 6, the first fact)",
+			hold.method, rootKey, loaded, hold.bodyETag)
+	}
 	swaps, rootHeads, _ := h.records()
 	if len(swaps) <= mark {
 		t.Errorf("B's Sync made no PutIfMatch of the root pointer %q (the harness saw %d, all before it: %q), "+
