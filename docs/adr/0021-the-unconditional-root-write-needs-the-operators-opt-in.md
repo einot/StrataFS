@@ -15,6 +15,16 @@ module's R12, and a rerun of `CommitProtocol_Fallback`). `README.md`'s wording
 of what the opt-in covers is the reviewer's (its second finding). §3, §4, §5
 and §6 follow; §6 adds tests G1 to G5 and C4. The rule in §1, the flag, and
 the rest of the Go change are unchanged.
+**Revised:** 2026-10-27 — on re-review, before merge, three low findings. The
+reclaim's guard (§2) now deletes only on a positive showing: a not-found, or
+a decoded root pointer of the current format version whose `Snapshot` is
+non-empty and differs from the attempt's key, so a root body that is JSON but
+no root pointer no longer counts as naming another (security-auditor;
+Assumption 26); its dependence on a read of `rootKey` showing the last write
+is stated, with its cost, in Assumption 22. The reclaim stays under the locks
+`commitLocked` holds, with #43 cited and the reclaim listed among the calls
+#43's fix moves (reviewer; Assumption 25). §6's first review item is
+reworded to match §2 (reviewer), and §6 adds test G6. No model change.
 **Issue:** #91
 
 ## Context
@@ -261,24 +271,32 @@ and its success path are unchanged. Its `store.ErrUnsupported` case becomes:
   `-commit-interval` and on every client `COMMIT` (Assumption 21). So, after
   the record and before returning, `commitLocked`:
   1. reads the root pointer once, `f.store.Get(ctx, rootKey)`;
-  2. if the read returns `store.ErrNotFound`, or a body that decodes as
-     `rootPointer` whose `Snapshot` is not `key`, calls
-     `f.store.Delete(ctx, key)` once; a failed `Delete` is logged at `Debug`
-     and leaves the orphan, which ADR 0019 §3 and the module's J14 cover;
-  3. if the read returns a body whose `Snapshot` is `key`, deletes nothing
-     and logs one record at `Error` whose message contains `took effect`: the
-     store applied a write it answered 501, outside every assumption here
-     (Assumption 22). The mount is left as it is, and its next swap, made
-     with the old ETag, fails its condition and diverges the mount with no
-     other writer, which is the route #5 owns for a swap whose reply was
-     lost;
-  4. if the read fails otherwise, or the body does not decode, deletes
-     nothing and logs at `Debug`.
+  2. calls `f.store.Delete(ctx, key)` once, only when the read positively
+     shows a root pointer other than this attempt's: it returned
+     `store.ErrNotFound`, or it returned a body that decodes as `rootPointer`
+     with `Version == snapshotVersion`, `Snapshot != ""` and
+     `Snapshot != key`. A failed `Delete` is logged at `Debug` and leaves the
+     orphan, which ADR 0019 §3 and the module's J14 cover;
+  3. if the body decodes with `Version == snapshotVersion` and `Snapshot ==
+     key`, deletes nothing and logs one record at `Error` whose message
+     contains `took effect`: the store applied a write it answered 501,
+     outside every assumption here (Assumption 22). The mount is left as it
+     is, and its next swap, made with the old ETag, fails its condition and
+     diverges the mount with no other writer, which is the route #5 owns for
+     a swap whose reply was lost;
+  4. in every other case, deletes nothing and logs at `Debug`: the read
+     failed otherwise; the body does not decode as JSON; or it decodes but
+     its `Version` is not `snapshotVersion` or its `Snapshot` is empty, as
+     `null`, `{}`, an error document served with 200, or a root pointer of
+     another format version do (Assumption 26). Nothing is deleted against a
+     root pointer the mount does not positively understand.
 
   The read and the `Delete` are made holding the locks `commitLocked` holds,
-  as its other calls are. The reclaim never writes `rootKey`, never deletes
-  any key but `key`, and changes neither the error returned nor any field of
-  the `FS`.
+  as its other store calls are; #43 records those calls under `FS.mu` as a
+  defect to fix for all of them, and when its fix moves them off the lock the
+  reclaim moves with them (Assumption 25). The reclaim never writes
+  `rootKey`, never deletes any key but `key`, and changes neither the error
+  returned nor any field of the `FS`.
 - **With the opt-in** (`f.fallbackAllowed()`): exactly as at `247a276`: the
   `Warn` record `"backend lacks conditional writes; concurrent mounts are
   unsafe"`, the `Put` of `rootKey`, returning `write root pointer: %w` on
@@ -659,8 +677,10 @@ and, in addition:
   answers 501); when armed, one-shot, **fails the next `Delete`** under
   `snapshotPrefix` with an error of the test's own, without calling the
   inner store; counts every `Get` of `rootKey`; records every `Delete` with
-  its key, in call order; and records the keys of every `Put` under
-  `snapshotPrefix`, in call order.
+  its key, in call order; records the keys of every `Put` under
+  `snapshotPrefix`, in call order; and, for G6, when armed, one-shot,
+  **answers the next `Get` of `rootKey`** with bytes the test gives and no
+  error, without calling the inner store.
 
 It takes no hold: every route here is sequential, and the 501 is injected
 synchronously. Two mounts in one test share one harness.
@@ -833,6 +853,25 @@ reworded to say no further write of the root pointer.
   `rootKey`; `rootKey` unchanged; the keys under `snapshotPrefix` as
   recorded; a `Create` of `c3` returns nil; a remount has neither `c2` nor
   `c3`. At `53abeb7` the refusal happens but the attempt's snapshot stays.
+- **G6** (`TestRefusedCommitReclaimsOnlyAgainstAPositiveRootPointer`; added
+  on re-review, against the branch at `c57ef58`). One subtest per body, each
+  on a fresh harness: seed `c1` on the inner store, `New` on the harness in
+  unconditional mode without the opt-in, record the inner store's keys under
+  `snapshotPrefix`, arm the next `Get` of `rootKey` to answer the body, then
+  commit `c2`. The bodies: `null`; `{}`; an error document served with 200,
+  `{"Code":"InternalError","Message":"boom"}`; a document that is not JSON,
+  `<Error/>`; and a root pointer of another format version,
+  `{"version":99,"epoch":7,"snapshot":"snapshots/00000000000000000007-ffffffffffff.json.gz","fsid":1,"written":1}`.
+  In every subtest `Sync` returns F3's error; the harness recorded exactly
+  one `Get` of `rootKey` since the mount and no `Delete`; the inner store's
+  keys under `snapshotPrefix` are the recorded ones plus exactly one, the
+  attempt's, which it still holds; and `rootKey`'s bytes on the inner store
+  are unchanged. At `c57ef58` the `null`, `{}`, error-document and
+  other-version subtests are red, since the code deletes on any decoded
+  body whose `Snapshot` is not `key`; the `<Error/>` subtest is green, and
+  stays green. G1, G2 and G3 cover the positive cases: a root pointer of the
+  current version naming another key, a not-found, and one naming the
+  attempt's key.
 - **C4** (`TestCheckRefusesAnEndpointHonouringOnlyIfNoneMatch`, in
   `cmd/strata/check_test.go`; red at `53abeb7`). A fake over a `*store.Local`
   under `t.TempDir()` that passes every `PutIfMatch` whose `etag` is `""`
@@ -866,9 +905,10 @@ reworded to say no further write of the root pointer.
 
 **What only review can show:**
 
-- that `commitLocked` makes no store call after a swap answered
-  `store.ErrUnsupported` on a mount without the opt-in, on every path, and
-  leaves the fields §2 names as they were;
+- that `commitLocked` writes the root pointer no further after a swap
+  answered `store.ErrUnsupported` on a mount without the opt-in, no `Put` and
+  no `Head` of `rootKey`, on every path, `initEmpty`'s included, and leaves
+  the fields §2 names as they were;
 - that the opt-in branch is the code of `247a276`, unchanged;
 - that nothing writes `FS.allowUnconditionalRoot` after `New`, and nothing
   but `fallbackAllowed` reads it;
@@ -878,8 +918,11 @@ reworded to say no further write of the root pointer.
   three conditional-write probes, with the probes skipped after it, and on
   nothing else, and every other outcome keeps its severity;
 - that the reclaim's `Delete` is made only after a `Get` of `rootKey`
-  returned not-found or a root pointer naming another key, only for the key
-  the commit wrote, and that no path deletes a key the root pointer names;
+  returned not-found, or a body that decodes as a root pointer of the
+  current format version whose `Snapshot` is non-empty and differs from the
+  key, only for the key the commit wrote, and that no path deletes a key the
+  root pointer names, or deletes against a body the mount does not
+  positively understand;
 - that the reclaim changes no field of the `FS` and not the error returned;
 - the `TLA+:` line on `fallbackAllowed`, the `trace.tsv` rows, and that
   `SwapUnsupported` with the member describes `commitLocked` (ADR 0013 §8);
@@ -1051,7 +1094,25 @@ Each is mine unless it says otherwise.
     which costs space and nothing else. The took-effect case itself is left
     to #5: the guard logs it at `Error` and changes no mount state, so that
     #5's in-doubt resolution, not this ADR, decides whether to adopt the
-    root.
+    root. **What the guard rests on**, stated on re-review: that a `Get` of
+    `rootKey` returns the root pointer as last written, which ADR 0013
+    Assumption 5 already assumes of every store call (AWS documents strong
+    read-after-write consistency; the model takes every key as
+    linearizable; `Local`'s `Put` is a rename). A store that both applies a
+    write it answered 501 and then serves a stale root pointer, from a
+    replica or before the write lands, defeats the guard: the read shows the
+    previous root, the attempt's snapshot is deleted, and the root pointer
+    names a snapshot the bucket no longer holds, so no mount can load it
+    until another commit lands, where before the reclaim the same two faults
+    left an orphan and a false divergence. The rule the auditor offered as
+    the other remedy, deleting only when the root pointer the read names
+    sorts below the attempt's key, does not close this: a stale read names
+    the previous root, which sorts below the attempt's key, so it passes that
+    rule too, and no read can tell "nothing happened" from "applied, read
+    stale". Only a delete conditioned on another key's content would, and
+    none exists (ADR 0019 *Alternatives*). Two faults the spec assumes away,
+    at once, is the accepted price; no test can show it without a store that
+    lies, so none is written.
 23. **The model folds the reclaim into `SwapUnsupported`** (§4), by the
     direct argument of ADR 0013 §4 that R12 gives, rather than adding a pc
     string and an action for the `Delete`. The only step that fails to
@@ -1070,6 +1131,29 @@ Each is mine unless it says otherwise.
     `-check` and the `Error` records point at the misconfiguration. Not
     uploading again while the namespace is unchanged would remove the
     bandwidth too, and is left open (*Alternatives considered*).
+25. **The reclaim stays under the locks** (§2). `commitLocked` makes its
+    store calls holding the commit gate and `FS.mu`, which #43 records as a
+    defect, and the repository's guidance to coder says that pattern is not
+    a precedent. The reclaim is kept there for this PR all the same: the
+    path is a refused commit's, the two calls are bounded like the swap and
+    the snapshot `Put` beside them, and the reviewer judged the cost
+    acceptable. When #43's fix moves `commitLocked`'s store calls off the
+    lock, the reclaim is among them, with the snapshot `Put`, the swap, and
+    the opted-in fallback's `Put` and `Head`. The reviewer's alternative,
+    having `commitLocked` return the key for `Sync` to reclaim after it
+    releases `FS.mu`, under the commit gate, would split the refusal between
+    two functions and change `commitLocked`'s signature, `initEmpty`'s call
+    included, to save lock time on a misconfiguration path; declined
+    (*Alternatives considered*).
+26. **The guard deletes only on a positive showing** (§2). The first form
+    deleted whenever a decoded body's `Snapshot` was not `key`, and a body
+    that is JSON but no root pointer, `null`, `{}` or an error document
+    served with 200, decodes without error with an empty `Snapshot`; review
+    found that, with a 501 that took effect, such a body would delete the
+    snapshot the root pointer names. The guard now requires the current
+    format version and a non-empty `Snapshot` that differs from the key, or
+    a not-found. A root pointer of another format version is not understood,
+    so nothing is deleted against it either. G6 pins each case.
 
 ## Alternatives considered
 
@@ -1108,6 +1192,12 @@ Each is mine unless it says otherwise.
   schedule, does nothing for a client's `COMMIT`, and delays a flaky store's
   recovery; the issue filed for the architect's N15 owns the committer's
   behaviour after repeated failures.
+- **Reclaim after `commitLocked` releases `FS.mu`**, under the commit gate
+  (Assumption 25).
+- **Delete only when the root pointer the read names sorts below the
+  attempt's key.** A stale read names the previous root, which sorts below
+  the key, so the rule admits the very case it was meant to stop
+  (Assumption 22).
 
 ## Consequences
 
@@ -1156,6 +1246,8 @@ Each is mine unless it says otherwise.
   (Assumption 22).
 - Not uploading a snapshot again while the namespace is unchanged since a
   refused swap (Assumption 24).
+- Moving `commitLocked`'s store calls, the reclaim's included, off `FS.mu`
+  (#43; Assumption 25).
 - A `-check` probe that conditions a `PUT` on a `GET`'s ETag (#133).
 - Multi-writer operation beyond detection (`docs/DESIGN.md` §15).
 
