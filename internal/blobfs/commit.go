@@ -252,8 +252,40 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		// can assert that no second writer exists, so without the opt-in the
 		// commit fails here and writes nothing more. The mount stays writable
 		// and dirty, and its next commit tries the swap again (ADR 0021 §1, §2).
+		//
+		// The snapshot uploaded above is then named by no root pointer, and no
+		// prune pass reaches it while the root pointer stands still, so it is
+		// reclaimed: otherwise a store that answers every swap 501 gains an
+		// orphan per attempt. A 501 is taken to change nothing, but the Delete
+		// waits on one read of the root pointer rather than on that assumption,
+		// since deleting a snapshot the root names would leave a bucket no mount
+		// can load. The reclaim changes neither the error returned nor any field
+		// of the FS. It is the module's R12 (ADR 0021 §2, the reclaim;
+		// Assumptions 21, 22).
 		f.log.Error("commit refused: the store does not support conditional writes, and this mount may not write the root pointer unconditionally",
 			"our_epoch", f.epoch, "attempted", epoch)
+		raw, rerr := f.store.Get(ctx, rootKey)
+		var cur rootPointer
+		if rerr == nil {
+			// A body that does not decode is treated as a failed read: nothing
+			// it says can show that the root names another key.
+			rerr = json.Unmarshal(raw, &cur)
+		}
+		switch {
+		case errors.Is(rerr, store.ErrNotFound) || (rerr == nil && cur.Snapshot != key):
+			if derr := f.store.Delete(ctx, key); derr != nil {
+				// The orphan stays for a later prune pass (ADR 0019 §3).
+				f.log.Debug("could not reclaim a refused commit's snapshot", "key", key, "err", derr)
+			}
+		case rerr == nil:
+			// The store applied a write it answered 501. The mount is left as it
+			// is: its next swap, made with the old ETag, fails its condition and
+			// diverges it, which is #5's to resolve.
+			f.log.Error("a root-pointer swap the store answered as unsupported took effect: the root pointer names the refused commit's snapshot, which is kept",
+				"snapshot", key, "attempted", epoch)
+		default:
+			f.log.Debug("could not read the root pointer, so a refused commit's snapshot is kept", "key", key, "err", rerr)
+		}
 		return fmt.Errorf("swap root pointer: the store does not support conditional writes, and this mount may not write the root pointer unconditionally: %w", err)
 	case errors.Is(err, store.ErrUnsupported):
 		// A backend without conditional writes cannot give us safe single-writer

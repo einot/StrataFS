@@ -213,11 +213,13 @@ func checkDelete(ctx context.Context, s store.Store, prefix string) result {
 }
 
 // checkConditionalWrites probes the compare-and-swap that makes a commit
-// atomic. An endpoint that answers them as unsupported fails them as required,
+// atomic. A probe the endpoint answers as unsupported fails as required,
+// whichever of the three it is, and so does every probe skipped after it,
 // since a mount there refuses to commit, unless allowUnconditional says the
 // operator allowed the unconditional write; then they are optional, but losing
 // them means losing all protection against a second mount of the same bucket
-// (ADR 0021 §1, §2). Every other outcome keeps the severity it had before.
+// (ADR 0021 §1, §2). Only the severity turns on that: every row reads as it
+// did, and every other outcome keeps the severity it had before.
 func checkConditionalWrites(ctx context.Context, s store.Store, prefix string, allowUnconditional bool) []result {
 	const (
 		nCreate = "conditional create (If-None-Match)"
@@ -253,7 +255,8 @@ func checkConditionalWrites(ctx context.Context, s store.Store, prefix string, a
 	}
 
 	if _, err := s.PutIfMatch(ctx, key, []byte(`{"epoch":2}`), etag); err != nil {
-		return append(out, fail(nUpdate, false, "failed with a correct ETag: %v", err), fail(nReject, false, "skipped"))
+		required := errors.Is(err, store.ErrUnsupported) && !allowUnconditional
+		return append(out, fail(nUpdate, required, "failed with a correct ETag: %v", err), fail(nReject, required, "skipped"))
 	}
 	out = append(out, pass(nUpdate, "update with the current etag succeeds"))
 
@@ -266,6 +269,8 @@ func checkConditionalWrites(ctx context.Context, s store.Store, prefix string, a
 		out = append(out, pass(nReject, "a second writer is detected, not silently lost"))
 	case err == nil:
 		out = append(out, fail(nReject, false, "ACCEPTED a stale ETag; concurrent mounts are unsafe"))
+	case errors.Is(err, store.ErrUnsupported):
+		out = append(out, fail(nReject, !allowUnconditional, "failed with an unexpected error: %v", err))
 	default:
 		out = append(out, fail(nReject, false, "failed with an unexpected error: %v", err))
 	}
