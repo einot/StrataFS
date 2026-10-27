@@ -10,12 +10,14 @@ This file says what the directory holds, how to read it and how to run it.
 
 - **`CommitProtocol.tla`**: how a mount reads the root pointer, commits,
   prunes snapshots and diverges, against other mounts, failing store calls
-  and crashes (ADR 0013 §1, item 1). It is checked against `c5068a0`.
-- **Its 30 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
-  eighteen MustHold and twelve MustFail. Eight of the MustFail ones each
-  remove a fix the code has, and four each show an open defect: #91, and #5
-  by three. Nine of the MustHold ones showed a defect until its fix flipped
-  them, eight #88 (ADR 0019) and one #89 (ADR 0020), and keep the two
+  and crashes (ADR 0013 §1, item 1). It is checked against `8415f61`.
+- **Its 32 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
+  nineteen MustHold and thirteen MustFail. Ten of the MustFail ones each
+  remove a fix the code has, one of them,
+  `CommitProtocol_UnconditionalTwoWriters`, stating besides what ADR 0021's
+  opt-in gives up, and three each show an open defect, #5 by three. Ten of
+  the MustHold ones showed a defect until its fix flipped them, eight #88
+  (ADR 0019), one #89 (ADR 0020) and one #91 (ADR 0021), and keep the two
   invariants they had (*MustHold and MustFail*). Each
   opens with a comment giving its expectation, its issue or the fix it
   removes, and the source of each `Fixes` member. One,
@@ -60,9 +62,10 @@ Each module opens with a header comment that states:
   stand for a run of Go steps, and its **assumptions**: the judgement calls
   the model rests on, which no requirement made.
 
-`CommitProtocol.tla` has two `Revised:` lines, for ADR 0019's fix of #88 and
-ADR 0020's fix of #89. Each action's comment names the Go symbols that
-`trace.tsv` gives it.
+`CommitProtocol.tla` has four `Revised:` lines: for ADR 0019's fix of #88,
+for ADR 0020's fix of #89, and two for ADR 0021's fix of #91, the second from
+its review. Each action's comment names the Go symbols that `trace.tsv` gives
+it.
 
 Every module declares the constant `Fixes`, the set of fixes a configuration
 includes, and its actions consult it, so one module describes the code with

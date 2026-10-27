@@ -98,11 +98,15 @@ and MinIO.
 That result is specific to one cluster, so `-check` remains the thing to run
 against any new endpoint rather than assuming this generalises.
 
-Where conditional writes are unavailable, the fallback is not to give up
-atomicity — the root swap is still a single object PUT, so readers still see one
-state or the other — but to give up *detection* of a second writer. Such a
-deployment must be operated single-writer by policy, and should say so rather
-than pretend the guarantee holds.
+Where conditional writes are unavailable, strata does not fall back on its
+own: a commit whose conditional write the store answers with 501 fails, and
+nothing more is written, until the operator says that exactly one mount writes
+the bucket by starting strata with `-allow-unconditional-root`
+([ADR 0021](adr/0021-the-unconditional-root-write-needs-the-operators-opt-in.md)).
+With that opt-in the fallback gives up *detection* of a second writer, not
+atomicity — the root swap is still a single object PUT, so readers still see
+one state or the other. Such a deployment is operated single-writer by policy,
+and the flag is how it says so rather than pretend the guarantee holds.
 
 The one thing object storage takes away is cheap small random writes. A 4 KB
 block is the wrong unit when each access is an HTTPS round trip, so block sizes
@@ -719,3 +723,4 @@ it is not this one.
 | [0018](adr/0018-state-machines-and-policies-are-a-standing-rule.md) | New and changed stateful code expresses its state as an explicit transition table run by `internal/fsm`, and every decision about whether a caller may do something is a pure policy in `internal/policy`, unless an ADR exempts the code, and the register `docs/adr/exemptions.md` lists every exemption; a security-relevant transition fires only once its policy permits it, in one hold that holds the lock serializing its machine exclusively | 14 — the code of every phase is new code under these rules; otherwise it constrains how every package expresses state and decisions about callers, and replaces ADR 0014's fixed scope |
 | [0019](adr/0019-a-prune-pass-deletes-only-below-its-own-commit.md) | A prune pass deletes only snapshots whose keys sort below the one its commit swapped the root pointer to, keeping the newest `-snapshot-retention` of them, and never reads the root pointer, so the snapshot the root pointer names is never deleted; `prunable` in `internal/blobfs` is the one place that decides what a pass deletes | none — it constrains `internal/blobfs`, which section 14 replaces; the sweeper of section 8, specified before its code (ADR 0013), inherits the rule that nothing the active root names is deleted |
 | [0020](adr/0020-a-mount-loads-the-root-pointer-and-its-etag-in-one-read.md) | A mount loads the root pointer and its ETag in one read: `loadOrInit` takes both from one store call, `GetWithETag`, never from a separate `Head`, so the ETag its first commit compare-and-swaps against is the ETag of the namespace it loaded, and a root pointer read that returns no ETag fails the mount | 5 — step 4's `If-Match` ETag, which the `fsinfo` load inherits; otherwise `internal/store`'s `Store` interface and `internal/blobfs`, which section 14 replaces |
+| [0021](adr/0021-the-unconditional-root-write-needs-the-operators-opt-in.md) | The unconditional root write needs the operator's opt-in: a conditional write of the root pointer that the store answers with 501 fails the commit, and nothing more is written, unless the mount was started with `-allow-unconditional-root`, which restores the unconditional write and asserts a single writer; `-check` fails such a store without the flag and passes it with a caveat with it; `fallbackAllowed` in `internal/blobfs` is the one place that decides it | 2 — the note on where this runs; 5 — step 4's swap, whose `fsinfo` form inherits that no store reply grants an unconditional write; otherwise `internal/blobfs` and `cmd/strata` |

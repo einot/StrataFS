@@ -14,6 +14,12 @@ test checks agree; the Consequences bullet on the refusal says what a
 read-only mount did before, and Assumption 4 that only the refusal's
 `CHANGES` entry is `BREAKING:`. The rule, the Go change and the
 configurations are unchanged.
+**Revised:** 2026-10-25 — cross-reference only: ADR 0021 decided #91, which
+§2 and *What this does not decide* leave to it. The unconditional `Put` and
+the `Head` after it now follow a swap answered `store.ErrUnsupported` only on
+a mount whose operator set `Config.AllowUnconditionalRoot`; without the
+opt-in such a swap fails the commit and writes nothing more. The rule, the
+Go change and the configurations here are unchanged.
 **Issue:** #89
 
 ## Context
@@ -199,7 +205,11 @@ changes: the loaded ETag goes to `PutIfMatch`, which answers
 `store.ErrUnsupported`, and the unconditional `Put` and the `Head` after it
 run as now. The ETag's provenance is irrelevant on that path, whose guarantee
 is a single writer's (`docs/DESIGN.md` §2), and #91 decides the fallback's
-policy. Step 3's refusal applies on that backend too (Assumption 3).
+policy. Step 3's refusal applies on that backend too (Assumption 3). ADR 0021
+has since decided #91: the unconditional `Put` and the `Head` follow a swap
+answered `store.ErrUnsupported` only on a mount whose operator set
+`Config.AllowUnconditionalRoot`, and otherwise the commit fails with nothing
+more written.
 
 ### 3. What does not change
 
@@ -730,7 +740,8 @@ Each is mine unless it says otherwise.
 - A swap reply with no ETag (#103), and the in-doubt knowledge of #5: what a
   mount does after a swap whose ETag it does not have. Assumption 3 names
   the asymmetry this leaves.
-- The fallback's policy on a backend without conditional writes (#91).
+- The fallback's policy on a backend without conditional writes (#91):
+  decided by ADR 0021.
 - A `-check` probe that conditions a `PUT` on the ETag a `GET` returned, so
   that Assumption 5 is checked on the endpoint in front of the operator
   (Assumption 11): #133.

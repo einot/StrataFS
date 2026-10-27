@@ -10,7 +10,7 @@
 \* Go symbols that perform each action, and docs/vocabulary.md, V3, gives
 \* every name.
 \*
-\* Checked against c5068a0
+\* Checked against 8415f61
 \* Revised: 2026-10-24 -- ADR 0019 (#88): with the Fixes member
 \*   PruneBelowCurrent, a prune pass deletes only the keys that sort below the
 \*   one its commit swapped the root pointer to, and keeps the Retention newest
@@ -25,6 +25,20 @@
 \*   never due. Without the member the module describes loadOrInit as it is
 \*   at 55fc666, as before. R2, J11 and J13 are reworded, and the Leaves-out
 \*   list names a read that returns no ETag. Nothing else moved.
+\* Revised: 2026-10-25 -- ADR 0021 (#91): with the Fixes member
+\*   FallbackOptIn, a swap the store answers 501 fails the commit and writes
+\*   nothing more (SwapUnsupported's first unfenced branch), and the
+\*   fallback's Put and Head follow a 501 only where FallbackAllowed, which
+\*   is the member's absence: a configuration without it describes both
+\*   commitLocked as it is at 247a276 and a mount whose operator set
+\*   Config.AllowUnconditionalRoot, which behave alike (J17). The Scope and
+\*   Leaves-out lists and R7 say so. Nothing else moved.
+\* Revised: 2026-10-25 -- ADR 0021, on review: SwapUnsupported's refusal
+\*   branch also removes the attempt's key from snapshots, the Delete by which
+\*   commitLocked reclaims the snapshot a refused commit uploaded, after a
+\*   read of the root pointer shows it names another key (ADR 0021 section
+\*   2); the read and the Delete fold into the action (R12), and the
+\*   Leaves-out list names a 501 that took effect. Nothing else moved.
 \*
 \* Scope
 \*   - One bucket, and the mount processes in Mounts.
@@ -32,10 +46,12 @@
 \*   - Namespace changes: Mutate, and StrayDirty (Assumption J6).
 \*   - Commits: chunks, then the snapshot, then a conditional swap of the
 \*     root pointer, with five store outcomes (SwapOK, SwapReplyLost,
-\*     SwapFailed, SwapConflict, SwapUnsupported) and the fallback after a
-\*     501 (FallbackPut, FallbackHead). The snapshot Put and the fallback's
-\*     Put may each fail without taking effect (PutFailed), or take effect
-\*     and fail (SnapshotReplyLost, FallbackReplyLost).
+\*     SwapFailed, SwapConflict, SwapUnsupported) and, after a 501, either
+\*     the refusal that FallbackOptIn adds, which writes nothing more, or
+\*     the fallback where FallbackAllowed (FallbackPut, FallbackHead). The
+\*     snapshot Put and the fallback's Put may each fail without taking
+\*     effect (PutFailed), or take effect and fail (SnapshotReplyLost,
+\*     FallbackReplyLost).
 \*   - Divergence (Diverge).
 \*   - Each mount's prune passes: StartPrune, PruneList, PruneDelete and
 \*     PruneEnd.
@@ -54,6 +70,15 @@
 \*   - Failed List and Delete calls (Assumption J14).
 \*   - A swap reply with no ETag (#103), and a Head failing after the
 \*     fallback's Put.
+\*   - A bucket whose mounts differ in Config.AllowUnconditionalRoot: here
+\*     every mount of a configuration is opted in or none is (J17).
+\*   - A 501 answered for a reason other than the condition: here a 501 is
+\*     the store's answer to the condition, and commitLocked treats every
+\*     501 on the swap alike (ADR 0021).
+\*   - A swap answered 501 that took effect: here a 501 changes no object
+\*     (J4), so the read that guards the refused commit's Delete (ADR 0021
+\*     section 2) always finds the root pointer naming another key, and the
+\*     Delete always follows (R12).
 \*   - A Put or a Delete taking effect more than once through the retries
 \*     of S3.do, with other calls in between: here a call takes effect at
 \*     most once, at its own step (ADR 0013 Assumption 5).
@@ -80,7 +105,9 @@
 \*        harms no invariant. Folding also drops early flushes (Commit and
 \*        FILE_SYNC writes), which is sound by the same monotonicity.
 \*   R7.  SwapUnsupported merges with FallbackPut, because the call answered
-\*        501 changes no object (docs/vocabulary.md, V3, allows this).
+\*        501 changes no object (docs/vocabulary.md, V3, allows this). With
+\*        FallbackOptIn and no opt-in the action ends at that call, and no
+\*        Put follows (ADR 0021 section 4).
 \*   R8.  StartPrune runs in the same hold of FS.mu as the swap's success
 \*        path, so it is part of SwapOK and of FallbackHead.
 \*   R9.  The List loop is one step: it is exactly one call below 1,000 keys,
@@ -96,6 +123,20 @@
 \*        store.ErrUnsupported, never store.ErrPrecondition. ADR 0014
 \*        section 7 gives "ReadOnly" no edge, so the PR that converts the
 \*        mode revises this.
+\*   R12. With FallbackOptIn and no opt-in, the swap's 501, commitLocked's
+\*        read of the root pointer and its Delete of the attempt's snapshot
+\*        are one action, SwapUnsupported's refusal branch, by the direct
+\*        argument ADR 0013 section 4 allows. The read's answer is fixed: the
+\*        501 changed nothing (J4), and no write of another mount can make
+\*        the root pointer name this mount's key, which carries its own
+\*        nonce, so the Delete always follows. Of the steps another mount can
+\*        take between the calls, only a PruneList that lists the key fails
+\*        to commute with the Delete, and moving the Delete before it changes
+\*        only whether that key and, through Kept, at most one older key
+\*        below that pass's own key appear in its doomed set; no root pointer
+\*        names either, so no property here tells the two orders apart. A
+\*        crash between the calls leaves the orphan, as a crash before the
+\*        swap would, and so does a failed Delete (J14).
 \*
 \* Assumptions (judgement calls, not requirements)
 \*   J1.  Commit ids are lineage ids, [writer, epoch]. They are unique,
@@ -205,6 +246,19 @@
 \*        store.ReadOnly refuses reaches nothing. Every object write is such
 \*        a call, so it also implies that no object holds a read-only
 \*        mount's write.
+\*   J17. The operator's opt-in to the unconditional fallback,
+\*        Config.AllowUnconditionalRoot (ADR 0021 section 2), is modelled as
+\*        the absence of FallbackOptIn, not as a constant naming the opted-in
+\*        mounts. With the opt-in commitLocked behaves after a 501 exactly as
+\*        it did at 247a276, so a configuration without the member describes
+\*        both a build without the fix and a build with it whose mounts all
+\*        have the opt-in, and a configuration with the member a build with
+\*        the fix whose mounts all lack it. A constant would have made every
+\*        existing configuration assign it, which ADR 0013 section 7 does not
+\*        allow. A bucket whose mounts differ in the opt-in is left out: it
+\*        is one where the operator's assertion of a single writer is false,
+\*        and CommitProtocol_NoFallbackOptIn and
+\*        CommitProtocol_UnconditionalTwoWriters already show what that loses.
 
 EXTENDS Naturals, FiniteSets
 
@@ -252,9 +306,16 @@ CONSTANTS
 \*     and its ETag with one call, GetWithETag, so GetRoot records both and
 \*     HeadRoot is never due. Without it loadOrInit reads the body with Get
 \*     and the ETag with a later Head, as at 55fc666.
+\*   FallbackOptIn: ADR 0021 section 2. commitLocked, after
+\*     store.ErrUnsupported from the swap, writes the root pointer
+\*     unconditionally only on a mount whose operator set
+\*     Config.AllowUnconditionalRoot, and otherwise fails the commit with
+\*     nothing more written. Without it, or on an opted-in mount, which
+\*     behave alike (J17), the fallback's Put and Head follow every 501, as
+\*     at 247a276.
 
 AllFixes  == {"IfNoneMatchInit", "Nonce", "ChunksFirst", "ReadOnlyFence",
-              "PruneBelowCurrent", "AtomicLoad"}
+              "PruneBelowCurrent", "AtomicLoad", "FallbackOptIn"}
 AllFaults == {"SwapReplyLost", "SwapFailed", "SwapConflict409", "PutFailed",
               "SnapshotReplyLost", "FallbackReplyLost"}
 
@@ -361,6 +422,12 @@ Mutable(m) == mode[m] = "Writable"
 
 \* New put m's store behind store.ReadOnly, which refuses every write.
 Fenced(m) == m \in ReadOnlyMounts /\ "ReadOnlyFence" \in Fixes
+
+\* The unconditional fallback follows a swap the store answered 501: in a
+\* build without FallbackOptIn, or on a mount whose operator set
+\* Config.AllowUnconditionalRoot, which behave alike (J17; ADR 0021 section
+\* 4). Go (trace.tsv): FS.fallbackAllowed, which reads the opt-in.
+FallbackAllowed == "FallbackOptIn" \notin Fixes
 
 \* The commit that m makes at k's epoch.
 CommitIdOf(m, k) == [writer |-> m, epoch |-> k.epoch]
@@ -518,7 +585,9 @@ TypeOK ==
 \* The initial state.
 
 \* Init: New, before its first store call. New sets FS.readOnly from
-\* Config.ReadOnly and puts a read-only mount's store behind store.ReadOnly.
+\* Config.ReadOnly and puts a read-only mount's store behind store.ReadOnly,
+\* and sets FS.allowUnconditionalRoot from Config.AllowUnconditionalRoot,
+\* which FallbackAllowed stands for (J17).
 \* With Start = "Empty" the bucket is empty and every mount is at
 \* loadOrInit's first read. With Start = "Loaded" the bucket holds a
 \* filesystem at epoch 1, written outside the model, which every mount has
@@ -785,13 +854,18 @@ SwapConflict(m) ==
                  PruneVars, acked, used, overtaken, crashes>>
 
 \* SwapUnsupported: store.ErrUnsupported, from errorFor's 501 or from
-\* ReadOnly.PutIfMatch, then the fallback's unconditional Put of the root
-\* pointer (FallbackPut, R7). store.ReadOnly refuses both calls when the
-\* mount is fenced, and they reach nothing. Otherwise both reach the bucket,
-\* and the Put is not applied (PutFailed), is applied, or is applied and
-\* answers with an error (FallbackReplyLost), which leaves rootETag as it
-\* was.
-\* Go (trace.tsv): FS.commitLocked; errorFor; ReadOnly.PutIfMatch.
+\* ReadOnly.PutIfMatch. store.ReadOnly refuses the swap when the mount is
+\* fenced, and the fallback's Put with it, so nothing reaches the bucket
+\* either way. Otherwise the call that answered 501 reached the bucket and
+\* changed nothing, and then, unless FallbackAllowed, commitLocked reclaims
+\* the attempt's snapshot, which no root pointer names, and returns an error
+\* (ADR 0021 section 2; R12); or, where FallbackAllowed, the fallback's
+\* unconditional Put of the root pointer
+\* follows (FallbackPut, R7), which reaches the bucket and is not applied
+\* (PutFailed), is applied, or is applied and answers with an error
+\* (FallbackReplyLost), which leaves rootETag as it was.
+\* Go (trace.tsv): FS.commitLocked; FS.fallbackAllowed; errorFor;
+\* ReadOnly.PutIfMatch.
 SwapUnsupported(m) ==
   /\ NextStep(m) = "Swap"
   /\ (Capability \in {"Unconditional", "Flaky"} \/ Fenced(m))
@@ -800,17 +874,26 @@ SwapUnsupported(m) ==
           /\ CommitFails(m, k)
           /\ UNCHANGED <<BucketVars, GhostVars>>
        \/ /\ ~Fenced(m)
+          /\ ~FallbackAllowed
+          /\ WriteCall(m)
+          /\ snapshots' = [x \in DOMAIN snapshots \ {k} |-> snapshots[x]]
+          /\ CommitFails(m, k)
+          /\ UNCHANGED <<bucketRoot, chunks, acked, used, overtaken>>
+       \/ /\ ~Fenced(m)
+          /\ FallbackAllowed
           /\ "PutFailed" \in Faults
           /\ WriteCall(m)
           /\ CommitFails(m, k)
           /\ UNCHANGED <<BucketVars, acked, used, overtaken>>
        \/ /\ ~Fenced(m)
+          /\ FallbackAllowed
           /\ WriteCall(m)
           /\ FallbackPut(m, k)
           /\ pc' = [pc EXCEPT ![m] = "FallbackHead"]
           /\ attempt' = [attempt EXCEPT ![m] = k]
           /\ UNCHANGED <<snapshots, chunks, acked>>
        \/ /\ ~Fenced(m)
+          /\ FallbackAllowed
           /\ "FallbackReplyLost" \in Faults
           /\ WriteCall(m)
           /\ FallbackPut(m, k)

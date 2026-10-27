@@ -208,9 +208,20 @@ the behaviour strata depends on and then exits, writing nothing permanent:
 
 The last one is the one that matters. An endpoint that *accepts* a write
 conditioned on a superseded ETag cannot protect the root pointer, so two mounts
-of the same bucket will silently overwrite each other's commits. strata still
-runs there — it falls back to an unconditional write — but you must guarantee a
-single writer yourself.
+of the same bucket will silently overwrite each other's commits; strata still
+runs there, and you must guarantee a single writer yourself. An endpoint that
+answers a conditional write with HTTP 501 (a conditional-write row above that
+reads `not supported`) gives no protection either, and there strata
+fails closed: a commit whose conditional write is answered 501 fails, writes
+nothing and deletes the snapshot it had uploaded, so by default strata commits
+nothing on such an endpoint (one that honours `If-None-Match` but not
+`If-Match` gets the empty filesystem's first commit and nothing after it), and
+`-check` reports it as not working. If you can guarantee a single writer, pass
+`-allow-unconditional-root`: strata then writes the root pointer
+unconditionally wherever the store answers a conditional write with HTTP 501,
+`-check` with the same flag passes the endpoint with that caveat, and a second
+mount of the bucket goes undetected
+([ADR 0021](docs/adr/0021-the-unconditional-root-write-needs-the-operators-opt-in.md)).
 
 ## Tests
 
@@ -275,6 +286,10 @@ This is a proof of concept. What that means concretely:
   tree of millions of files would make commits expensive. This is the limitation
   [docs/DESIGN.md](docs/DESIGN.md) exists to remove.
 - **Single writer per bucket.** Concurrent writers are detected, not merged.
+  On a store without conditional writes they cannot be detected at all, so
+  strata refuses to commit there unless started with
+  `-allow-unconditional-root`, which is your assertion that there is only one
+  writer ([ADR 0021](docs/adr/0021-the-unconditional-root-write-needs-the-operators-opt-in.md)).
 - **No garbage collection of chunks.** Superseded *snapshots* are pruned, but
   deleting a file only unlinks it from the namespace; its chunks stay.
 - **No hard links**, and MKNOD is refused. FSINFO advertises both absences.

@@ -677,8 +677,16 @@ func pr88AwaitPassAtCleanup(t *testing.T, h *pr88Store, fs *FS, what string) {
 // signal, so the init commit's pass is listing.
 func pr88Pruner(t *testing.T, ctx context.Context, h *pr88Store, retention int, what string) (*FS, *pr88Hold) {
 	t.Helper()
+	return pr88PrunerWith(t, ctx, h, pr88Config(h, retention), what)
+}
+
+// pr88PrunerWith is pr88Pruner with the pruning mount's Config given whole,
+// for R8, whose mount is started with Config.AllowUnconditionalRoot
+// (ADR 0021 section 6, O5).
+func pr88PrunerWith(t *testing.T, ctx context.Context, h *pr88Store, cfg Config, what string) (*FS, *pr88Hold) {
+	t.Helper()
 	list := h.armList()
-	fs := pr88MustNew(t, ctx, what, pr88Config(h, retention))
+	fs := pr88MustNew(t, ctx, what, cfg)
 	pr88AwaitPassAtCleanup(t, h, fs, "the prune pass of "+what)
 	pr88WaitSignal(t, list.entered, "the List of "+snapshotPrefix+" by the prune pass that "+what+"'s init commit begins")
 	return fs, list
@@ -1250,12 +1258,20 @@ func TestPruneKeepsRootSnapshotAfterLostSwapReply(t *testing.T) {
 // the unconditional fallback, a Put of the root pointer that took effect and
 // returned an error, whose retry sorts above it.
 //
+// The pruning mount is started with the operator's opt-in,
+// Config.AllowUnconditionalRoot (ADR 0021): without it a swap the store
+// answers store.ErrUnsupported fails the commit and no fallback is made, so
+// New over an empty bucket on this store is refused. The trace's
+// SwapUnsupported and FallbackPut are therefore the opted-in fallback's, as
+// docs/tla/CommitProtocol_PruneFallbackReply.cfg, without FallbackOptIn,
+// describes (ADR 0021 section 4; section 6, O5).
+//
 // The trace's steps, through the code path:
 //   - InitEmpty, PutSnapshot [1,1], SwapUnsupported and FallbackHead, which
 //     start the pass: New over the empty bucket on the harness in
-//     unconditional mode from the start, with SnapshotRetention 1, so the
-//     init commit goes through the fallback; the harness holds the pass's
-//     List;
+//     unconditional mode from the start, with SnapshotRetention 1 and the
+//     opt-in, so the init commit goes through the fallback; the harness holds
+//     the pass's List;
 //   - Mutate, PutSnapshot [2,1] and SwapUnsupported, whose fallback Put takes
 //     effect and fails: a commit whose root Put the harness applies and then
 //     fails, so that the root pointer names its epoch-2 snapshot while Sync
@@ -1281,8 +1297,10 @@ func TestPruneKeepsRootSnapshotAfterLostSwapReply(t *testing.T) {
 // both, the test fails, naming the key, and the remount fails.
 func TestPruneKeepsRootSnapshotAfterLostFallbackReply(t *testing.T) {
 	h, ctx := pr88NewHarness(t, true)
-	a, list := pr88Pruner(t, ctx, h, 1, "New over an empty bucket with SnapshotRetention 1, on a store with no "+
-		"conditional writes")
+	cfg := pr88Config(h, 1)
+	cfg.AllowUnconditionalRoot = true
+	a, list := pr88PrunerWith(t, ctx, h, cfg, "New over an empty bucket with SnapshotRetention 1 and "+
+		"AllowUnconditionalRoot, on a store with no conditional writes")
 
 	h.armRootPutLost()
 	mark := h.snapshotCount()

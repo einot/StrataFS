@@ -247,6 +247,60 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		f.log.Error("commit conflict: another writer owns this bucket",
 			"our_epoch", f.epoch, "attempted", epoch)
 		return errors.New("commit conflict: another writer owns this bucket; remount to continue")
+	case errors.Is(err, store.ErrUnsupported) && !f.fallbackAllowed():
+		// One 501 says nothing about the next request, and only the operator
+		// can assert that no second writer exists, so without the opt-in the
+		// commit fails here and writes nothing more. The mount stays writable
+		// and dirty, and its next commit tries the swap again (ADR 0021 §1, §2).
+		//
+		// The snapshot uploaded above is then named by no root pointer, and no
+		// prune pass reaches it while the root pointer stands still, so it is
+		// reclaimed: otherwise a store that answers every swap 501 gains an
+		// orphan per attempt. A 501 is taken to change nothing, but the Delete
+		// waits on one read of the root pointer that positively shows another
+		// root rather than on that assumption, since deleting a snapshot the
+		// root names would leave a bucket no mount can load. The reclaim
+		// changes neither the error returned nor any field of the FS. It is the
+		// module's R12 (ADR 0021 §2, the reclaim; Assumptions 21, 22, 26).
+		//
+		// The read and the Delete run under the locks commitLocked holds, as
+		// its other store calls do. #43 records those calls as a defect to fix
+		// for all of them, and when it is fixed the reclaim moves off the lock
+		// with them (ADR 0021 Assumption 25).
+		f.log.Error("commit refused: the store does not support conditional writes, and this mount may not write the root pointer unconditionally",
+			"our_epoch", f.epoch, "attempted", epoch)
+		raw, rerr := f.store.Get(ctx, rootKey)
+		var cur rootPointer
+		if rerr == nil {
+			// A body that does not decode is treated as a failed read: nothing
+			// it says can show that the root names another key.
+			rerr = json.Unmarshal(raw, &cur)
+		}
+		// A body that is JSON but no root pointer, as null, {} or an error
+		// document served with 200 are, decodes with an empty Snapshot, and a
+		// root pointer of another format version is not one this build
+		// understands; neither shows which key the root names, so neither
+		// may lead to a Delete (ADR 0021 Assumption 26).
+		understood := rerr == nil && cur.Version == snapshotVersion && cur.Snapshot != ""
+		switch {
+		case errors.Is(rerr, store.ErrNotFound) || (understood && cur.Snapshot != key):
+			if derr := f.store.Delete(ctx, key); derr != nil {
+				// The orphan stays for a later prune pass (ADR 0019 §3).
+				f.log.Debug("could not reclaim a refused commit's snapshot", "key", key, "err", derr)
+			}
+		case understood:
+			// The store applied a write it answered 501. The mount is left as it
+			// is: its next swap, made with the old ETag, fails its condition and
+			// diverges it, which is #5's to resolve.
+			f.log.Error("a root-pointer swap the store answered as unsupported took effect: the root pointer names the refused commit's snapshot, which is kept",
+				"snapshot", key, "attempted", epoch)
+		case rerr == nil:
+			f.log.Debug("the root pointer read is not a root pointer this build understands, so a refused commit's snapshot is kept",
+				"key", key, "version", cur.Version, "snapshot", cur.Snapshot)
+		default:
+			f.log.Debug("could not read the root pointer, so a refused commit's snapshot is kept", "key", key, "err", rerr)
+		}
+		return fmt.Errorf("swap root pointer: the store does not support conditional writes, and this mount may not write the root pointer unconditionally: %w", err)
 	case errors.Is(err, store.ErrUnsupported):
 		// A backend without conditional writes cannot give us safe single-writer
 		// detection. Fall back to an unconditional write and say so clearly.
@@ -276,6 +330,17 @@ func (f *FS) commitLocked(ctx context.Context) error {
 	// never stalls a write.
 	f.schedulePrune(key)
 	return nil
+}
+
+// fallbackAllowed reports whether a commit whose swap the store answered
+// store.ErrUnsupported may write the root pointer unconditionally: only when
+// the operator set Config.AllowUnconditionalRoot. It is a function of the
+// mount's configuration alone, and not a policy: no caller asks for the write
+// (ADR 0021 §2, §5).
+//
+// TLA+: docs/tla/CommitProtocol.tla SwapUnsupported
+func (f *FS) fallbackAllowed() bool {
+	return f.allowUnconditionalRoot
 }
 
 // schedulePrune starts a background pass that deletes superseded snapshots,
