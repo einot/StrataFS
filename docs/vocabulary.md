@@ -98,8 +98,11 @@ is, since `mountModes` has that one edge and Go's `Fire` refuses the rest
 mount without `store.ReadOnly` beneath it could reach the case, so only a
 configuration without `ReadOnlyFence` does. The four entries marked exists
 were confirmed against ADR 0014 §7 as revised on 2026-10-27, which the
-conversion's PR implements; the commit at which the architect confirmed them
-in the code is recorded here once that code is on its branch (ADR 0014,
+conversion's PR implements, and in the code at `faeba5b`:
+`internal/blobfs/mode.go` declares `mountWritable`, `mountReadOnly`,
+`mountDiverged` and `mountDiverge`, whose `String` values are `"Writable"`,
+`"ReadOnly"`, `"Diverged"` and `"Diverge"`, and the table `mountModes` with
+its one edge, and `internal/blobfs/fs.go` holds `FS.mode` (ADR 0014,
 Assumption 41).
 
 ## V2. Root-pointer knowledge
@@ -119,7 +122,7 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 
 ## V3. Commit protocol
 
-`docs/tla/CommitProtocol.tla`, checked against `8415f61`. Its Go sites exist:
+`docs/tla/CommitProtocol.tla`, checked against `faeba5b`. Its Go sites exist:
 `Sync`, `loadOrInit`, `initEmpty`, `decodeSnapshot`, `commitLocked`,
 `fallbackAllowed`, `schedulePrune` and `pruneSnapshots` in
 `internal/blobfs/commit.go`; `New`,
