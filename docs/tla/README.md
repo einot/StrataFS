@@ -10,7 +10,7 @@ This file says what the directory holds, how to read it and how to run it.
 
 - **`CommitProtocol.tla`**: how a mount reads the root pointer, commits,
   prunes snapshots and diverges, against other mounts, failing store calls
-  and crashes (ADR 0013 §1, item 1). It is checked against `8415f61`.
+  and crashes (ADR 0013 §1, item 1). It is checked against `faeba5b`.
 - **Its 32 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
   nineteen MustHold and thirteen MustFail. Ten of the MustFail ones each
   remove a fix the code has, one of them,
@@ -62,10 +62,10 @@ Each module opens with a header comment that states:
   stand for a run of Go steps, and its **assumptions**: the judgement calls
   the model rests on, which no requirement made.
 
-`CommitProtocol.tla` has four `Revised:` lines: for ADR 0019's fix of #88,
-for ADR 0020's fix of #89, and two for ADR 0021's fix of #91, the second from
-its review. Each action's comment names the Go symbols that `trace.tsv` gives
-it.
+`CommitProtocol.tla` has five `Revised:` lines: for ADR 0019's fix of #88,
+for ADR 0020's fix of #89, two for ADR 0021's fix of #91, the second from
+its review, and one for ADR 0014 §7's conversion of the mount mode. Each
+action's comment names the Go symbols that `trace.tsv` gives it.
 
 Every module declares the constant `Fixes`, the set of fixes a configuration
 includes, and its actions consult it, so one module describes the code with

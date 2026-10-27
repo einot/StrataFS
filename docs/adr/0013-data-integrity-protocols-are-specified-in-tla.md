@@ -5,6 +5,13 @@
 **Revised:** 2026-10-18 — cross-reference only: since ADR 0016, `run` makes its
 final commit on a `Serve` error, so Assumption 7's first example no longer
 describes the code; `Crash`'s meaning is unchanged.
+**Revised:** 2026-10-27 — cross-reference only, for ADR 0014 §7's conversion
+of the mount mode: the `FS.diverged` that §4 and Assumption 9 name is, since
+that conversion, the mount mode `FS.mode`, an `fsm.Atomic` whose `Fire` of
+`Diverge` replaces `commitLocked`'s `Store` and whose `State` replaces
+`mutable()`'s `Load`; a sentence at each says so. The arguments stand, since
+each rests on the read and the write being atomic and on the read being made
+holding no lock, which are as they were. Nothing else changed.
 **Issue:** #109
 
 ## Context
@@ -274,7 +281,9 @@ change them.
   while it does, so each of those calls is an action, and the work between
   them joins the call before or after it. That work touches only state
   `FS.mu` protects, but for `FS.diverged`, which `mutable()` reads holding no
-  lock. Joining the `Store` of it to the failed swap before it passes the
+  lock (since ADR 0014 §7's conversion, `FS.mode`, whose `Fire` of `Diverge`
+  is the `Store` below and whose `State` is the read; the argument is
+  unchanged). Joining the `Store` of it to the failed swap before it passes the
   first test directly: `mutable()`'s read commutes with the swap, and every
   other step that can fall between the two commutes with the `Store`.
 - **FileData folds three runs**, each on the ground of the first test. It has
@@ -310,7 +319,9 @@ change them.
   checks. Today that read is `mutable()`, which `Write`, `SetAttr` and the
   namespace operations call before they take `FS.mu`, and which reads
   `FS.diverged`, which `commitLocked` writes holding `FS.mu`; the read and the
-  write are atomic (#48).
+  write are atomic (#48). Since ADR 0014 §7's conversion the field is
+  `FS.mode`, read by `State` and written by `Fire`, both atomic, so the rule
+  and its reason stand.
 - **A spec may split an action further.** A finer split adds interleavings,
   so an invariant that holds of it holds of the coarser one; a liveness
   property then needs fairness on each part.
@@ -640,8 +651,11 @@ when TLC runs in §10, and the issue in *Context*.
    model, whose definition exempts accesses that are all atomic (as ADR 0005's
    *Sources* quote it). Atomicity does not make the read part of the critical
    section after it, so a commit can still diverge between the two, as this
-   assumption's first sentence says. `FS.mode`, read without a lock
-   (`docs/vocabulary.md`, V1), is ADR 0014's.
+   assumption's first sentence says. Since ADR 0014 §7's conversion the
+   field is `FS.mode`, an `fsm.Atomic` read by `State` without a lock and
+   written by `Fire` under `FS.mu`, so each sentence above reads with
+   `FS.mode` for `FS.diverged` and holds as it did (`docs/vocabulary.md`,
+   V1).
 10. **A finer split** (§4). It lets a spec keep apart a step the vocabulary
     names, such as `StartPrune` after a swap, where the rule would let it
     merge, at the price of more states.

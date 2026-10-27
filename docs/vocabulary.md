@@ -70,30 +70,40 @@ the `machine` value in log lines (ADR 0014 §9).
 
 ## V1. Mount mode
 
-Go types `mountMode` and `mountEvent`. Table `mountModes`, named `"mode"`,
-which is the `machine` value in log lines and the `Machine` of an
-`fsm.IllegalError`. Field `FS.mode`, an `*fsm.Atomic[mountMode, mountEvent]`,
-read without a lock (ADR 0014 §7); today `FS.readOnly` and `FS.diverged`.
-TLA+ `mode[m]`.
+Go types `mountMode` and `mountEvent`, in `internal/blobfs/mode.go`. Table
+`mountModes`, named `"mode"`, which is the `machine` value in log lines and
+the `Machine` of an `fsm.IllegalError`. Field `FS.mode`, an
+`*fsm.Atomic[mountMode, mountEvent]`, read without a lock, which ADR 0014
+§7's conversion put in place of `FS.readOnly` and `FS.diverged`. TLA+
+`mode[m]`.
 
 | Name | Kind | Go | TLA+ | Meaning | Status |
 |---|---|---|---|---|---|
-| `Writable` | state | `mountWritable` | `"Writable"` | accepts changes | reserved, ADR 0014 |
-| `ReadOnly` | state | `mountReadOnly` | `"ReadOnly"` | `Config.ReadOnly`; no edge leaves it | reserved, ADR 0014 |
-| `Diverged` | state | `mountDiverged` | `"Diverged"` | lost a swap; terminal | reserved, ADR 0014 |
+| `Writable` | state | `mountWritable` | `"Writable"` | accepts changes | exists, with ADR 0014 §7's conversion (the note below) |
+| `ReadOnly` | state | `mountReadOnly` | `"ReadOnly"` | `Config.ReadOnly`; no edge leaves it | exists, with ADR 0014 §7's conversion (the note below) |
+| `Diverged` | state | `mountDiverged` | `"Diverged"` | lost a swap; terminal | exists, with ADR 0014 §7's conversion (the note below) |
 | `Closed` | state | `mountClosed` | `"Closed"` | final commit done | reserved, the lifecycle ADR |
-| `Diverge` | event | `mountDiverge` | `Diverge(m)` | `Writable` to `Diverged` | reserved, ADR 0014 |
+| `Diverge` | event | `mountDiverge` | `Diverge(m)` | `Writable` to `Diverged` | exists, with ADR 0014 §7's conversion (the note below) |
 | `Close` | event | `mountClose` | `Close(m)` | its edges are the lifecycle ADR's | reserved, the lifecycle ADR |
 | `Mutable` | predicate | `(*FS).mutable` | `Mutable(m)` | nil exactly when `Writable` | exists, `internal/blobfs/fs.go` |
 
-At `043927f` the mode is `FS.readOnly` and `FS.diverged`, and `commitLocked`
-sets `FS.diverged` on any `store.ErrPrecondition`, a read-only mount's
-included. `docs/tla/CommitProtocol.tla`, checked against that commit, holds
-that as `"Diverged"` either way, so its `Diverge(m)` can leave `ReadOnly`,
-which this table, and ADR 0014 §7, do not allow. Only a read-only mount
-without `store.ReadOnly` beneath it can get that answer, so only a
-configuration without `ReadOnlyFence` reaches the case. The PR that converts
-the mode revises the spec (its reduction R11).
+Before the conversion, at `043927f`, the mode was `FS.readOnly` and
+`FS.diverged`, and `commitLocked` set `FS.diverged` on any
+`store.ErrPrecondition`, a read-only mount's included; the module held that
+as `"Diverged"` either way, so its `Diverge(m)` could leave `ReadOnly`, which
+this table does not allow. The conversion settled it as the table has it:
+`Diverge(m)` moves only a `"Writable"` mount and leaves any other mode as it
+is, since `mountModes` has that one edge and Go's `Fire` refuses the rest
+(the module's R11 and its `Revised` line of 2026-10-27). Only a read-only
+mount without `store.ReadOnly` beneath it could reach the case, so only a
+configuration without `ReadOnlyFence` does. The four entries marked exists
+were confirmed against ADR 0014 §7 as revised on 2026-10-27, which the
+conversion's PR implements, and in the code at `faeba5b`:
+`internal/blobfs/mode.go` declares `mountWritable`, `mountReadOnly`,
+`mountDiverged` and `mountDiverge`, whose `String` values are `"Writable"`,
+`"ReadOnly"`, `"Diverged"` and `"Diverge"`, and the table `mountModes` with
+its one edge, and `internal/blobfs/fs.go` holds `FS.mode` (ADR 0014,
+Assumption 41).
 
 ## V2. Root-pointer knowledge
 
@@ -112,7 +122,7 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 
 ## V3. Commit protocol
 
-`docs/tla/CommitProtocol.tla`, checked against `8415f61`. Its Go sites exist:
+`docs/tla/CommitProtocol.tla`, checked against `faeba5b`. Its Go sites exist:
 `Sync`, `loadOrInit`, `initEmpty`, `decodeSnapshot`, `commitLocked`,
 `fallbackAllowed`, `schedulePrune` and `pruneSnapshots` in
 `internal/blobfs/commit.go`; `New`,
@@ -141,7 +151,7 @@ Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
 
 | Action | Go | Meaning |
 |---|---|---|
-| `Init` | `New` | the initial state. `New` sets `FS.readOnly` from `Config.ReadOnly` and puts a read-only mount's store behind `store.ReadOnly`, and sets `FS.allowUnconditionalRoot` from `Config.AllowUnconditionalRoot`, which `FallbackAllowed` stands for (ADR 0021 §4). With `Start` `"Empty"` every mount is at `loadOrInit`'s first read; with `"Loaded"` every mount has loaded a filesystem at epoch 1 |
+| `Init` | `New` | the initial state. `New` makes `FS.mode` at `InitialMode(m)`, `ReadOnly` from `Config.ReadOnly` and `Writable` otherwise (ADR 0014 §7), puts a read-only mount's store behind `store.ReadOnly`, and sets `FS.allowUnconditionalRoot` from `Config.AllowUnconditionalRoot`, which `FallbackAllowed` stands for (ADR 0021 §4). With `Start` `"Empty"` every mount is at `loadOrInit`'s first read; with `"Loaded"` every mount has loaded a filesystem at epoch 1 |
 | `GetRoot` | `loadOrInit`'s read of the root pointer: `GetWithETag(rootKey)` with `AtomicLoad`, `Get(rootKey)` without it | reads the root pointer. With `AtomicLoad` the body and its ETag come from one response, and the ETag becomes `rootETag[m]` here (ADR 0020 §2, §4); without it the ETag waits for `HeadRoot` |
 | `HeadRoot` | `loadOrInit`'s `Head(rootKey)`, without `AtomicLoad` only | the load-race window (#89), which `AtomicLoad` closes (ADR 0020): with the member the action is never enabled, and no Go symbol performs it, so `trace.tsv` has no row for it |
 | `GetSnapshot` | `loadOrInit`'s `Get` of the snapshot the root names, and `decodeSnapshot` | a missing snapshot makes `New` fail, and `pc[m]` becomes `"Failed"` |
@@ -154,7 +164,7 @@ Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
 | `SwapOK` | `commitLocked`'s `PutIfMatch` | applied, and the reply carries the ETag |
 | `SwapReplyLost` | the same | applied, and an error is returned |
 | `SwapFailed` | the same | not applied, and an error is returned |
-| `SwapConflict` | the same | `store.ErrPrecondition`; fires `Diverge` (V1), on a read-only mount too at `043927f` |
+| `SwapConflict` | the same | `store.ErrPrecondition`; fires `Diverge` (V1), which moves only a `"Writable"` mount (the module's R11) |
 | `SwapUnsupported` | the same, and `fallbackAllowed` | `store.ErrUnsupported`. Unless `FallbackAllowed`, `commitLocked` reclaims the attempt's snapshot, which no root pointer names, once a read of the root pointer has confirmed that, and returns an error (ADR 0021 §2; the module's R12). Otherwise `FallbackPut` follows, which `store.ReadOnly` refuses when the mount is fenced, and which otherwise is applied, not applied (`"PutFailed"`), or applied with an error returned (`"FallbackReplyLost"`) |
 | `FallbackPut` | `commitLocked`'s unconditional root `Put` after it | merged with `SwapUnsupported`: an operator of that action's fallback branches, taken only where `FallbackAllowed` (ADR 0021 §4), not a step of its own |
 | `FallbackHead` | the `Head` after `FallbackPut` | only where `FallbackAllowed` |
@@ -174,7 +184,7 @@ machine states, and the rest are named here. CommitProtocol leaves
 | `snapshots` | the objects under `snapshotPrefix` | a function from the keys present to sets of commit ids: a key's set stands for that snapshot's `snapshot.Inodes`, as the commits it includes | exists |
 | `chunks` | the objects under `chunkPrefix` | a set of commit ids: a commit is in it once its chunk is stored | exists |
 | `pc[m]` | none | where `New`, `loadOrInit` or `commitLocked` has got to, as one of the strings below | reserved, ADR 0013 |
-| `mode[m]` | `FS.mode` (V1) | at `043927f`, `FS.readOnly` and `FS.diverged`: `"Diverged"` while `FS.diverged` is set, `"ReadOnly"` while only `FS.readOnly` is, and `"Writable"` otherwise (V1's note) | reserved, ADR 0014 |
+| `mode[m]` | `FS.mode` (V1) | the mode's state, as `FS.mode.State()` gives it. Before ADR 0014 §7's conversion, at `043927f`, it stood for `FS.readOnly` and `FS.diverged`: `"Diverged"` while `FS.diverged` was set, `"ReadOnly"` while only `FS.readOnly` was, and `"Writable"` otherwise (V1's note) | exists, with ADR 0014 §7's conversion (V1's note) |
 | `rootKnowledge[m]` | `FS.rootKnowledge` (V2) | | reserved, the ADR for #5 |
 | `rootETag[m]` | `FS.rootETag` | | exists |
 | `epoch[m]` | `FS.epoch` | | exists |
@@ -248,8 +258,8 @@ machine's states (rule 3).
   epoch 1, written outside the model, which every mount has loaded.
 
 **Definitions.** The module's other definitions. All reserved, ADR 0013, but
-`Mutable`, `Prunable` and `FallbackAllowed`, which exist, `Diverge`, which
-ADR 0014 reserves (V1), and `Below`, which ADR 0019 reserves.
+`Mutable`, `Prunable`, `FallbackAllowed` and `Diverge` (V1), which exist,
+and `Below`, which ADR 0019 reserves.
 
 | Definition | Meaning |
 |---|---|
@@ -282,7 +292,7 @@ ADR 0014 reserves (V1), and `Below`, which ADR 0019 reserves.
 | `CommitFails(m, k)` | `commitLocked` returns an error: back to `"Ready"`, or to `"Failed"` for `initEmpty`'s commit |
 | `FlushEffect(m, k)` | the chunk of `m`'s commit at `k`'s epoch is stored; an epoch-1 commit has none |
 | `SnapshotEffect(m, k)` | `m`'s snapshot `Put` of `k` takes effect, and with `ChunksFirst` the chunk uploads folded before it too |
-| `Diverge(m)` | V1's event, which `SwapConflict` conjoins: at `043927f`, `commitLocked`'s `diverged.Store(true)`, which makes `mode[m]` `"Diverged"`, a read-only mount's too (V1's note) |
+| `Diverge(m)` | V1's event, which `SwapConflict` conjoins: `commitLocked`'s `Fire` of `mountDiverge` on `FS.mode`, which makes a `"Writable"` mount's `mode[m]` `"Diverged"` and leaves any other mode as it is (the module's R11). Before the conversion, at `043927f`, it was `commitLocked`'s `diverged.Store(true)`, which made a read-only mount's `"Diverged"` too (V1's note) |
 | `Committed(m, k, et)` | `commitLocked`'s success path, with the root pointer's new ETag `et` |
 | `BucketVars`, `MountVars`, `PruneVars`, `GhostVars`, `Vars` | the variables, in groups, for `UNCHANGED` and for `Spec` |
 | `Next`, `Spec` | the next-state relation, and the specification, `Init /\ [][Next]_Vars` |

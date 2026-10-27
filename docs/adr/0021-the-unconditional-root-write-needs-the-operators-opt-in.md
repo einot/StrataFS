@@ -25,6 +25,14 @@ is stated, with its cost, in Assumption 22. The reclaim stays under the locks
 `commitLocked` holds, with #43 cited and the reclaim listed among the calls
 #43's fix moves (reviewer; Assumption 25). §6's first review item is
 reworded to match §2 (reviewer), and §6 adds test G6. No model change.
+**Revised:** 2026-10-27 — cross-reference only, for ADR 0014 §7's conversion
+of the mount mode: the `FS.diverged` that §2 and §5 name, and the
+`FS.readOnly` that §5 names, are since that conversion the one field
+`FS.mode`, whose `Diverged` and `ReadOnly` states they were. §2's "leaves
+`FS.diverged` as they were" reads as "leaves the mode as it is, and fires
+nothing", which ADR 0014 §7 now states and its M6 tests; §2's words stay,
+since a test cites them, and a parenthesis at §2 and at §5 says this. The
+rule, the flag, the Go change and the model are unchanged.
 **Issue:** #91
 
 ## Context
@@ -250,7 +258,9 @@ and its success path are unchanged. Its `store.ErrUnsupported` case becomes:
 - **Without the opt-in** (`!f.fallbackAllowed()`): `commitLocked` writes the
   root pointer no further, in particular it makes no `Put` and no `Head` of
   `rootKey`; leaves `FS.epoch`, `FS.rootETag`, `FS.dirty`, `FS.lastCommit` and
-  `FS.diverged` as they were; does not call `schedulePrune`; logs one record
+  `FS.diverged` as they were (since ADR 0014 §7's conversion, `FS.mode`: the
+  mode stays as it is, and no event fires); does not call `schedulePrune`;
+  logs one record
   at `Error` whose message contains `conditional writes` (Assumption 8);
   **reclaims the snapshot** the commit uploaded before the swap, as the next
   paragraph says; and returns an error for which
@@ -512,9 +522,11 @@ second for the reclaim:
   from `Config` and written by nothing else: there is no legal next step that
   depends on where it is now, so it has no named states (ADR 0018 §2), as
   `FS.readOnly` has none until ADR 0014 §7 folds it into the mode's initial
-  state. The mount mode is untouched: a refused swap leaves the mount
-  `Writable`, with `FS.diverged` unset, and no event is added to any machine
-  (Assumption 16).
+  state (done with that section's conversion: the mode starts `ReadOnly`
+  from `Config.ReadOnly`). The mount mode is untouched: a refused swap leaves
+  the mount `Writable`, with `FS.diverged` unset (since the conversion,
+  `FS.mode` left as it is, with no `Fire`), and no event is added to any
+  machine (Assumption 16).
 - **The decision is a configuration value, not a policy.** ADR 0018 §2
   reaches "a decision that allows or refuses a well-formed request". No
   caller's request asks for the root pointer to be written unconditionally:

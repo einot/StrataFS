@@ -238,6 +238,12 @@
   says that `Sync` does not notice cancellation while it waits for the gate.
   **Assumption 6** — `truncate` never waits on the budget, and since
   ADR 0012 it can wait for the commit gate.
+- **Revised:** 2026-10-27 — cross-reference only, for ADR 0014 §7's
+  conversion of the mount mode: the `f.diverged` that §5 says a failed drain
+  sets is, since that conversion, the `Diverged` state of the mount mode
+  `FS.mode`, which the failed drain enters by firing `Diverge`. §5's words
+  stay as written, since tests quote them; a parenthesis after them says
+  this. Nothing else changed.
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
 - **Affects:** `internal/blobfs`, `cmd/strata`, doc comment on `vfs.FS.Write`
 
@@ -918,6 +924,9 @@ into `NFS3ERR_IO`. Concretely, for the two failures worth naming:
   to `vfs.ErrIO`. The write whose drain *discovers* divergence therefore gets
   `NFS3ERR_IO`; the *next* write gets `NFS3ERR_STALE`, from `f.mutable()`
   (`internal/blobfs/fs.go:271-273`), because the failed drain set `f.diverged`.
+  (Since ADR 0014 §7's conversion of the mount mode, `f.diverged` is the
+  `Diverged` state of `FS.mode`, which the failed drain enters by firing
+  `Diverge`; the codes are the same.)
   This ADR describes that behaviour rather than changing it — `NFS3ERR_IO` for
   "the commit failed" is defensible, and changing an error code is
   client-visible and deserves its own decision rather than arriving inside a

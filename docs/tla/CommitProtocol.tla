@@ -10,7 +10,7 @@
 \* Go symbols that perform each action, and docs/vocabulary.md, V3, gives
 \* every name.
 \*
-\* Checked against 8415f61
+\* Checked against faeba5b
 \* Revised: 2026-10-24 -- ADR 0019 (#88): with the Fixes member
 \*   PruneBelowCurrent, a prune pass deletes only the keys that sort below the
 \*   one its commit swapped the root pointer to, and keeps the Retention newest
@@ -39,6 +39,14 @@
 \*   read of the root pointer shows it names another key (ADR 0021 section
 \*   2); the read and the Delete fold into the action (R12), and the
 \*   Leaves-out list names a 501 that took effect. Nothing else moved.
+\* Revised: 2026-10-27 -- ADR 0014 section 7, the mount mode's conversion
+\*   (#114): Diverge moves a mount from "Writable" to "Diverged" and leaves
+\*   any other mode as it is, as the Go table mountModes has that one edge
+\*   and Fire refuses the rest, where it made a read-only mount "Diverged"
+\*   too. R11 is rewritten for it, J18 says why it gets no Fixes member, and
+\*   the comments of Init, Diverge and SwapConflict name FS.mode in place of
+\*   FS.readOnly and FS.diverged. No configuration changes. Nothing else
+\*   moved.
 \*
 \* Scope
 \*   - One bucket, and the mount processes in Mounts.
@@ -114,15 +122,18 @@
 \*        and every configuration stays far below that.
 \*   R10. PruneEnd stays a step of its own, because it does not commute with
 \*        schedulePrune's read of FS.pruning.
-\*   R11. A conflict makes a read-only mount "Diverged" too (Diverge). At
-\*        043927f commitLocked sets FS.diverged on any store.ErrPrecondition,
-\*        whatever FS.readOnly is, and then refuses every commit, and
-\*        mutable() refuses a read-only mount either way. Only a
-\*        configuration without ReadOnlyFence reaches the case, since
+\*   R11. A conflict diverges a "Writable" mount only (Diverge). Since ADR
+\*        0014 section 7's conversion, commitLocked fires mountDiverge on
+\*        FS.mode, whose table mountModes has one edge, from "Writable", so
+\*        a read-only mount's mode is left "ReadOnly": Go's Fire refuses and
+\*        commitLocked logs the refusal, and the mount, still dirty, tries
+\*        its commit again as a writable mount does after any failed swap.
+\*        Only a configuration without ReadOnlyFence reaches the case, since
 \*        store.ReadOnly answers every write of a fenced mount
-\*        store.ErrUnsupported, never store.ErrPrecondition. ADR 0014
-\*        section 7 gives "ReadOnly" no edge, so the PR that converts the
-\*        mode revises this.
+\*        store.ErrUnsupported, never store.ErrPrecondition. Before the
+\*        conversion, at 043927f, commitLocked set FS.diverged on any
+\*        store.ErrPrecondition, whatever FS.readOnly was, and this module
+\*        made a read-only mount "Diverged" too.
 \*   R12. With FallbackOptIn and no opt-in, the swap's 501, commitLocked's
 \*        read of the root pointer and its Delete of the attempt's snapshot
 \*        are one action, SwapUnsupported's refusal branch, by the direct
@@ -259,6 +270,15 @@
 \*        is one where the operator's assertion of a single writer is false,
 \*        and CommitProtocol_NoFallbackOptIn and
 \*        CommitProtocol_UnconditionalTwoWriters already show what that loses.
+\*   J18. The conversion's Diverge gets no Fixes member. A member describes
+\*        the code with and without a fix and gets a MustFail configuration
+\*        that removes it (ADR 0013 section 7); the guarded Diverge fixes no
+\*        defect, and no property here tells it from the old form, since the
+\*        one configuration that reaches a read-only mount's conflict,
+\*        CommitProtocol_NoReadOnlyFence, has violated ReadOnlyNeverWrites
+\*        at its first write call, before any swap, and NoSelfDivergence
+\*        looks only at "Diverged". A member would add a configuration pair
+\*        and a calibration that show nothing (ADR 0014, Assumption 40).
 
 EXTENDS Naturals, FiniteSets
 
@@ -499,11 +519,13 @@ SnapshotEffect(m, k) ==
   /\ used' = used \cup {k}
   /\ IF "ChunksFirst" \in Fixes THEN FlushEffect(m, k) ELSE UNCHANGED chunks
 
-\* Diverge: the event of docs/vocabulary.md, V1, which at 043927f is
-\* commitLocked's diverged.Store(true) on store.ErrPrecondition. It makes a
-\* read-only mount "Diverged" too (R11).
+\* Diverge: the event of docs/vocabulary.md, V1: commitLocked's Fire of
+\* mountDiverge on FS.mode after store.ErrPrecondition (ADR 0014 section 7).
+\* The table mountModes has one edge, "Writable" to "Diverged", so a mount
+\* in any other mode is left as it is (R11).
 \* Go (trace.tsv): FS.commitLocked.
-Diverge(m) == mode' = [mode EXCEPT ![m] = "Diverged"]
+Diverge(m) ==
+  mode' = [mode EXCEPT ![m] = IF @ = "Writable" THEN "Diverged" ELSE @]
 
 \* StartPrune: schedulePrune, in the hold of FS.mu of the success path that
 \* calls it (R8): unless pruning is off or a pass is running, a pass starts
@@ -584,10 +606,11 @@ TypeOK ==
 -----------------------------------------------------------------------------
 \* The initial state.
 
-\* Init: New, before its first store call. New sets FS.readOnly from
-\* Config.ReadOnly and puts a read-only mount's store behind store.ReadOnly,
-\* and sets FS.allowUnconditionalRoot from Config.AllowUnconditionalRoot,
-\* which FallbackAllowed stands for (J17).
+\* Init: New, before its first store call. New makes FS.mode at
+\* InitialMode(m), "ReadOnly" when Config.ReadOnly is set and "Writable"
+\* otherwise (ADR 0014 section 7), puts a read-only mount's store behind
+\* store.ReadOnly, and sets FS.allowUnconditionalRoot from
+\* Config.AllowUnconditionalRoot, which FallbackAllowed stands for (J17).
 \* With Start = "Empty" the bucket is empty and every mount is at
 \* loadOrInit's first read. With Start = "Loaded" the bucket holds a
 \* filesystem at epoch 1, written outside the model, which every mount has
@@ -837,9 +860,9 @@ SwapFailed(m) ==
                  PruneVars, acked, used, overtaken, crashes>>
 
 \* SwapConflict: store.ErrPrecondition, from errorFor's 412 or 409 or from
-\* Local's ETag check, and commitLocked's diverged.Store(true), which is
-\* Diverge. With SwapConflict409 it may also come while the condition holds.
-\* A read-only mount diverges too (R11).
+\* Local's ETag check, and commitLocked's Fire of mountDiverge on FS.mode,
+\* which is Diverge. With SwapConflict409 it may also come while the
+\* condition holds. A read-only mount's mode is left as it is (R11).
 \* Go (trace.tsv): FS.commitLocked; errorFor; Local.PutIfMatch.
 SwapConflict(m) ==
   /\ NextStep(m) = "Swap"

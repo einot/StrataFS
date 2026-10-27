@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"strata/internal/fsm"
 	"strata/internal/store"
 	"strata/internal/vfs"
 )
@@ -87,7 +88,6 @@ type FS struct {
 	commitInterval time.Duration
 	ownerUID       uint32
 	ownerGID       uint32
-	readOnly       bool
 	skipVerify     bool
 
 	// allowUnconditionalRoot is Config.AllowUnconditionalRoot. New sets it
@@ -135,10 +135,13 @@ type FS struct {
 	dirty      bool
 	lastCommit time.Time
 
-	// diverged is read without a lock, by mutable() ahead of every change, so
-	// it is atomic rather than guarded by mu. commitLocked sets it once, on
-	// store.ErrPrecondition, and nothing clears it (ADR 0003 §5).
-	diverged atomic.Bool
+	// mode is the mount mode. It is read without a lock, by mutable() ahead of
+	// every change, so it is an fsm.Atomic rather than guarded by mu. Every
+	// Fire on it is made in commitLocked, holding mu for writing from Sync or
+	// from initEmpty before the FS is shared. Its one edge, Diverge, only
+	// narrows and is caused by the store's answer, so it needs no policy
+	// (ADR 0018 §5). New makes it and nothing reassigns it (ADR 0014 §7).
+	mode *fsm.Atomic[mountMode, mountEvent]
 
 	// retention is how many namespace snapshots to keep behind the current
 	// one; pruning guards against a busy mount filling the bucket.
@@ -264,11 +267,18 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 
 	// A read-only FS reaches its bucket only through the wrapper, so the
 	// refusal sits below every write path, present or future, rather than
-	// resting on each one checking readOnly. Building it calls nothing on the
+	// resting on each one checking the mode. Building it calls nothing on the
 	// store, so the checks above still come first (ADR 0011 §3, ADR 0009 §2).
 	st := cfg.Store
 	if cfg.ReadOnly {
 		st = store.ReadOnly{Store: cfg.Store}
+	}
+
+	// The mode is made before loadOrInit, since initEmpty's commit can
+	// diverge, and making it calls nothing on the store (ADR 0014 §7).
+	initial := mountWritable
+	if cfg.ReadOnly {
+		initial = mountReadOnly
 	}
 
 	host, _ := os.Hostname()
@@ -279,8 +289,8 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 		commitInterval: cfg.CommitInterval,
 		ownerUID:       cfg.OwnerUID,
 		ownerGID:       cfg.OwnerGID,
-		readOnly:       cfg.ReadOnly,
 		skipVerify:     cfg.SkipChunkVerification,
+		mode:           fsm.NewAtomic(mountModes, initial),
 		retention:      cfg.SnapshotRetention,
 		open:           make(map[uint64]*openFile),
 		budget:         newBudget(cfg.MaxDirtyBytes, cfg.Log),
@@ -329,7 +339,7 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 
 // Run drives background commits until ctx is cancelled.
 func (f *FS) Run(ctx context.Context) {
-	if f.readOnly {
+	if f.mode.State() == mountReadOnly {
 		<-ctx.Done()
 		return
 	}
@@ -436,17 +446,23 @@ func inGroup(c vfs.Caller, gid uint32) bool {
 	return false
 }
 
-// mutable reports whether the mount accepts changes at all.
+// mutable reports whether the mount accepts changes at all, from the mode
+// alone: nil for Writable, vfs.ErrROFS for ReadOnly and vfs.ErrStale for
+// Diverged. Any other value answers vfs.ErrServerFault, so a state added later
+// is refused until its ADR maps it (ADR 0014 §7).
 //
 // TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) mutable() error {
-	if f.readOnly {
+	switch f.mode.State() {
+	case mountWritable:
+		return nil
+	case mountReadOnly:
 		return vfs.ErrROFS
-	}
-	if f.diverged.Load() {
+	case mountDiverged:
 		return vfs.ErrStale
+	default:
+		return vfs.ErrServerFault
 	}
-	return nil
 }
 
 const maxNameLen = 255
@@ -558,7 +574,7 @@ func (f *FS) Access(ctx context.Context, c vfs.Caller, h vfs.Handle, want uint32
 	if n.isDir() && permitted(n, c, 1) {
 		granted |= vfs.AccessLookup
 	}
-	if !f.readOnly && permitted(n, c, 2) {
+	if f.mode.State() != mountReadOnly && permitted(n, c, 2) {
 		granted |= vfs.AccessModify | vfs.AccessExtend
 		if n.isDir() {
 			granted |= vfs.AccessDelete

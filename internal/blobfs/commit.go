@@ -40,7 +40,7 @@ func (f *FS) loadOrInit(ctx context.Context) error {
 	// instead of failing and diverging.
 	raw, etag, err := f.store.GetWithETag(ctx, rootKey)
 	if errors.Is(err, store.ErrNotFound) {
-		if f.readOnly {
+		if f.mode.State() == mountReadOnly {
 			return fmt.Errorf("blobfs: %s holds no filesystem, and a read-only mount does not create one", storeName())
 		}
 		return f.initEmpty(ctx)
@@ -186,9 +186,13 @@ func (f *FS) Sync(ctx context.Context) error {
 // changed a chunk list without the commit gate, and is logged as the bug it is
 // rather than committed as a silent exposure of removed bytes.
 //
+// It also refuses, storing nothing, once the mode is Diverged. It is the mode's
+// one writer: a swap that fails with store.ErrPrecondition fires Diverge, and
+// no other outcome of the swap touches the mode (ADR 0014 §7).
+//
 // TLA+: docs/tla/CommitProtocol.tla PutSnapshot, SwapOK, SwapReplyLost, SwapFailed, SwapConflict, SwapUnsupported, FallbackPut, FallbackHead, Diverge
 func (f *FS) commitLocked(ctx context.Context) error {
-	if f.diverged.Load() {
+	if f.mode.State() == mountDiverged {
 		return errors.New("filesystem diverged: another writer committed to this bucket; remount to continue")
 	}
 	for id, of := range f.open {
@@ -243,7 +247,16 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		// Someone else moved the root pointer. Our in-memory tree is built on a
 		// namespace that is no longer current, so continuing would discard
 		// their work. Refuse to write any further rather than corrupt.
-		f.diverged.Store(true)
+		//
+		// A Fire that fails changes nothing else: the swap failed whatever the
+		// mode was, so the conflict is still logged and returned. No build
+		// reaches it today, since a read-only mount's swap answers
+		// store.ErrUnsupported and a diverged one is refused above (ADR 0014
+		// §3, §7).
+		if from, _, ferr := f.mode.Fire(mountDiverge); ferr != nil {
+			f.log.Error("mount mode: illegal transition",
+				"machine", mountModes.Name(), "from", from.String(), "event", mountDiverge.String(), "err", ferr)
+		}
 		f.log.Error("commit conflict: another writer owns this bucket",
 			"our_epoch", f.epoch, "attempted", epoch)
 		return errors.New("commit conflict: another writer owns this bucket; remount to continue")

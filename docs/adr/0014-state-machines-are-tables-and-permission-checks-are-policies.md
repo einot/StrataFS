@@ -11,6 +11,17 @@ present form" holds for each thing it covers until a change brings that thing
 under the rules (ADR 0018 §2, §3). §1, §3 and §9 each gain a sentence pointing
 to ADR 0018. Nothing else here changes, §1's text
 included, and every test this ADR pins stands.
+**Revised:** 2026-10-27 — §7, for the conversion it plans, against the code
+at `37abe5d`: ADR 0021's refusal of a swap answered 501 fires nothing, and
+the fallback and `case err != nil` fire nothing either; `commitLocked`'s one
+`Fire`, its failed-`Fire` record and what it returns are stated; the field's
+doc comment, the file `internal/blobfs/mode.go`, and the model's change
+(`Diverge` leaves any mode but `Writable` as it is, R11 rewritten, no
+`Fixes` member) are pinned; the tests that name the old fields are listed as
+of `37abe5d`; §11 adds M6 to M9, names the test file and extends what review
+checks; Assumptions 36 to 42 are added. The type, the table, the `String`
+values, the initial state, `New`'s ordering and `mutable()`'s mapping are
+unchanged, and every test this ADR pins stands.
 **Issue:** #114
 
 ## Context
@@ -576,7 +587,11 @@ This is for the PR that wires the policy. It changes no behaviour.
 
 ### 7. The mount mode machine
 
-This is for the PR that converts the mount mode. Pinned:
+This is for the PR that converts the mount mode: #114's first conversion.
+The section was revised on 2026-10-27 against the code at `37abe5d`, which
+has ADR 0019, ADR 0020 and ADR 0021 in it (Assumption 36); the `Revised`
+line above says what moved. Pinned, in a new file `internal/blobfs/mode.go`,
+whose `Spec:` line cites §3 and §7 (Assumption 37):
 
 ```go
 type mountMode uint32
@@ -595,38 +610,115 @@ var mountModes = fsm.NewTable("mode",
     fsm.Edge[mountMode, mountEvent]{From: mountWritable, On: mountDiverge, To: mountDiverged})
 ```
 
-- `String()` gives `"Writable"`, `"ReadOnly"`, `"Diverged"` and `"Diverge"`
-  (vocabulary V1). Any other value gives `"mountMode(<n>)"` or
-  `"mountEvent(<n>)"`.
+- `String()`, with value receivers (§3), gives `"Writable"`, `"ReadOnly"`,
+  `"Diverged"` and `"Diverge"` (vocabulary V1). Any other value gives
+  `"mountMode(<n>)"` or `"mountEvent(<n>)"`, `n` in decimal.
 - `FS` gains `mode *fsm.Atomic[mountMode, mountEvent]`, read without a lock:
-  - `New` makes it before `loadOrInit`, since `initEmpty`'s commit can
-    diverge;
-  - it starts at `mountReadOnly` if `Config.ReadOnly` is set, and at
-    `mountWritable` otherwise.
-- `FS.readOnly` and `FS.diverged` are removed. No test reads either field:
-  the tests name `f.diverged` only in a comment and in failure messages that
-  quote or cite ADR 0003 §5.
-- Its readers:
-  - `mutable()` returns:
+  - `New` makes it with `fsm.NewAtomic(mountModes, initial)` after its checks
+    on `cfg` and before `loadOrInit`, since `initEmpty`'s commit can diverge
+    (M8). Making it calls nothing on the store, so ADR 0009 §2 and
+    ADR 0011 §2 are unaffected; it sits where `allowUnconditionalRoot` is
+    set, for the same reason (ADR 0021 §2).
+  - `initial` is `mountReadOnly` if `Config.ReadOnly` is set, and
+    `mountWritable` otherwise (Assumption 23).
+  - Nothing reassigns it. Its doc comment says that it is read without a
+    lock; that every `Fire` on it is made in `commitLocked`, holding `FS.mu`
+    for writing from `Sync` or from `initEmpty` before the FS is shared; and
+    that `Diverge` needs no policy (ADR 0018 §5).
+- `FS.readOnly` and `FS.diverged` are removed. No test reads either field.
+  At `37abe5d` the tests name them only in text no compiler reads:
+  `f.diverged` in a failure message of `internal/blobfs/backpressure_test.go`
+  and in a comment and a failure message of
+  `internal/nfs/backpressure_test.go`, each quoting or citing ADR 0003 §5,
+  and `FS.diverged` in a comment of `internal/blobfs/swap_fallback_test.go`
+  that lists what ADR 0021 §6 leaves to review. None changes.
+- **Its one writer.** `commitLocked`'s `store.ErrPrecondition` case fires
+  `mountDiverge`, and nothing else fires anything. In particular the other
+  cases of its switch on the swap's error leave the mode as it is and fire
+  nothing: `store.ErrUnsupported` without the opt-in, which is ADR 0021 §2's
+  refusal (M6); `store.ErrUnsupported` with it, the fallback; and
+  `case err != nil`. So does every success path, and every other function.
+- **Its readers:**
+  - `mutable()` reads `f.mode` and nothing else, and returns:
     - nil for `mountWritable`;
     - `vfs.ErrROFS` for `mountReadOnly`;
     - `vfs.ErrStale` for `mountDiverged`;
     - `vfs.ErrServerFault` for any other value.
 
     So it is nil exactly when the mode is `Writable` (vocabulary V1), and a
-    state added later is refused until its ADR maps it.
-  - `commitLocked` refuses, as now, when the mode is `mountDiverged`. On
-    `store.ErrPrecondition` it fires `mountDiverge`, logs a failed `Fire` at
-    `Error` (§9), then logs its `"commit conflict"` record and returns as now.
-  - `Access` masks on `mountReadOnly` only, as now. Whether `Diverged` masks
-    too is #97's to decide.
-  - `Run` starts no committer on `mountReadOnly`.
-  - `loadOrInit` refuses a bucket with no root pointer on `mountReadOnly`.
+    state added later is refused until its ADR maps it (Assumption 24).
+  - `commitLocked` refuses at its top, as now, when `f.mode.State()` is
+    `mountDiverged`, storing nothing (M7). On `store.ErrPrecondition` it
+    calls `f.mode.Fire(mountDiverge)`. A `Fire` that fails is logged at
+    `Error` with §9's keys `machine`, `from`, `event` and `err`, and nothing
+    else happens on it: `commitLocked` then logs its `"commit conflict"`
+    record and returns the error it returns today, whether the `Fire`
+    succeeded or not, since the swap failed whatever the mode was
+    (Assumption 38). In this build the failed `Fire` is unreachable: a
+    read-only mount's swap is refused by `store.ReadOnly` with
+    `store.ErrUnsupported`, never `store.ErrPrecondition` (ADR 0011 §3), and
+    a diverged mount is refused at the top of the same hold. It is kept
+    because §3 asks it of every owner, and a later edge or a later store
+    could reach it.
+  - `Access` masks on `mountReadOnly` only, as now: `f.mode.State() !=
+    mountReadOnly` where `!f.readOnly` stood, so a `Diverged` mount is not
+    masked, as now. Whether it should be is #97's to decide.
+  - `Run` starts no committer when `f.mode.State()` is `mountReadOnly`.
+  - `loadOrInit` refuses a bucket with no root pointer when `f.mode.State()`
+    is `mountReadOnly` (ADR 0011 §2). Its refusal of a root pointer with no
+    ETag (ADR 0020 §2) reads no mode.
   - `New` still puts the store behind `store.ReadOnly`, decided from
-    `Config.ReadOnly`.
-- That PR also adds `Revised` lines to ADR 0003 (for §5's `f.diverged`) and to
-  ADR 0013 (for §4's and Assumption 9's `FS.diverged`). They are
-  cross-references only, so the tests that quote ADR 0003 §5 stay valid.
+    `Config.ReadOnly` and not from the mode (ADR 0011 §3).
+- **Logging** is §9's: the mode adds no record of a legal `Fire`, and a
+  failed one is logged as above.
+- **ADR 0018.** The mount mode is security-relevant, since `mutable()` and
+  `Access`'s mask read it, and its one edge only narrows and is caused by a
+  store's answer, so no policy guards it and no request is named
+  (ADR 0018 §5, which says so at `2d7ff34`; nothing here changes it). No
+  edge widens: `ReadOnly` and `Diverged` have no edge out. Every `Fire` is
+  made holding `FS.mu` for writing or before the FS is shared, which is the
+  hold ADR 0018 §5 would ask of a widening edge added later. The conversion
+  grants no exemption, and E11 and E12 stand, since the gate and the mask
+  still judge the mount and not the caller (ADR 0018 §4). ADR 0018 itself
+  needs no revision: its §4 and §5 were written for the converted form.
+- **The model.** `docs/tla/CommitProtocol.tla`'s `mode[m]` already holds the
+  machine (vocabulary V1, V3). The conversion changes one operator and the
+  comments that named the fields, under a `Revised` line of 2026-10-27:
+  - `Diverge(m)` moves a mount from `"Writable"` to `"Diverged"` and leaves
+    any other mode as it is, as `mountModes` has that one edge and Go's
+    `Fire` refuses the rest. Before, it made a read-only mount `"Diverged"`
+    too, as `commitLocked` did at `043927f` (the module's old R11, which
+    deferred the change to this PR). R11 is rewritten for it.
+  - It gets no `Fixes` member (the module's J18; Assumption 40). Only a
+    configuration without `ReadOnlyFence` reaches a read-only mount's
+    conflict, since a fenced mount's swap never answers
+    `store.ErrPrecondition`, and the one such configuration,
+    `CommitProtocol_NoReadOnlyFence`, is MustFail on `ReadOnlyNeverWrites`,
+    which it violates at its first write call, before any swap. So no row's
+    outcome changes, and no configuration is added or flipped.
+  - The comments of `Init`, `Diverge` and `SwapConflict` name `FS.mode`
+    where they named `FS.readOnly` and `FS.diverged`.
+  - `docs/tla/trace.tsv`: the `Mutate` row for `FS.mutable` says its locks
+    are none because the mode is an `fsm.Atomic` read in one atomic load,
+    and that row, the `Diverge` row and the `Init` row add
+    `ADR 0014 section 7` to what decides them. No row is added or removed:
+    the table is no action, and `FS.commitLocked`, `FS.mutable` and `New`
+    keep their rows.
+  - The module's `Checked against` line, and the commits at which
+    vocabulary V1 and V3 record the Go names as confirmed, are set once the
+    conversion's code is on the branch, by the architect, as ADR 0013 §8
+    has it for a refactor of traced code (Assumption 41).
+- **Cross-references.** This PR adds `Revised` lines to ADR 0003 (§5's
+  `f.diverged`), ADR 0013 (§4's and Assumption 9's `FS.diverged`) and
+  ADR 0021 (§2's and §5's `FS.diverged` and `FS.readOnly`), each saying that
+  the field named is now the mode's state. They are cross-references only,
+  and the quoted words stay, so the tests that quote ADR 0003 §5 and
+  ADR 0021 §2 stay valid. `docs/vocabulary.md` V1's entries move to exists,
+  and V3's rows that described the two fields now describe `FS.mode`.
+- **Not user-visible.** No client or deployment sees a change: the codes
+  `mutable()` answers, the records `commitLocked` makes on a conflict, and
+  `Config.ReadOnly`'s meaning (ADR 0011 §4) are as they were. No `CHANGES`
+  entry (Assumption 39).
 
 ### 8. Machines decided elsewhere
 
@@ -819,23 +911,59 @@ which a filed defect will change:
   POSIX `futimens` gives [EACCES] for a time set to now without write access,
   and [EPERM] for any other time.
 
-**`blobfs`, for the PR that does §7** (package `blobfs`):
+**`blobfs`, for the PR that does §7** (package `blobfs`, in one new file,
+`internal/blobfs/mount_mode_test.go`; Assumption 42). The harness is
+ADR 0011 §7's: a `*store.Local` under the test's temporary directory, behind
+a fake where a test needs one; `SnapshotRetention` −1; `MaxDirtyBytes` −1
+where a `Write` is made (ADR 0003 §1); every `New` and every call in a
+goroutine that recovers a panic and is waited for under a bound. A test may
+use `rootKey` and `snapshotPrefix` (ADR 0011 §7), `f.mode`, `mountModes`,
+and the types and constants §7 pins; it may not read or write any other
+unexported field. No existing test file changes.
 
 - **M1.** `New` with `Config.ReadOnly` gives `f.mode.State() == mountReadOnly`,
   on a bucket that holds a filesystem (ADR 0011 §2); without it,
-  `mountWritable`.
+  `mountWritable`, on an empty bucket and on one that holds a filesystem.
 - **M2.** `mountModes.Name()` is `"mode"`, and `mountModes.Edges()` is exactly
   `[]fsm.Edge[mountMode, mountEvent]{{From: mountWritable, On: mountDiverge, To: mountDiverged}}`.
-- **M3.** A root-pointer swap that fails with `store.ErrPrecondition` leaves
-  the mode at `mountDiverged`, and a later `Write` answers `vfs.ErrStale`. A
-  read-only mount's mode stays `mountReadOnly`, and its `Write` answers
-  `vfs.ErrROFS`.
+- **M3.** On a writable mount with one commit behind it and a change since,
+  a `Sync` whose swap of `rootKey` the fake fails with
+  `store.ErrPrecondition` returns a non-nil error and leaves
+  `f.mode.State() == mountDiverged`; a `Write` after it answers
+  `vfs.ErrStale`, and a `Create` of a fresh name does too. On a read-only
+  mount of a bucket that holds a filesystem, a `Write` answers
+  `vfs.ErrROFS`, a `Sync` returns nil (ADR 0011 §4), and `f.mode.State()`
+  is `mountReadOnly` after both.
 - **M4.** `TestWriteRacingADivergingCommitIsNotADataRace`, in
   `internal/blobfs/diverged_race_test.go` (which landed with #48's fix), is
   unchanged and passes under `-race`.
 - **M5.** `String()` gives `"Writable"`, `"ReadOnly"`, `"Diverged"` and
-  `"Diverge"`; `mountMode(0).String()` is `"mountMode(0)"`, and
-  `mountEvent(0).String()` is `"mountEvent(0)"`.
+  `"Diverge"`; `mountMode(0).String()` is `"mountMode(0)"`,
+  `mountMode(4).String()` is `"mountMode(4)"`, and `mountEvent(0).String()`
+  is `"mountEvent(0)"`.
+- **M6.** On a writable mount with one commit behind it and a change since,
+  without `Config.AllowUnconditionalRoot`, a `Sync` whose swap of `rootKey`
+  the fake answers with `store.ErrUnsupported` returns a non-nil error for
+  which `errors.Is(err, store.ErrUnsupported)` holds (ADR 0021 §2), and
+  leaves `f.mode.State() == mountWritable`; a `Create` of a fresh name after
+  it returns nil. The fake passes every other call through, the `Get` of
+  `rootKey` and the `Delete` of the refused commit's snapshot included.
+- **M7.** After M3's divergence, a second `Sync` returns a non-nil error, and
+  the fake counted no `Put`, `PutIfMatch` or `Delete` of any key after the
+  swap that failed: a diverged mount's commit is refused before it stores
+  anything.
+- **M8.** `New`, writable, on an empty bucket behind a fake whose first
+  `PutIfMatch` of `rootKey` fails with `store.ErrPrecondition`, returns a nil
+  `*FS` and a non-nil error, and does not panic: the machine exists before
+  `initEmpty`'s commit can fire `mountDiverge`. What the bucket then holds
+  is not pinned. An `*FS` that such a `New` returned is never used
+  (ADR 0011 §7).
+- **M9.** `mutable()` over every value. For an `*FS` built by a literal that
+  sets only `mode`, to `fsm.NewAtomic(mountModes, m)`, `mutable()` returns
+  nil for `mountWritable`, `vfs.ErrROFS` for `mountReadOnly`,
+  `vfs.ErrStale` for `mountDiverged`, and `vfs.ErrServerFault` for
+  `mountMode(0)` and `mountMode(4)`, each compared with `errors.Is`.
+  `mutable()` reads nothing else (§7), so the literal is enough.
 
 **`blobfs`, for the PR that does §6** (package `blobfs`):
 
@@ -868,6 +996,21 @@ the wrong type, since `blobfs` relies on those refusals (§6).
 - that nothing is exported beyond §2 and §5;
 - that `f.perm` is written only by `New`;
 - that a failed `Fire` is logged.
+
+For the PR that does §7, review also shows:
+
+- that `FS.readOnly` and `FS.diverged` are gone, and that nothing writes
+  the mode but `commitLocked`'s one `Fire`: ADR 0021's refusal, the
+  fallback and `case err != nil` fire nothing (M6 samples the first);
+- that a failed `Fire` is logged with §9's keys and the `"commit conflict"`
+  record and the error still follow, since no test reaches it;
+- that `mutable()`, `Access`, `Run` and `loadOrInit` read the mode where §7
+  says, and nothing else reads it;
+- that `f.mode` is made before `loadOrInit` and never reassigned, and that
+  its doc comment says what §7 asks;
+- that `FS.mutable`, `FS.commitLocked` and `New` still perform `Mutate`,
+  `Diverge` and `Init` holding the locks their `trace.tsv` rows give
+  (ADR 0013 §8), and that the module's `Diverge` is `mountModes`.
 
 ## Assumptions
 
@@ -1016,6 +1159,43 @@ says how it bears on this ADR.
     `err` is the key the repository's other `Error` records use for an error
     (ADR 0003 §7; the committer's records). The message is left open because
     only review checks the record (§11).
+36. **Read, not run, at `37abe5d`** (§7). The 2026-10-27 revision of §7 was
+    checked by reading the code at `37abe5d`, the commit the conversion's
+    branch was cut from; nothing was run. The session's own reading of that
+    code, given with the task, agreed with mine on every reader and writer
+    of the two fields.
+37. **One new file, `internal/blobfs/mode.go`** (§7), for the types, their
+    `String` methods and the table, next to each other as §3 asks. The name
+    is pinned so that coder, test-author and review agree on where the
+    machine is; nothing else depends on it.
+38. **A failed `Fire` changes nothing that `commitLocked` returns** (§7).
+    The swap failed with `store.ErrPrecondition` whatever the mode was, so
+    the error the caller needs is the commit conflict, as today; the failed
+    `Fire` is a second fact, logged as §3 and §9 ask, not a replacement for
+    the first. Its message text is not pinned (Assumption 35).
+39. **No `CHANGES` entry for the conversion** (§7): nothing a client or a
+    deployment sees changes. The one new log record, for a failed `Fire`,
+    is unreachable in this build.
+40. **No `Fixes` member for the model's `Diverge`** (§7). A member describes
+    the code with and without a fix, and gets a MustFail configuration that
+    removes it (ADR 0013 §7). The guarded `Diverge` fixes no defect and is
+    told from the old form by no property: the only configuration that
+    reaches a read-only mount's conflict has violated `ReadOnlyNeverWrites`
+    before any swap, and `NoSelfDivergence` looks only at `"Diverged"`. A
+    member would add a configuration pair and a calibration that show
+    nothing. The module's J18 says the same.
+41. **The commits are recorded after the code lands** (§7). `Checked
+    against` names the commit at which the trace was checked against the
+    Go code (ADR 0013 §6), and vocabulary V1's exists names the commit the
+    name was confirmed at; neither exists while this revision is written,
+    so the entries say what they will be, and the architect's pass after
+    coder's commit sets them, before review, as ADR 0021's did at
+    `8415f61`.
+42. **The test file, and M9's form** (§11). The M-tests go in one file,
+    named so that coder finds them. M9 builds an `*FS` by a literal, which
+    is a unit test of `mutable()` over a machine made once, not the
+    reassignment §3 forbids, and is sound because `mutable()` reads nothing
+    but `f.mode` (§7).
 
 ## Alternatives considered
 
