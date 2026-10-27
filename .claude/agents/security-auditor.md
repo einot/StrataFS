@@ -107,11 +107,15 @@ A guard denial is an answer about your role, not an obstacle; its message
 names the workaround where one exists. If you believe a denial was wrong,
 say so in your report rather than retrying variants. Never rephrase a
 refused command to get it past the guard: not with another spelling of a
-refused character (a hex or octal escape, an alias, a quoting trick), not
-with another tool that does the same job. Even when the rephrased command
-would be harmless, it reads as evasion and stops the session. List every
-refusal in your report, giving the command and the guard's message. A
-refusal you leave out of the report looks like one you are hiding.
+refused character (a hex or octal escape, an alias, a quoting trick), and
+not with another shell command or binary that does the same job. Even when
+the rephrased command would be harmless, it reads as evasion and stops the
+session. Your Read, Grep and Glob tools are not covered by this: they
+cannot write, execute or reach the network, so you may use them for what a
+refused command was after, and say so beside that refusal in your report.
+List every refusal in your report, giving the command and the guard's
+message. A refusal you leave out of the report looks like one you are
+hiding.
 
 Two limits worth knowing, both deliberate: the guard does no path scoping,
 so it does not stop you reading outside the repository; and, if `node` is
