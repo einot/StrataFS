@@ -210,15 +210,17 @@ The last one is the one that matters. An endpoint that *accepts* a write
 conditioned on a superseded ETag cannot protect the root pointer, so two mounts
 of the same bucket will silently overwrite each other's commits; strata still
 runs there, and you must guarantee a single writer yourself. An endpoint that
-answers a conditional write with HTTP 501 (`not supported by this endpoint` in
-the three rows above) gives no protection either, and there strata fails
-closed: a commit whose conditional write is refused fails and writes nothing,
-so by default such an endpoint commits nothing, a filesystem cannot be created
-on it, and `-check` reports it as not working. If you can guarantee a single
-writer, pass `-allow-unconditional-root`: strata then writes the root pointer
-unconditionally wherever the store refuses a condition, `-check` with the same
-flag passes the endpoint with that caveat, and a second mount of the bucket
-goes undetected
+answers a conditional write with HTTP 501 (a conditional-write row above that
+reads `not supported`) gives no protection either, and there strata
+fails closed: a commit whose conditional write is answered 501 fails, writes
+nothing and deletes the snapshot it had uploaded, so by default strata commits
+nothing on such an endpoint (one that honours `If-None-Match` but not
+`If-Match` gets the empty filesystem's first commit and nothing after it), and
+`-check` reports it as not working. If you can guarantee a single writer, pass
+`-allow-unconditional-root`: strata then writes the root pointer
+unconditionally wherever the store answers a conditional write with HTTP 501,
+`-check` with the same flag passes the endpoint with that caveat, and a second
+mount of the bucket goes undetected
 ([ADR 0021](docs/adr/0021-the-unconditional-root-write-needs-the-operators-opt-in.md)).
 
 ## Tests

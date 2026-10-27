@@ -33,6 +33,12 @@
 \*   commitLocked as it is at 247a276 and a mount whose operator set
 \*   Config.AllowUnconditionalRoot, which behave alike (J17). The Scope and
 \*   Leaves-out lists and R7 say so. Nothing else moved.
+\* Revised: 2026-10-25 -- ADR 0021, on review: SwapUnsupported's refusal
+\*   branch also removes the attempt's key from snapshots, the Delete by which
+\*   commitLocked reclaims the snapshot a refused commit uploaded, after a
+\*   read of the root pointer shows it names another key (ADR 0021 section
+\*   2); the read and the Delete fold into the action (R12), and the
+\*   Leaves-out list names a 501 that took effect. Nothing else moved.
 \*
 \* Scope
 \*   - One bucket, and the mount processes in Mounts.
@@ -69,6 +75,10 @@
 \*   - A 501 answered for a reason other than the condition: here a 501 is
 \*     the store's answer to the condition, and commitLocked treats every
 \*     501 on the swap alike (ADR 0021).
+\*   - A swap answered 501 that took effect: here a 501 changes no object
+\*     (J4), so the read that guards the refused commit's Delete (ADR 0021
+\*     section 2) always finds the root pointer naming another key, and the
+\*     Delete always follows (R12).
 \*   - A Put or a Delete taking effect more than once through the retries
 \*     of S3.do, with other calls in between: here a call takes effect at
 \*     most once, at its own step (ADR 0013 Assumption 5).
@@ -113,6 +123,20 @@
 \*        store.ErrUnsupported, never store.ErrPrecondition. ADR 0014
 \*        section 7 gives "ReadOnly" no edge, so the PR that converts the
 \*        mode revises this.
+\*   R12. With FallbackOptIn and no opt-in, the swap's 501, commitLocked's
+\*        read of the root pointer and its Delete of the attempt's snapshot
+\*        are one action, SwapUnsupported's refusal branch, by the direct
+\*        argument ADR 0013 section 4 allows. The read's answer is fixed: the
+\*        501 changed nothing (J4), and no write of another mount can make
+\*        the root pointer name this mount's key, which carries its own
+\*        nonce, so the Delete always follows. Of the steps another mount can
+\*        take between the calls, only a PruneList that lists the key fails
+\*        to commute with the Delete, and moving the Delete before it changes
+\*        only whether that key and, through Kept, at most one older key
+\*        below that pass's own key appear in its doomed set; no root pointer
+\*        names either, so no property here tells the two orders apart. A
+\*        crash between the calls leaves the orphan, as a crash before the
+\*        swap would, and so does a failed Delete (J14).
 \*
 \* Assumptions (judgement calls, not requirements)
 \*   J1.  Commit ids are lineage ids, [writer, epoch]. They are unique,
@@ -833,9 +857,10 @@ SwapConflict(m) ==
 \* ReadOnly.PutIfMatch. store.ReadOnly refuses the swap when the mount is
 \* fenced, and the fallback's Put with it, so nothing reaches the bucket
 \* either way. Otherwise the call that answered 501 reached the bucket and
-\* changed nothing, and then, unless FallbackAllowed, commitLocked returns an
-\* error at once, with no further call (ADR 0021 section 2); or, where
-\* FallbackAllowed, the fallback's unconditional Put of the root pointer
+\* changed nothing, and then, unless FallbackAllowed, commitLocked reclaims
+\* the attempt's snapshot, which no root pointer names, and returns an error
+\* (ADR 0021 section 2; R12); or, where FallbackAllowed, the fallback's
+\* unconditional Put of the root pointer
 \* follows (FallbackPut, R7), which reaches the bucket and is not applied
 \* (PutFailed), is applied, or is applied and answers with an error
 \* (FallbackReplyLost), which leaves rootETag as it was.
@@ -851,8 +876,9 @@ SwapUnsupported(m) ==
        \/ /\ ~Fenced(m)
           /\ ~FallbackAllowed
           /\ WriteCall(m)
+          /\ snapshots' = [x \in DOMAIN snapshots \ {k} |-> snapshots[x]]
           /\ CommitFails(m, k)
-          /\ UNCHANGED <<BucketVars, acked, used, overtaken>>
+          /\ UNCHANGED <<bucketRoot, chunks, acked, used, overtaken>>
        \/ /\ ~Fenced(m)
           /\ FallbackAllowed
           /\ "PutFailed" \in Faults

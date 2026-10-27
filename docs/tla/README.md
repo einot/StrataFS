@@ -62,9 +62,10 @@ Each module opens with a header comment that states:
   stand for a run of Go steps, and its **assumptions**: the judgement calls
   the model rests on, which no requirement made.
 
-`CommitProtocol.tla` has three `Revised:` lines, for ADR 0019's fix of #88,
-ADR 0020's fix of #89 and ADR 0021's fix of #91. Each action's comment names
-the Go symbols that `trace.tsv` gives it.
+`CommitProtocol.tla` has four `Revised:` lines: for ADR 0019's fix of #88,
+for ADR 0020's fix of #89, and two for ADR 0021's fix of #91, the second from
+its review. Each action's comment names the Go symbols that `trace.tsv` gives
+it.
 
 Every module declares the constant `Fixes`, the set of fixes a configuration
 includes, and its actions consult it, so one module describes the code with

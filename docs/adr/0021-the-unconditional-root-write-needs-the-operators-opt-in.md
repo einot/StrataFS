@@ -2,6 +2,19 @@
 
 **Status:** Accepted
 **Date:** 2026-10-25
+**Revised:** 2026-10-25 — on review, before merge, three findings. §2's
+`-check` rule makes a conditional-write probe required, without the flag,
+whenever *that* probe is answered 501, not only the first, with every row's
+name and detail as they were, so an endpoint that honours `If-None-Match` but
+answers `If-Match` 501 fails `-check` as its mount fails to commit (reviewer;
+Assumption 10). §2's refusal now reclaims the
+snapshot the refused commit uploaded, after one read of the root pointer
+confirms it names another key, so a store that answers every swap 501 does not
+fill the bucket with orphans (security-auditor; Assumptions 21 to 24; the
+module's R12, and a rerun of `CommitProtocol_Fallback`). `README.md`'s wording
+of what the opt-in covers is the reviewer's (its second finding). §3, §4, §5
+and §6 follow; §6 adds tests G1 to G5 and C4. The rule in §1, the flag, and
+the rest of the Go change are unchanged.
 **Issue:** #91
 
 ## Context
@@ -224,21 +237,48 @@ nothing (Assumption 6).
 **`commitLocked`.** Its `store.ErrPrecondition` case, its `case err != nil`
 and its success path are unchanged. Its `store.ErrUnsupported` case becomes:
 
-- **Without the opt-in** (`!f.fallbackAllowed()`): `commitLocked` makes no
-  further store call in this commit, in particular no `Put` and no `Head` of
+- **Without the opt-in** (`!f.fallbackAllowed()`): `commitLocked` writes the
+  root pointer no further, in particular it makes no `Put` and no `Head` of
   `rootKey`; leaves `FS.epoch`, `FS.rootETag`, `FS.dirty`, `FS.lastCommit` and
   `FS.diverged` as they were; does not call `schedulePrune`; logs one record
-  at `Error` whose message contains `conditional writes` (Assumption 8); and
-  returns an error for which `errors.Is(err, store.ErrUnsupported)` holds and
-  whose text contains `unconditional`, for example:
+  at `Error` whose message contains `conditional writes` (Assumption 8);
+  **reclaims the snapshot** the commit uploaded before the swap, as the next
+  paragraph says; and returns an error for which
+  `errors.Is(err, store.ErrUnsupported)` holds and whose text contains
+  `unconditional`, whatever the reclaim did, for example:
 
   ```text
   swap root pointer: the store does not support conditional writes, and this mount may not write the root pointer unconditionally: store: operation not supported by backend
   ```
 
-  The snapshot the commit wrote before the swap stays in the bucket, as it
-  does after any failed swap; it sorts above the root pointer's key, and ADR
-  0019 §3 says what becomes of it. The rest of the text is not pinned.
+  The rest of the text is not pinned.
+
+  **The reclaim.** A refused commit has already uploaded a full snapshot
+  under `key`, which no root pointer names, since a 501 changes no object
+  (ADR 0013 Assumption 5; the module's J4 and R7). Left there it would never
+  be pruned while the root pointer stands still, and a store that answers
+  every swap 501 would gain one orphan per attempt, on every
+  `-commit-interval` and on every client `COMMIT` (Assumption 21). So, after
+  the record and before returning, `commitLocked`:
+  1. reads the root pointer once, `f.store.Get(ctx, rootKey)`;
+  2. if the read returns `store.ErrNotFound`, or a body that decodes as
+     `rootPointer` whose `Snapshot` is not `key`, calls
+     `f.store.Delete(ctx, key)` once; a failed `Delete` is logged at `Debug`
+     and leaves the orphan, which ADR 0019 §3 and the module's J14 cover;
+  3. if the read returns a body whose `Snapshot` is `key`, deletes nothing
+     and logs one record at `Error` whose message contains `took effect`: the
+     store applied a write it answered 501, outside every assumption here
+     (Assumption 22). The mount is left as it is, and its next swap, made
+     with the old ETag, fails its condition and diverges the mount with no
+     other writer, which is the route #5 owns for a swap whose reply was
+     lost;
+  4. if the read fails otherwise, or the body does not decode, deletes
+     nothing and logs at `Debug`.
+
+  The read and the `Delete` are made holding the locks `commitLocked` holds,
+  as its other calls are. The reclaim never writes `rootKey`, never deletes
+  any key but `key`, and changes neither the error returned nor any field of
+  the `FS`.
 - **With the opt-in** (`f.fallbackAllowed()`): exactly as at `247a276`: the
   `Warn` record `"backend lacks conditional writes; concurrent mounts are
   unsafe"`, the `Put` of `rootKey`, returning `write root pointer: %w` on
@@ -267,13 +307,28 @@ nowhere, since a boolean has no value to refuse (Assumption 9).
 func runCheck(ctx context.Context, s store.Store, out io.Writer, allowUnconditional bool) error
 ```
 
-- When the first conditional `PutIfMatch` answers `store.ErrUnsupported`, the
-  three conditional-write results have `required` equal to
-  `!allowUnconditional`; their names and details are unchanged. Every other
-  outcome of the three probes keeps the severity and the text it has at
-  `247a276` (Assumption 10).
+- The three conditional-write probes run in order, as at `247a276`: the
+  create with `If-None-Match`, the update with `If-Match` and the current
+  ETag, and the stale `If-Match`. Only severity changes: no row's name or
+  detail changes from what it is at `247a276`. A probe whose `PutIfMatch`
+  answers `store.ErrUnsupported` has `required` equal to
+  `!allowUnconditional`, whichever of the three it is, and so does every
+  probe after it, which is not run because of it. The details are today's:
+  when the first probe is answered so, all three rows read `not supported by
+  this endpoint`; when the second is, its row reads `failed with a correct
+  ETag: ` followed by the error's text, which for `store.ErrUnsupported`
+  ends `operation not supported by backend`, and the third row reads
+  `skipped`; when the third is, its row reads `failed with an unexpected
+  error: ` followed by the error's text. Every other outcome of the three
+  probes keeps the severity and the text it has at `247a276`: a probe
+  failing with another error, the probes skipped after it, and a stale
+  `If-Match` that is accepted stay optional (Assumption 10). So an endpoint
+  that honours
+  `If-None-Match` but answers `If-Match` 501, which creates the filesystem
+  and then commits nothing (§3), fails `-check` without the flag, as its
+  mount fails to commit.
 - The summary is unchanged except in one case: when `required` failures
-  exist and the conditional-write results are among them, these lines follow
+  exist and a conditional-write result is among them, these lines follow
   the existing `This endpoint is missing behaviour strata requires. It will
   not work correctly.`:
 
@@ -303,16 +358,26 @@ root pointer and the snapshot; every other flag and every other probe of
 - **A store that answers every conditional write 501, without the flag.**
   `strata -bucket s3://b ...` on a bucket with no filesystem exits with status
   1: `initEmpty`'s commit fails at its swap, `New` returns §2's error, and
-  `main` prints `strata: ` and it; a snapshot object is left behind, and no
-  root pointer. On a bucket that holds a filesystem, strata mounts and
-  serves: loading writes nothing. Every commit then fails at its swap, so
-  the committer logs `"periodic commit failed"` at `Error` every
-  `-commit-interval` beside §2's record, nothing is ever committed, and the
-  final commit fails too, so strata exits with status 1 and
+  `main` prints `strata: ` and it; the snapshot the commit uploaded is
+  reclaimed, so the bucket is left as it was. On a bucket that holds a
+  filesystem, strata mounts and serves: loading writes nothing. Every commit
+  then fails at its swap, so the committer logs `"periodic commit failed"`
+  at `Error` every `-commit-interval` beside §2's record, nothing is ever
+  committed, each attempt's snapshot is reclaimed so the bucket does not
+  grow, and the final commit fails too, so strata exits with status 1 and
   `final commit: ...`, losing every change since the last commit the bucket
   holds, as it does when the store is down (Assumption 4). `-check` reports
   the three conditional-write probes as `FAIL`, prints §2's guidance, and
   exits with status 1.
+- **A store that honours `If-None-Match` but answers `If-Match` 501, without
+  the flag** (the OpenStack Swift shape in *Context*). On a bucket with no
+  filesystem, `initEmpty`'s swap, `If-None-Match: *`, is honoured, so the
+  filesystem is created and strata serves it; every later commit is refused
+  as above, with its snapshot reclaimed, so the bucket holds the empty
+  filesystem and nothing more. `-check` reports the create probe `ok`, the
+  update probe `FAIL` with today's detail, `failed with a correct ETag: ` and
+  the error's text, and the stale probe `FAIL` as `skipped`, prints §2's
+  guidance, and exits with status 1 (§2; Assumption 10).
 - **The same store, with `-allow-unconditional-root`.** Everything behaves
   as at `247a276`: the filesystem is created, commits go through the
   unconditional write with the `Warn` record each time, and `-check` exits 0
@@ -333,7 +398,8 @@ root pointer and the snapshot; every other flag and every other probe of
 
 ### 4. The model
 
-In `docs/tla/CommitProtocol.tla`, under a `Revised: 2026-10-25` line:
+In `docs/tla/CommitProtocol.tla`, under two `Revised: 2026-10-25` lines, the
+second for the reclaim:
 
 - `Fixes` gains the member **`FallbackOptIn`** (`docs/vocabulary.md`, V3), and
   `AllFixes` lists it. The module gains the definition
@@ -353,16 +419,30 @@ In `docs/tla/CommitProtocol.tla`, under a `Revised: 2026-10-25` line:
   configurations without the member already show what that loses.
 - `SwapUnsupported(m)` gains a branch: when the mount is not fenced and
   `~FallbackAllowed`, the call that answered 501 reached the bucket
-  (`WriteCall`), changed nothing, and `commitLocked` returns an error
-  (`CommitFails`), with no `FallbackPut`. Its three fallback branches, the
-  `Put` not applied, applied, and applied with an error, now require
+  (`WriteCall`) and changed nothing, the attempt's key leaves `snapshots`,
+  which is the reclaim's `Delete` (§2), and `commitLocked` returns an error
+  (`CommitFails`), with no `FallbackPut`. The reclaim's read of the root
+  pointer and its `Delete` are folded into the action by the direct argument
+  ADR 0013 §4 allows, which the module's R12 gives: no other mount's write
+  can make the root pointer name this mount's key, so the read's answer is
+  fixed and the `Delete` always follows; of the steps another mount can take
+  between the calls, only a `PruneList` that lists the key fails to commute
+  with the `Delete`, and the two orders differ only in which garbage that
+  pass dooms, which no property reads (Assumption 23). `used` keeps the key,
+  since Go never reuses a nonce. Its three fallback branches, the `Put` not
+  applied, applied, and applied with an error, now require
   `FallbackAllowed`. The fenced branch is unchanged: `store.ReadOnly` refuses
   the swap, and the `Put` with the opt-in, so nothing reaches the bucket
   either way. R7 is unchanged, and notes that the action ends at the 501
-  without the fallback.
+  without the fallback. The Leaves-out list names a 501 that took effect,
+  which J4 excludes and §2's guard read exists for.
 - **`CommitProtocol_Fallback` flips to MustHold**, `FallbackOptIn` added to
   its `Fixes`, its two invariants and every other line unchanged (ADR 0013
   §7). Its comment records the flip and the route TLC reported at `247a276`.
+  The session's run of the flipped configuration found no violation (exit 0,
+  96 distinct states); the reclaim changes the states a refused commit
+  leaves, so the configuration is run again, and the prediction is that it
+  still holds (Assumption 23).
 - **`CommitProtocol_NoFallbackOptIn`**, MustFail on `NoLostAck`, is
   `CommitProtocol_Fallback` without the member: the configuration that
   removes the fix (ADR 0013 §7), and the one that TLC checked at `247a276`
@@ -432,7 +512,10 @@ In `docs/tla/CommitProtocol.tla`, under a `Revised: 2026-10-25` line:
   named, and `fallbackAllowed` and `FallbackAllowed` name it (Assumption 7).
 - **Nothing is security-relevant under ADR 0018 §5**: no transition is added
   or changed, so none asks a policy. `-check`'s change is a report, and E9
-  already exempts `runCheck` from the state rule.
+  already exempts `runCheck` from the state rule. The reclaim (§2) is a step
+  the server takes on a store's answer, as a prune pass is (ADR 0019 §5): no
+  caller asks for the deletion, and it reads no caller's identity, so the
+  policy rule does not reach it either.
 - So nothing is converted and no exemption is granted;
   `docs/adr/exemptions.md` is unchanged (Assumption 16).
 
@@ -565,7 +648,19 @@ and, in addition:
   argument and whether it was answered 501 or passed through; records every
   `Put` of `rootKey`, keeping each one's bytes, so that O2 can compute the
   ETag `Local` gave the body; counts every `Head` of `rootKey`; and counts
-  every `Put`, `Delete` and `PutIfMatch` of any key.
+  every `Put`, `Delete` and `PutIfMatch` of any key;
+- and, for the tests added on review: in its **create-only mode**, set
+  before the first call, passes every `PutIfMatch` whose `etag` is `""`
+  through and answers every other `PutIfMatch` with `store.ErrUnsupported`
+  without calling the inner store (the Swift shape of *Context*); when
+  armed, one-shot, **applies then answers 501**: passes the next
+  `PutIfMatch` of `rootKey` through to the inner store and, if it succeeded,
+  returns `""` and `store.ErrUnsupported` (a store that applies a write it
+  answers 501); when armed, one-shot, **fails the next `Delete`** under
+  `snapshotPrefix` with an error of the test's own, without calling the
+  inner store; counts every `Get` of `rootKey`; records every `Delete` with
+  its key, in call order; and records the keys of every `Put` under
+  `snapshotPrefix`, in call order.
 
 It takes no hold: every route here is sequential, and the 501 is injected
 synchronously. Two mounts in one test share one harness.
@@ -673,7 +768,9 @@ otherwise:
     `runCheck(ctx, fake, &out, false)` returns a non-nil error, and the
     output contains `[FAIL] conditional create (If-None-Match)`,
     `[FAIL] conditional update (If-Match)`, `[FAIL] stale If-Match is
-    REJECTED`, `It will not work correctly.` and `-allow-unconditional-root`.
+    REJECTED`, `It will not work correctly.` and `-allow-unconditional-root`;
+    and, added on review, each of the three `[FAIL]` lines holds `not
+    supported by this endpoint`, which pins that the rows keep today's text.
   - **C2** (`TestCheckAllowsAnEndpointWithoutConditionalWritesWithTheOptIn`):
     `runCheck(ctx, fake, &out, true)` returns nil, and the output contains
     the same three `[FAIL]` rows, `with the caveats noted above` and
@@ -685,6 +782,72 @@ otherwise:
 
   `-check` writes and deletes probe objects under `strata-check/`, so each
   case uses its own `*store.Local`.
+
+**Tests added on review**, for the reclaim and the `-check` rule (the
+Revised line), written against the branch at `53abeb7`, where the fix of §2
+exists but neither change does. None of F1 to F3, O1 to O5, C2 and C3
+changes its assertions: the reclaim makes a `Get` and a `Delete`, which no
+existing assertion counts except O3's, on a read-only mount, which never
+reaches the swap. C1 gains the one assertion its entry above names, that each
+`[FAIL]` row reads `not supported by this endpoint`, since the `-check` rule
+changes severity only. One failure message, `sf91CheckNoRootFallback`'s, which
+says a refused swap "is followed by no further store call in that commit", is
+reworded to say no further write of the root pointer.
+
+- **G1** (`TestRefusedCommitReclaimsItsSnapshot`; red at `53abeb7`). F3's
+  setup: seed `c1` on the inner store, then `New` on the harness in
+  unconditional mode without the opt-in. Record the inner store's keys under
+  `snapshotPrefix`. Commit `c2`: `Sync` returns F3's error; since the mount,
+  the harness recorded exactly one `Put` under `snapshotPrefix`, under a key
+  K, then exactly one `Get` of `rootKey`, then exactly one `Delete`, of K;
+  the inner store's keys under `snapshotPrefix` are as recorded; `rootKey`'s
+  bytes are unchanged. `Sync` again: one more `Put` under `snapshotPrefix`,
+  under a new key K2, one more `Get` of `rootKey`, one more `Delete`, of K2;
+  the keys are still as recorded. A remount has `c1` only. At `53abeb7` no
+  `Get` and no `Delete` is made, and the listing grows by one key per
+  `Sync`.
+- **G2** (`TestRefusedInitLeavesTheBucketEmpty`; red at `53abeb7`). F2's
+  setup. `New` returns a nil `*FS` and F2's error; the harness recorded one
+  `Delete`, of the key of its one `Put` under `snapshotPrefix`; the inner
+  store's `List("", "", 0)` returns no object. At `53abeb7` the snapshot is
+  left behind and no `Delete` is made.
+- **G3** (`TestRefusedCommitKeepsASnapshotTheRootPointerNames`; green at
+  `53abeb7`, and it must stay green: it guards the reclaim). Seed `c1`;
+  `New` on the harness, not in unconditional mode, without the opt-in; arm
+  apply-then-501; commit `c2`: `Sync` returns F3's error; the harness
+  recorded no `Delete`; the root pointer on the inner store decodes as
+  `rootPointer` whose `Snapshot` is the key of the last `Put` under
+  `snapshotPrefix`, and that object exists; a remount has `c1` and `c2`.
+  What the mount does next is #5's, and is not asserted.
+- **G4** (`TestRefusedCommitIgnoresAFailedReclaim`; red at `53abeb7` on the
+  `Delete` count). G1's setup with fail-next-`Delete` armed before the
+  commit. `Sync` returns F3's error, wrapping `store.ErrUnsupported` with
+  `unconditional` in its text; the harness recorded one `Delete`, of K,
+  which it failed; the inner store still holds K; `rootKey` is unchanged.
+- **G5** (`TestStoreHonouringOnlyIfNoneMatchCreatesThenCommitsNothing`; red
+  at `53abeb7` on the listing). The harness in create-only mode over an empty
+  bucket, without the opt-in. `New` succeeds: the harness recorded one
+  `PutIfMatch` of `rootKey` with `etag` `""` passed through, and no `Put` of
+  `rootKey`. Record `rootKey`'s bytes and the keys under `snapshotPrefix`.
+  Commit `c2`: `Sync` returns F3's error; no `Put` and no `Head` of
+  `rootKey`; `rootKey` unchanged; the keys under `snapshotPrefix` as
+  recorded; a `Create` of `c3` returns nil; a remount has neither `c2` nor
+  `c3`. At `53abeb7` the refusal happens but the attempt's snapshot stays.
+- **C4** (`TestCheckRefusesAnEndpointHonouringOnlyIfNoneMatch`, in
+  `cmd/strata/check_test.go`; red at `53abeb7`). A fake over a `*store.Local`
+  under `t.TempDir()` that passes every `PutIfMatch` whose `etag` is `""`
+  through and answers every other `PutIfMatch` with `store.ErrUnsupported`
+  without calling the inner store. `runCheck(ctx, fake, &out, false)`
+  returns a non-nil error, and the output contains
+  `[ok  ] conditional create (If-None-Match)`, a line holding
+  `[FAIL] conditional update (If-Match)`, `failed with a correct ETag` and
+  `not supported`, a line holding both `[FAIL] stale If-Match is REJECTED`
+  and `skipped`, `It will not work correctly.` and
+  `-allow-unconditional-root`. `runCheck(ctx, fake, &out, true)` returns
+  nil, and the output contains the same `ok` row, the same two `FAIL` rows,
+  `with the caveats noted above` and `Run exactly one mount per bucket.`. At
+  `53abeb7` the rows read the same, and the first call returns nil with
+  `with the caveats noted above` in its output.
 
 **Safety rules**, as ADR 0011 §7, ADR 0012 §9 and ADR 0020 §6 give them:
 
@@ -711,8 +874,13 @@ otherwise:
   but `fallbackAllowed` reads it;
 - that `run` passes the flag to both `Config` and `runCheck`, and the help
   text is §2's;
-- that `-check`'s severity turns on `store.ErrUnsupported` from the first
-  conditional `PutIfMatch` alone, and every other outcome keeps its severity;
+- that `-check`'s severity turns on `store.ErrUnsupported` from any of the
+  three conditional-write probes, with the probes skipped after it, and on
+  nothing else, and every other outcome keeps its severity;
+- that the reclaim's `Delete` is made only after a `Get` of `rootKey`
+  returned not-found or a root pointer naming another key, only for the key
+  the commit wrote, and that no path deletes a key the root pointer names;
+- that the reclaim changes no field of the `FS` and not the error returned;
 - the `TLA+:` line on `fallbackAllowed`, the `trace.tsv` rows, and that
   `SwapUnsupported` with the member describes `commitLocked` (ADR 0013 §8);
 - that `fallbackAllowed` is a pure function of the mount's configuration
@@ -788,16 +956,25 @@ Each is mine unless it says otherwise.
    multi-writer, which `README.md` says it is not. A boolean flag has no
    value to refuse, so unlike ADR 0008 to ADR 0010's flags it is judged
    nowhere, and it is not refused with `-read-only` (Assumption 11).
-10. **`-check`'s severity turns on the 501 alone** (§2). The three probes
-    are required without the flag only when the first conditional `PUT`
-    answers `store.ErrUnsupported`, because that is the one outcome this ADR
-    changes the mount's behaviour on: `-check`'s exit status then says what
-    the mount will do with the same flags. An endpoint that accepts a stale
-    `If-Match` keeps its optional severity, since strata still commits there,
-    with no detection, as before; whether `-check` should fail it without
-    the flag is left open (*What this does not decide*). The guidance lines
-    are mine; they name the flag so that the operator learns the remedy from
-    the tool that found the problem.
+10. **`-check`'s severity turns on a 501 alone, from any probe** (§2). A
+    probe is required without the flag when its own `PutIfMatch` answers
+    `store.ErrUnsupported`, and so are the probes skipped after it, because
+    that is the one outcome this ADR changes the mount's behaviour on:
+    `-check`'s exit status then says what the mount will do with the same
+    flags. The first version keyed the rule to the first probe alone, and
+    review found the gap: an endpoint that honours `If-None-Match` but
+    answers `If-Match` 501, the Swift shape of *Context*, passed `-check`
+    while its mount created the filesystem and then committed nothing (§3).
+    Only the severity changes: every row keeps the name and detail it has at
+    `247a276`, so the report reads as before, the all-501 case's three `not
+    supported by this endpoint` rows included, which the first version
+    described and a draft of this revision would have changed to `skipped`
+    without saying so (supervisor's finding). An endpoint that accepts a
+    stale `If-Match` keeps its optional severity,
+    since strata still commits there, with no detection, as before; whether
+    `-check` should fail it without the flag is left open (*What this does
+    not decide*). The guidance lines are mine; they name the flag so that the
+    operator learns the remedy from the tool that found the problem.
 11. **`-read-only` with the flag is accepted** (§3). It allows nothing a
     read-only mount could do, since `store.ReadOnly` refuses the `Put`
     (ADR 0011 §3), and refusing the combination would add a rule for no
@@ -852,6 +1029,47 @@ Each is mine unless it says otherwise.
     quote it. None of this decides the design: the decision rests on 501
     being an answer about one request, which the RFC gives, and on the
     operator being the only party who can assert a single writer.
+21. **The refused commit reclaims its snapshot** (§2). Security review found
+    that without it a store answering every swap 501 gains an orphan per
+    attempt, on every interval and on every client `COMMIT`, which checks no
+    credential, and that ADR 0019's passes never reclaim them while the root
+    pointer stands still. The first version said ADR 0019 §3 covers the
+    orphan; it does so only once the root pointer passes it, which here
+    happens only after the operator acts, and then two commits later. A
+    `Delete` of a key no root pointer names is what ADR 0019 §1 already
+    calls safe. The alternatives, reusing the uploaded snapshot on the retry
+    and backing the committer off, are in *Alternatives considered*.
+22. **A read guards the `Delete`** (§2). The spec assumes a 501 applies
+    nothing (ADR 0013 Assumption 5; the module's J4), and the refusal already
+    rests on it: a 501 that took effect would make the mount diverge alone
+    at its next swap, #5's shape. A `Delete` on the strength of that
+    assumption alone would turn that bad outcome into a worse one, a root
+    pointer naming a deleted snapshot and a bucket no mount can load, which
+    is the failure ADR 0019 exists to prevent; one `Get` of the root pointer
+    rules it out by observation, at one read per refused commit, on a path
+    where latency no longer matters. The read's failure leaves the orphan,
+    which costs space and nothing else. The took-effect case itself is left
+    to #5: the guard logs it at `Error` and changes no mount state, so that
+    #5's in-doubt resolution, not this ADR, decides whether to adopt the
+    root.
+23. **The model folds the reclaim into `SwapUnsupported`** (§4), by the
+    direct argument of ADR 0013 §4 that R12 gives, rather than adding a pc
+    string and an action for the `Delete`. The only step that fails to
+    commute with it is another mount's `PruneList`, and the two orders differ
+    only in which garbage that pass dooms. The guard read is not modelled at
+    all, since its answer is fixed in the model; the Leaves-out list says
+    so. `CommitProtocol_Fallback` is the one configuration that takes the
+    branch, and its rerun is the check of this reading; I predict that it
+    still holds.
+24. **What the reclaim does not bound** (§2, §3). Each refused commit still
+    uploads a full snapshot and makes two more calls, holding the commit
+    gate and `FS.mu` across them, and a client `COMMIT` on a dirty namespace
+    can cause one on demand; so a store that refuses every swap costs
+    bandwidth and latency per attempt, as a client that changes a file and
+    `COMMIT`s in a loop already costs today. The bucket no longer grows, and
+    `-check` and the `Error` records point at the misconfiguration. Not
+    uploading again while the namespace is unchanged would remove the
+    bandwidth too, and is left open (*Alternatives considered*).
 
 ## Alternatives considered
 
@@ -875,6 +1093,21 @@ Each is mine unless it says otherwise.
 - **A `policy.Policy` for the decision** (Assumption 7).
 - **Keep the fallback as it is and document it harder.** The issue's first
   done-when rules it out: one reply still decides.
+- **Leave the refused commit's snapshot in the bucket.** ADR 0019's passes
+  reclaim it only once the operator has acted and two commits have landed;
+  until then every interval and every client `COMMIT` adds one
+  (Assumption 21).
+- **Delete it without reading the root pointer first** (Assumption 22).
+- **Reuse the uploaded snapshot on the retry** when the namespace has not
+  changed since. The commit would have to know that no change landed between
+  two attempts, which `FS.dirty` cannot tell, so every path that sets
+  `FS.dirty` would gain a counter or a reset, which brings `FS.dirty` under
+  ADR 0018's state rule (its §3, *Not yet moved*), and the protocol would
+  swap to a key an earlier attempt wrote; left open (Assumption 24).
+- **Back the committer off after a refusal.** It changes the committer's
+  schedule, does nothing for a client's `COMMIT`, and delays a flaky store's
+  recovery; the issue filed for the architect's N15 owns the committer's
+  behaviour after repeated failures.
 
 ## Consequences
 
@@ -888,7 +1121,13 @@ Each is mine unless it says otherwise.
   before, and carries the risk it always carried, now stated on its command
   line.
 - A mount whose store refuses its swaps logs two `Error` records per interval
-  until the operator acts (Assumption 4).
+  until the operator acts (Assumption 4), and uploads a snapshot per attempt
+  that it then reclaims, so it costs bandwidth but no storage
+  (Assumption 24).
+- A refused commit leaves no object behind: its snapshot is deleted once one
+  read shows the root pointer names another key, and is kept, with an
+  `Error` record, if a store applied the write it answered 501
+  (Assumption 22).
 - `Config` has one more field, `FS` one more field and one more method, and
   `runCheck` one more argument.
 - The model states the opt-in's cost, `CommitProtocol_UnconditionalTwoWriters`,
@@ -911,6 +1150,12 @@ Each is mine unless it says otherwise.
 - A bucket whose mounts differ in the opt-in (Assumption 12).
 - A 501 answered for a reason other than the condition: strata treats every
   501 on the swap alike, and with the opt-in falls back on any of them.
+- A store that applies a write it answers 501. The reclaim's guard read
+  keeps the snapshot and logs the case; the mount then diverges alone at its
+  next swap, as after a lost reply, which #5's in-doubt knowledge resolves
+  (Assumption 22).
+- Not uploading a snapshot again while the namespace is unchanged since a
+  refused swap (Assumption 24).
 - A `-check` probe that conditions a `PUT` on a `GET`'s ETag (#133).
 - Multi-writer operation beyond detection (`docs/DESIGN.md` §15).
 
