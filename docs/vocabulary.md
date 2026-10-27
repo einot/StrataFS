@@ -112,7 +112,7 @@ Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
 
 ## V3. Commit protocol
 
-`docs/tla/CommitProtocol.tla`, checked against `6e0a13d`. Its Go sites exist:
+`docs/tla/CommitProtocol.tla`, checked against `8415f61`. Its Go sites exist:
 `Sync`, `loadOrInit`, `initEmpty`, `decodeSnapshot`, `commitLocked`,
 `fallbackAllowed`, `schedulePrune` and `pruneSnapshots` in
 `internal/blobfs/commit.go`; `New`,
@@ -130,8 +130,8 @@ which it lands, was reserved here already and exists as of `c5068a0`;
 `GetWithETag`, the `store.Store` method that `GetRoot` traces to, is a Go
 symbol `trace.tsv` names, not an entry. ADR 0021 added `FallbackOptIn` and
 `FallbackAllowed`: `FallbackAllowed` exists as of `85dbfcf`, and
-`FallbackOptIn`, whose refusal branch includes the reclaim ADR 0021's revision
-added, as of `6e0a13d`; the Go names behind them,
+`FallbackOptIn`, whose refusal branch includes the reclaim ADR 0021's revisions
+added, with its guard, as of `8415f61`; the Go names behind them,
 `Config.AllowUnconditionalRoot`, `FS.allowUnconditionalRoot` and
 `(*FS).fallbackAllowed`, are what `FallbackAllowed` traces to.
 
@@ -301,7 +301,7 @@ ADR 0014 reserves (V1), and `Below`, which ADR 0019 reserves.
 | `ReadOnlyFence` | `New` puts a read-only mount's store behind `store.ReadOnly` (ADR 0011 §3) | exists |
 | `PruneBelowCurrent` | a prune pass deletes only the snapshot keys that sort below the one its commit swapped the root pointer to, and keeps the `Retention` newest of them, so the snapshot the root pointer names is never deleted (ADR 0019 §1, §2) | exists |
 | `AtomicLoad` | `loadOrInit` reads the root pointer's body and its ETag with one call, `store.Store.GetWithETag`, so the ETag its first commit swaps against is the ETag of the body it loaded, and a commit by another mount between a mount's reads is refused, not overwritten (ADR 0020 §1, §2) | exists, as of `c5068a0` |
-| `FallbackOptIn` | `commitLocked`, after `store.ErrUnsupported` from the swap, writes the root pointer unconditionally only on a mount whose operator set `Config.AllowUnconditionalRoot`, and otherwise fails the commit, writing nothing more and reclaiming the snapshot it uploaded, so one 501 never turns a conditional writer into an unconditional one (ADR 0021 §1, §2) | exists, as of `6e0a13d` |
+| `FallbackOptIn` | `commitLocked`, after `store.ErrUnsupported` from the swap, writes the root pointer unconditionally only on a mount whose operator set `Config.AllowUnconditionalRoot`, and otherwise fails the commit, writing nothing more and reclaiming the snapshot it uploaded, so one 501 never turns a conditional writer into an unconditional one (ADR 0021 §1, §2) | exists, as of `8415f61` |
 
 **Checked against rule 1.** Every name the CommitProtocol spec added here was
 checked against rule 1 and against the operators listed at the end of this
