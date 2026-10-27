@@ -3,11 +3,14 @@ package main
 // Clean-room tests for runCheck's handling of an endpoint without conditional
 // writes, written without reading the implementation, from ADR 0021
 // (docs/adr/0021-the-unconditional-root-write-needs-the-operators-opt-in.md)
-// sections 2, 3 and 6 and Assumption 10: C1 to C3 of section 6.
+// sections 2, 3 and 6 and Assumption 10, as revised on 2026-10-25: C1 to C3
+// of section 6, and C4 and C1's last assertion, added on review.
 //
-// ADR 0021 section 2: runCheck(ctx, s, out, allowUnconditional). When the
-// first conditional PutIfMatch answers store.ErrUnsupported, the three
-// conditional-write probes fail with required equal to !allowUnconditional.
+// ADR 0021 section 2: runCheck(ctx, s, out, allowUnconditional). A
+// conditional-write probe whose PutIfMatch answers store.ErrUnsupported, and
+// every probe skipped after it, fails with required equal to
+// !allowUnconditional, whichever of the three it is; every row keeps the name
+// and detail it has at 247a276.
 // Without the opt-in runCheck prints guidance that names
 // -allow-unconditional-root after "It will not work correctly." and returns
 // an error; with it the probes are optional, the summary is the existing
@@ -21,8 +24,9 @@ package main
 //
 // Not covered, on purpose: that run passes -allow-unconditional-root to
 // runCheck and to blobfs.Config, the flag's help text, and that -check's
-// severity turns on store.ErrUnsupported from the first conditional
-// PutIfMatch alone, which ADR 0021 section 6 leaves to review.
+// severity turns on store.ErrUnsupported from any of the three probes, with
+// the probes skipped after it, and on nothing else, which ADR 0021 section 6
+// leaves to review.
 
 import (
 	"bytes"
@@ -96,6 +100,25 @@ func (s *ck91NoCAS) GetWithETag(ctx context.Context, key string) ([]byte, string
 	return s.inner.GetWithETag(ctx, key)
 }
 
+// ck91CreateOnly is C4's fake (ADR 0021 section 6): a store.Store over a
+// *store.Local that passes every call through, except that it answers every
+// PutIfMatch whose etag is not "" with store.ErrUnsupported without calling
+// the inner store, and passes one whose etag is "" through: an endpoint that
+// honours If-None-Match but answers If-Match 501, the Swift shape of ADR
+// 0021's Context. Every other method is ck91NoCAS's pass-through.
+type ck91CreateOnly struct {
+	ck91NoCAS
+}
+
+var _ store.Store = (*ck91CreateOnly)(nil)
+
+func (s *ck91CreateOnly) PutIfMatch(ctx context.Context, key string, data []byte, etag string) (string, error) {
+	if etag != "" {
+		return "", store.ErrUnsupported
+	}
+	return s.inner.PutIfMatch(ctx, key, data, etag)
+}
+
 // ck91Local makes a fresh local bucket under the test's temporary directory.
 func ck91Local(t *testing.T) *store.Local {
 	t.Helper()
@@ -142,6 +165,34 @@ func ck91Run(t *testing.T, s store.Store, allow bool) (string, error) {
 	return out.String(), err
 }
 
+// ck91Line returns the first line of out that contains marker, and whether
+// there is one.
+func ck91Line(out, marker string) (string, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, marker) {
+			return line, true
+		}
+	}
+	return "", false
+}
+
+// ck91LineHolds requires the first line of out that contains marker to
+// contain every string in want too.
+func ck91LineHolds(t *testing.T, out, marker string, want []string, what, where string) {
+	t.Helper()
+	line, ok := ck91Line(out, marker)
+	if !ok {
+		t.Errorf("%s: the report has no line containing %q (%s). The report:\n%s", what, marker, where, out)
+		return
+	}
+	for _, w := range want {
+		if !strings.Contains(line, w) {
+			t.Errorf("%s: the line %q does not contain %q: the row keeps the detail it has at 247a276 (%s). "+
+				"The report:\n%s", what, line, w, where, out)
+		}
+	}
+}
+
 // ck91Contains requires out to contain every string in want.
 func ck91Contains(t *testing.T, out string, want []string, what, where string) {
 	t.Helper()
@@ -168,6 +219,10 @@ func TestCheckRefusesAnEndpointWithoutConditionalWrites(t *testing.T) {
 	}
 	want := append(append([]string(nil), ck91FailRows...), "It will not work correctly.", "-allow-unconditional-root")
 	ck91Contains(t, out, want, what, "ADR 0021 section 2; section 6, C1")
+	for _, row := range ck91FailRows {
+		ck91LineHolds(t, out, row, []string{"not supported by this endpoint"}, what,
+			"ADR 0021 section 2, Assumption 10; section 6, C1, added on review")
+	}
 }
 
 // TestCheckAllowsAnEndpointWithoutConditionalWritesWithTheOptIn is C2 of ADR
@@ -210,4 +265,58 @@ func TestCheckPassesAnEndpointWithConditionalWritesEitherWay(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCheckRefusesAnEndpointHonouringOnlyIfNoneMatch is C4 of ADR 0021
+// section 6, added on review: -check's severity turns on a 501 from any
+// conditional-write probe, not only the first, and so does every probe
+// skipped after it (ADR 0021 section 2; Assumption 10). On an endpoint that
+// honours If-None-Match but answers If-Match 501, the create probe passes,
+// the update probe fails with today's detail, and the stale probe fails as
+// skipped. Without the opt-in runCheck says the endpoint will not work,
+// names -allow-unconditional-root, and returns an error, as the mount there
+// creates the filesystem and then commits nothing (section 3, the second
+// case); with it runCheck prints the caveat text and returns nil. Each call
+// runs over its own *store.Local.
+//
+// At 53abeb7 the rows read the same, and the first call returns nil with
+// "with the caveats noted above" in its output.
+func TestCheckRefusesAnEndpointHonouringOnlyIfNoneMatch(t *testing.T) {
+	const (
+		okCreate  = "[ok  ] conditional create (If-None-Match)"
+		failUpd   = "[FAIL] conditional update (If-Match)"
+		failStale = "[FAIL] stale If-Match is REJECTED"
+	)
+	checkRows := func(t *testing.T, out, what, where string) {
+		t.Helper()
+		ck91Contains(t, out, []string{okCreate}, what, where)
+		ck91LineHolds(t, out, failUpd, []string{"failed with a correct ETag", "not supported"}, what, where)
+		ck91LineHolds(t, out, failStale, []string{"skipped"}, what, where)
+	}
+
+	t.Run("allowUnconditional=false", func(t *testing.T) {
+		out, err := ck91Run(t, &ck91CreateOnly{ck91NoCAS{inner: ck91Local(t)}}, false)
+		what := "runCheck(ctx, fake, &out, false) on an endpoint that honours only If-None-Match"
+		where := "ADR 0021 section 2, Assumption 10; section 6, C4"
+		if err == nil {
+			t.Errorf("%s = nil, want an error: without the opt-in a probe answered store.ErrUnsupported is "+
+				"required, whichever of the three it is, and so is every probe skipped after it (%s). The "+
+				"report:\n%s", what, where, out)
+		}
+		checkRows(t, out, what, where)
+		ck91Contains(t, out, []string{"It will not work correctly.", "-allow-unconditional-root"}, what, where)
+	})
+
+	t.Run("allowUnconditional=true", func(t *testing.T) {
+		out, err := ck91Run(t, &ck91CreateOnly{ck91NoCAS{inner: ck91Local(t)}}, true)
+		what := "runCheck(ctx, fake, &out, true) on an endpoint that honours only If-None-Match"
+		where := "ADR 0021 section 2; section 6, C4"
+		if err != nil {
+			t.Errorf("%s = %v, want nil: with the opt-in the conditional-write probes are optional (%s). The "+
+				"report:\n%s", what, err, where, out)
+		}
+		checkRows(t, out, what, where)
+		ck91Contains(t, out, []string{"with the caveats noted above", "Run exactly one mount per bucket."}, what,
+			where)
+	})
 }
