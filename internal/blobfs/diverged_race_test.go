@@ -14,11 +14,14 @@ package blobfs
 // defined behaviour; go test -race reports it and fails the test.
 //
 // So the test drives exactly that interleaving. A Sync is held inside the
-// root pointer's swap, the PutIfMatch of rootKey, which the store fake then
-// fails with store.ErrPrecondition: another writer moved the root pointer, so
-// this FS has diverged (ADR 0003 §5). While it is held a Write starts, with no
-// synchronisation between the two beyond the store fake's own channels, which
-// order only the test goroutine against the Sync. What that Write returns is
+// root pointer's swap, the PutIfMatch of rootKey. Once released, the store
+// fake writes a foreign root pointer on its inner store, standing for another
+// writer, and then fails the swap with store.ErrPrecondition; the one read of
+// the root pointer that follows the refusal, inside the same held Sync, finds
+// that writer, so this FS has diverged (ADR 0003 §5; ADR 0022 §3 and §8).
+// While the swap is held a Write starts, with no synchronisation between the
+// two beyond the store fake's own channels, which order only the test
+// goroutine against the Sync. What that Write returns is
 // not pinned: it may land before the commit fails and succeed, or see the
 // divergence and answer vfs.ErrStale. What is pinned is that it is not a data
 // race, that the Sync fails, and that a Write after both have returned is

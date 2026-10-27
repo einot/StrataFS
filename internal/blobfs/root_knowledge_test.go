@@ -4,9 +4,10 @@ package blobfs
 // as a second writer", written without reading the implementation, from
 // ADR 0022
 // (docs/adr/0022-a-failed-root-swap-is-settled-by-one-read-of-the-root-pointer.md)
-// sections 1 to 5 and 8 and Assumptions 2, 4, 6, 9, 10, 11, 12 and 23,
+// sections 1 to 5 and 8 and Assumptions 2 to 6, 9 to 12, 15 and 23,
 // docs/vocabulary.md V2, ADR 0014 section 11, ADR 0021 section 6, ADR 0019
-// section 6, ADR 0011 section 7, ADR 0003 section 4 and internal/vfs/vfs.go.
+// section 6, ADR 0011 section 7, ADR 0012 section 9, the safety rules and
+// facts of ADR 0020 section 6, ADR 0003 section 4 and internal/vfs/vfs.go.
 //
 // ADR 0022 section 1's rule: a mount decides that another writer owns the
 // bucket only on a positive showing from a read of the root pointer, never
@@ -22,10 +23,17 @@ package blobfs
 // diverges the mount at once or leaves it holding a stale ETag, so that its
 // next swap diverges it with no other writer.
 //
-// Covered, as ADR 0022 section 8's route tests, each in two parts (Assumption
-// 23): the part that compiles at edcfc15 is here, and the assertions on
-// f.rootKnowledge.State(), f.doubtKey and f.rootSnapshot, which cannot
-// compile there, are marked "round 2" where they go.
+// Covered: ADR 0022 section 8's tests of the machine and the verdict,
+//   - K1, TestRootStatesTableAndStrings;
+//   - K2, TestClassifyRootDecidesWhatOneReadShows;
+//   - K3, TestNewStartsKnownWithTheRootPointersKey;
+//
+// and its route tests, each written in two parts (Assumption 23): its calls,
+// its records and its assertions on Sync's result, f.mode.State(), FS.dirty,
+// FS.epoch, FS.rootETag, the inner store, the log and a remount, which use
+// only names that exist at edcfc15 and fail there as each test's doc comment
+// says; and its assertions on f.rootKnowledge.State(), f.doubtKey and
+// f.rootSnapshot, added once the code existed.
 //   - K4, TestLostSwapReplyIsAdoptedNotTakenForASecondWriter
 //     (CommitProtocol_SelfDiverge; route 1).
 //   - K5, TestSwapRefusedWhileTheRootIsUnchangedRetriesAtTheNextCommit
@@ -44,14 +52,6 @@ package blobfs
 //     4). G3 in internal/blobfs/swap_fallback_test.go asserts the same Sync
 //     result.
 //   - K13, TestLostReplyOnTheFirstCommitIsAdoptedByNew.
-//
-// Not here yet: K1 (TestRootStatesTableAndStrings), K2
-// (TestClassifyRootDecidesWhatOneReadShows) and K3
-// (TestNewStartsKnownWithTheRootPointersKey), which name rootStates,
-// classifyRoot and the new FS fields whole, and so are written in round 2,
-// once the code exists: one reference to a name that does not exist at
-// edcfc15 would stop the package's tests from building and hide the red run
-// (Assumption 23).
 //
 // Elsewhere, changed by ADR 0022 section 8: M3 and M7 in
 // internal/blobfs/mount_mode_test.go, M4 in
@@ -82,9 +82,11 @@ package blobfs
 //   - fails the next read of the root pointer: answers the next GetWithETag of
 //     rootKey with nil, "" and rk5ErrInjected without calling the inner store
 //     (ProbeFailed); or arms that failure only at the next PutIfMatch of
-//     rootKey, for a test that must arm it before New, whose own load reads
-//     the root pointer; or answers the next GetWithETag of rootKey with bytes
-//     and an ETag the test gives;
+//     rootKey, so that the read it fails is the first one after the swap,
+//     whatever reads come before it (New's own load reads the root pointer,
+//     and ADR 0011 section 7 lets no test rely on which reads New makes); or
+//     answers the next GetWithETag of rootKey with bytes and an ETag the test
+//     gives;
 //   - in its unconditional mode, set before the first call and never changed,
 //     answers every PutIfMatch of any key with store.ErrUnsupported without
 //     calling the inner store;
@@ -99,18 +101,23 @@ package blobfs
 // The safety rules, as ADR 0011 section 7, ADR 0012 section 9, ADR 0020
 // section 6, ADR 0021 section 6 and ADR 0022 section 8 give them; every test
 // here follows them:
-//   - every New and every FS call, f.mode.State() and every read of an FS
-//     field included, runs in rk5Go, which recovers a panic, and is waited for
-//     under rk5Bound, 10 s; goroutines never touch t, and nothing here is
-//     parallel;
+//   - every New and every FS call, f.mode.State(), every read of an FS field
+//     and every call of classifyRoot included, runs in rk5Go, which recovers
+//     a panic, and is waited for under rk5Bound, 10 s; goroutines never touch
+//     t, and nothing here is parallel;
 //   - every mount has SnapshotRetention -1 and MaxDirtyBytes -1, and no Write
 //     is made, so no prune pass and no drain runs;
 //   - there is no time.Sleep and no polling, and no test calls Run;
 //   - every bucket is a local directory under the test's t.TempDir();
-//   - the bucket is inspected through the inner *store.Local only after the
-//     harness's records have been read; the inner store is written to only to
-//     seed a filesystem or to stand for another writer (the foreign root
-//     pointer of section 8);
+//   - where a test has a harness, the bucket is inspected through the inner
+//     *store.Local only after the harness's records have been read, never
+//     through the harness; the inner store is written to only to seed a
+//     filesystem or to stand for another writer (the foreign root pointer of
+//     section 8);
+//   - an FS field is read only holding FS.mu for reading, and only the fields
+//     section 8 names: FS.dirty, FS.epoch, FS.rootETag, FS.rootSnapshot,
+//     FS.doubtKey and f.rootKnowledge.State(); f.mode.State() is read without
+//     a lock (ADR 0014 section 11); no field is written;
 //   - an *FS that New returned where it should have refused is never used.
 
 import (
@@ -128,6 +135,7 @@ import (
 	"testing"
 	"time"
 
+	"strata/internal/fsm"
 	"strata/internal/store"
 	"strata/internal/vfs"
 )
@@ -690,23 +698,45 @@ func rk5Commit(t *testing.T, ctx context.Context, fs *FS, name, what string) err
 
 // rk5Fields is what rk5Read reads of an FS.
 type rk5Fields struct {
-	dirty    bool
-	epoch    uint64
-	rootETag string
+	dirty        bool
+	epoch        uint64
+	rootETag     string
+	knowledge    rootState
+	doubtKey     string
+	rootSnapshot string
 }
 
-// rk5Read reads FS.dirty, FS.epoch and FS.rootETag holding FS.mu for reading
-// (ADR 0022 section 8, the facts).
-//
-// round 2: read f.rootKnowledge.State(), f.doubtKey and f.rootSnapshot here
-// too, under the same hold.
+// rk5Read reads FS.dirty, FS.epoch, FS.rootETag, f.rootKnowledge.State(),
+// FS.doubtKey and FS.rootSnapshot in one hold of FS.mu for reading (ADR 0022
+// section 8, the facts).
 func rk5Read(t *testing.T, fs *FS, what string) rk5Fields {
 	t.Helper()
 	return rk5Go(func() rk5Fields {
 		fs.mu.RLock()
 		defer fs.mu.RUnlock()
-		return rk5Fields{dirty: fs.dirty, epoch: fs.epoch, rootETag: fs.rootETag}
+		return rk5Fields{
+			dirty:        fs.dirty,
+			epoch:        fs.epoch,
+			rootETag:     fs.rootETag,
+			knowledge:    fs.rootKnowledge.State(),
+			doubtKey:     fs.doubtKey,
+			rootSnapshot: fs.rootSnapshot,
+		}
 	}).wait(t, what)
+}
+
+// rk5CheckKnowledge requires the knowledge f records to be want, and, when
+// checkDoubt is set, FS.doubtKey to be doubtKey (ADR 0022 sections 2 to 4).
+func rk5CheckKnowledge(t *testing.T, f rk5Fields, want rootState, checkDoubt bool, doubtKey, when, where string) {
+	t.Helper()
+	if f.knowledge != want {
+		t.Errorf("%s, f.rootKnowledge.State() = %v, want %v (ADR 0022 sections 2 to 4; %s)", when, f.knowledge,
+			want, where)
+	}
+	if checkDoubt && f.doubtKey != doubtKey {
+		t.Errorf("%s, FS.doubtKey = %q, want %q: doubtKey names the attempt in doubt while the root is in "+
+			"doubt, and is \"\" otherwise (ADR 0022 section 2; %s)", when, f.doubtKey, doubtKey, where)
+	}
 }
 
 // rk5Mode returns fs.mode.State(), which needs no lock (ADR 0014 section 11).
@@ -873,6 +903,244 @@ func rk5CheckConflictRecord(t *testing.T, c *rk5Capture, foreign rootPointer, wh
 		conflicts)
 }
 
+// TestRootStatesTableAndStrings is K1 of ADR 0022 section 8: the table of
+// root-pointer knowledge is named "rootKnowledge", after the field that holds
+// its state (ADR 0014 section 3), and has exactly section 2's four edges, in
+// order; String gives docs/vocabulary.md V2's names, and "<type>(<n>)", n in
+// decimal, for a value with no name (ADR 0022 section 2).
+func TestRootStatesTableAndStrings(t *testing.T) {
+	const where = "ADR 0022 section 2; section 8, K1"
+	if got := rootStates.Name(); got != "rootKnowledge" {
+		t.Errorf("rootStates.Name() = %q, want %q: a table is named after the field that holds its state, "+
+			"FS.rootKnowledge (ADR 0014 section 3; %s)", got, "rootKnowledge", where)
+	}
+	want := []fsm.Edge[rootState, rootEvent]{
+		{From: rootKnown, On: rootSwapOK, To: rootKnown},
+		{From: rootKnown, On: rootSwapUnknown, To: rootInDoubt},
+		{From: rootInDoubt, On: rootProbeOurs, To: rootKnown},
+		{From: rootInDoubt, On: rootProbeUnchanged, To: rootKnown},
+	}
+	got := rootStates.Edges()
+	if len(got) != len(want) {
+		t.Fatalf("rootStates.Edges() = %v (length %d), want %v (length %d): the table gains no other edge (%s)",
+			got, len(got), want, len(want), where)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("rootStates.Edges()[%d] = %v (From %d, On %d, To %d), want %v (From %d, On %d, To %d) (%s)",
+				i, got[i], uint8(got[i].From), uint8(got[i].On), uint8(got[i].To), want[i],
+				uint8(want[i].From), uint8(want[i].On), uint8(want[i].To), where)
+		}
+	}
+
+	cases := []struct {
+		expr string
+		got  string
+		want string
+	}{
+		{"rootKnown.String()", rootKnown.String(), "Known"},
+		{"rootInDoubt.String()", rootInDoubt.String(), "InDoubt"},
+		{"rootSwapOK.String()", rootSwapOK.String(), "SwapOK"},
+		{"rootSwapUnknown.String()", rootSwapUnknown.String(), "SwapUnknown"},
+		{"rootProbeOurs.String()", rootProbeOurs.String(), "ProbeOurs"},
+		{"rootProbeUnchanged.String()", rootProbeUnchanged.String(), "ProbeUnchanged"},
+		{"rootState(0).String()", rootState(0).String(), "rootState(0)"},
+		{"rootState(3).String()", rootState(3).String(), "rootState(3)"},
+		{"rootEvent(0).String()", rootEvent(0).String(), "rootEvent(0)"},
+		{"rootEvent(5).String()", rootEvent(5).String(), "rootEvent(5)"},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q (docs/vocabulary.md V2; %s)", tc.expr, tc.got, tc.want, where)
+		}
+	}
+}
+
+// rk5Verdict names a probeVerdict for failure messages.
+func rk5Verdict(v probeVerdict) string {
+	switch v {
+	case probeOurs:
+		return "probeOurs"
+	case probeUnchanged:
+		return "probeUnchanged"
+	case probeTheirs:
+		return "probeTheirs"
+	case probeFailed:
+		return "probeFailed"
+	}
+	return fmt.Sprintf("probeVerdict(%d)", uint8(v))
+}
+
+// TestClassifyRootDecidesWhatOneReadShows is K2 of ADR 0022 section 8:
+// classifyRoot over section 3's rules, in order, the first that applies
+// deciding, with a case for each:
+//  1. a not-found while the mount descends from no root: probeUnchanged;
+//  2. a not-found while it descends from one: probeTheirs;
+//  3. any other error: probeFailed, even beside a body that names the attempt;
+//  4. a body that does not decode as rootPointer, or decodes with another
+//     Version or an empty Snapshot: probeFailed, for each of ADR 0021 G6's
+//     five bodies, for this build's version with an empty Snapshot, and for
+//     another version naming the attempt;
+//  5. a body naming doubtKey: probeOurs, with the decoded body returned, and
+//     probeFailed with an empty etag;
+//  6. a body naming rootSnapshot: probeUnchanged, and probeFailed with an
+//     empty etag;
+//  7. a body naming a third key: probeTheirs, with or without an etag.
+//
+// A root pointer of this build's version is made from one read off a New's
+// bucket, as section 8 says, since the version number is not a name a test
+// may use. Where section 3 says what rootPointer is returned, the zero value
+// where nothing decoded and the decoded body for a positive verdict, it is
+// asserted; for a body that decoded but decided nothing it is not.
+func TestClassifyRootDecidesWhatOneReadShows(t *testing.T) {
+	const where = "ADR 0022 section 3; section 8, K2"
+	local, err := store.NewLocal(filepath.Join(t.TempDir(), "bucket"))
+	if err != nil {
+		t.Fatalf("setup: store.NewLocal: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	rk5MustNew(t, ctx, "setup: New over an empty bucket, for a root pointer of this build's version",
+		rk5Config(local, nil))
+	_, base, ok := rk5Root(t, ctx, local, where)
+	if !ok {
+		t.Fatalf("setup: no root pointer of this build's version could be read off the bucket (%s)", where)
+	}
+
+	const (
+		rootSnap = snapshotPrefix + "00000000000000000003-aaaaaaaaaaaa.json.gz"
+		doubt    = snapshotPrefix + "00000000000000000004-bbbbbbbbbbbb.json.gz"
+		third    = snapshotPrefix + "00000000000000000004-cccccccccccc.json.gz"
+	)
+	// body returns base naming key at epoch, with version, and its bytes.
+	body := func(key string, epoch uint64, version int) (rootPointer, []byte) {
+		rp := base
+		rp.Snapshot, rp.Epoch, rp.Version = key, epoch, version
+		b, err := json.Marshal(rp)
+		if err != nil {
+			t.Fatalf("setup: marshalling a root pointer: %v", err)
+		}
+		return rp, b
+	}
+	ours, oursBody := body(doubt, 4, base.Version)
+	unchanged, unchangedBody := body(rootSnap, 3, base.Version)
+	theirs, theirsBody := body(third, 4, base.Version)
+	_, emptySnapBody := body("", 1, base.Version)
+	_, otherVersionOursBody := body(doubt, 4, base.Version+1)
+	zero := &rootPointer{}
+
+	cases := []struct {
+		name         string
+		raw          []byte
+		etag         string
+		err          error
+		rootSnapshot string
+		want         probeVerdict
+		wantRP       *rootPointer // nil: not asserted
+	}{
+		{"rule 1: store.ErrNotFound, no root descended from", nil, "", store.ErrNotFound, "",
+			probeUnchanged, zero},
+		{"rule 1: a wrapped store.ErrNotFound, no root descended from", nil, "",
+			fmt.Errorf("get %q: %w", rootKey, store.ErrNotFound), "", probeUnchanged, zero},
+		{"rule 2: store.ErrNotFound, a root descended from", nil, "", store.ErrNotFound, rootSnap,
+			probeTheirs, zero},
+		{"rule 3: another error", nil, "", rk5ErrInjected, rootSnap, probeFailed, zero},
+		{"rule 3 before rule 5: another error beside a body naming the attempt", oursBody, "e", rk5ErrInjected,
+			rootSnap, probeFailed, nil},
+		{"rule 4: null", []byte(`null`), "e", nil, rootSnap, probeFailed, zero},
+		{"rule 4: {}", []byte(`{}`), "e", nil, rootSnap, probeFailed, zero},
+		{"rule 4: an error document served with 200", []byte(`{"Code":"InternalError","Message":"boom"}`), "e",
+			nil, rootSnap, probeFailed, zero},
+		{"rule 4: not JSON, <Error/>", []byte(`<Error/>`), "e", nil, rootSnap, probeFailed, zero},
+		{"rule 4: a root pointer of version 99",
+			[]byte(`{"version":99,"epoch":7,"snapshot":"snapshots/00000000000000000007-ffffffffffff.json.gz","fsid":1,"written":1}`),
+			"e", nil, rootSnap, probeFailed, nil},
+		{"rule 4 before rule 6: this build's version with an empty Snapshot, no root descended from",
+			emptySnapBody, "e", nil, "", probeFailed, nil},
+		{"rule 4 before rule 5: another version naming the attempt", otherVersionOursBody, "e", nil, rootSnap,
+			probeFailed, nil},
+		{"rule 5: naming the attempt", oursBody, "e5", nil, rootSnap, probeOurs, &ours},
+		{"rule 5: naming the attempt, with no ETag", oursBody, "", nil, rootSnap, probeFailed, nil},
+		{"rule 6: naming the snapshot descended from", unchangedBody, "e6", nil, rootSnap, probeUnchanged,
+			&unchanged},
+		{"rule 6: naming the snapshot descended from, with no ETag", unchangedBody, "", nil, rootSnap,
+			probeFailed, nil},
+		{"rule 7: naming a third key", theirsBody, "e7", nil, rootSnap, probeTheirs, &theirs},
+		{"rule 7: naming a third key, with no ETag", theirsBody, "", nil, rootSnap, probeTheirs, &theirs},
+	}
+	type result struct {
+		v  probeVerdict
+		rp rootPointer
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			what := fmt.Sprintf("classifyRoot(%q, %q, %v, %q, %q)", tc.raw, tc.etag, tc.err, tc.rootSnapshot,
+				doubt)
+			r := rk5Go(func() result {
+				v, rp := classifyRoot(tc.raw, tc.etag, tc.err, tc.rootSnapshot, doubt)
+				return result{v, rp}
+			}).wait(t, what)
+			if r.v != tc.want {
+				t.Errorf("%s = %s, want %s (%s)", what, rk5Verdict(r.v), rk5Verdict(tc.want), where)
+			}
+			if tc.wantRP != nil && r.rp != *tc.wantRP {
+				t.Errorf("%s returned the root pointer %+v, want %+v: the decoded body where one decoded, and the "+
+					"zero value otherwise (%s)", what, r.rp, *tc.wantRP, where)
+			}
+		})
+	}
+}
+
+// TestNewStartsKnownWithTheRootPointersKey is K3 of ADR 0022 section 8: after
+// New, over an empty bucket and over a bucket that holds a filesystem,
+// f.rootKnowledge.State() is rootKnown, FS.doubtKey is "", and FS.rootSnapshot
+// is the key the root pointer at rootKey names, which for a fresh bucket is
+// the key of the one object under snapshotPrefix (ADR 0022 section 2, section
+// 8's facts).
+func TestNewStartsKnownWithTheRootPointersKey(t *testing.T) {
+	for _, seeded := range []bool{false, true} {
+		name := "an empty bucket"
+		if seeded {
+			name = "a bucket that holds a filesystem"
+		}
+		t.Run(name, func(t *testing.T) {
+			where := "ADR 0022 section 8, K3, " + name
+			local, err := store.NewLocal(filepath.Join(t.TempDir(), "bucket"))
+			if err != nil {
+				t.Fatalf("setup: store.NewLocal: %v", err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			if seeded {
+				s := rk5MustNew(t, ctx, "setup: New over an empty bucket", rk5Config(local, nil))
+				if err := rk5Commit(t, ctx, s, "c1", "setup: Sync of the seeding commit of c1"); err != nil {
+					t.Fatalf("setup: Sync of the seeding commit of c1 = %v, want success", err)
+				}
+			}
+
+			fs := rk5MustNew(t, ctx, where+": New", rk5Config(local, nil))
+			f := rk5Read(t, fs, "reading the FS's fields after New")
+			rk5CheckKnowledge(t, f, rootKnown, true, "", "after New over "+name, where)
+
+			_, rp, ok := rk5Root(t, ctx, local, where)
+			if ok && f.rootSnapshot != rp.Snapshot {
+				t.Errorf("after New over %s, FS.rootSnapshot = %q, want %q, the key the root pointer names (ADR "+
+					"0022 section 2; %s)", name, f.rootSnapshot, rp.Snapshot, where)
+			}
+			if !seeded {
+				infos, err := local.List(ctx, snapshotPrefix, "", 0)
+				if err != nil {
+					t.Fatalf("List(%q) on the bucket = %v (%s)", snapshotPrefix, err, where)
+				}
+				if len(infos) != 1 || f.rootSnapshot != infos[0].Key {
+					t.Errorf("after New over %s the bucket holds %v under %q and FS.rootSnapshot = %q, want one "+
+						"key, which FS.rootSnapshot names (%s)", name, infos, snapshotPrefix, f.rootSnapshot, where)
+				}
+			}
+		})
+	}
+}
+
 // TestLostSwapReplyIsAdoptedNotTakenForASecondWriter is K4 of ADR 0022
 // section 8, from CommitProtocol_SelfDiverge's route (route 1; the issue's
 // first done-when): a swap that took effect and lost its reply is settled by
@@ -883,9 +1151,10 @@ func rk5CheckConflictRecord(t *testing.T, c *rk5Capture, foreign rootPointer, wh
 // New over an empty bucket on the harness; the lost reply armed; a commit of
 // c2: Sync returns nil; the harness recorded, after the PutIfMatch it applied,
 // exactly one GetWithETag of rootKey and no further PutIfMatch of rootKey;
-// f.mode.State() is mountWritable, FS.epoch 2, FS.rootETag the MD5 of the
-// root pointer's bytes on the inner store, which names the applied attempt's
-// key, and FS.dirty false. A commit of c3: Sync returns nil, its PutIfMatch
+// f.mode.State() is mountWritable, f.rootKnowledge.State() rootKnown,
+// FS.doubtKey "", FS.rootSnapshot the key the applied PutIfMatch wrote,
+// FS.epoch 2, FS.rootETag the MD5 of the root pointer's bytes on the inner
+// store, which names the applied attempt's key, and FS.dirty false. A commit of c3: Sync returns nil, its PutIfMatch
 // passed through with that MD5 as its etag argument, and its key carries
 // epoch 3. A remount on the inner store has c2 and c3.
 //
@@ -928,8 +1197,11 @@ func TestLostSwapReplyIsAdoptedNotTakenForASecondWriter(t *testing.T) {
 			"(ADR 0022 section 1; %s)", got, mountWritable, where)
 	}
 	f := rk5Read(t, fs, "reading the FS's fields after the commit of c2")
-	// round 2: f.rootKnowledge.State() == rootKnown, f.doubtKey == "", and
-	// f.rootSnapshot == appliedKey (ADR 0022 section 8, K4).
+	rk5CheckKnowledge(t, f, rootKnown, true, "", "after the commit of c2", where)
+	if appliedKey != "" && f.rootSnapshot != appliedKey {
+		t.Errorf("after the commit of c2, FS.rootSnapshot = %q, want %q, the key the applied PutIfMatch wrote: "+
+			"the attempt is adopted (ADR 0022 section 3, probeOurs; %s)", f.rootSnapshot, appliedKey, where)
+	}
 	if f.epoch != 2 {
 		t.Errorf("after the commit of c2, FS.epoch = %d, want 2: the adopted attempt's epoch (ADR 0022 section "+
 			"3, probeOurs; %s)", f.epoch, where)
@@ -998,7 +1270,8 @@ func TestLostSwapReplyIsAdoptedNotTakenForASecondWriter(t *testing.T) {
 // The swap of c2 fails with the subtest's error: Sync returns a non-nil
 // error, for which errors.Is(err, store.ErrPrecondition) holds in the first;
 // the harness recorded exactly one GetWithETag of rootKey after the refused
-// PutIfMatch; f.mode.State() is mountWritable; FS.epoch is unchanged,
+// PutIfMatch; f.mode.State() is mountWritable; f.rootKnowledge.State() is
+// rootKnown and FS.doubtKey ""; FS.rootSnapshot and FS.epoch are unchanged,
 // FS.rootETag is the MD5 of the root pointer's bytes on the inner store, and
 // FS.dirty is true. A Create of c3 returns nil; Sync returns nil, its
 // PutIfMatch passed through with that MD5 as its etag argument; and a remount
@@ -1054,9 +1327,12 @@ func TestSwapRefusedWhileTheRootIsUnchangedRetriesAtTheNextCommit(t *testing.T) 
 					where)
 			}
 			f := rk5Read(t, fs, "reading the FS's fields after the commit of c2")
-			// round 2: f.rootKnowledge.State() == rootKnown, f.doubtKey == "",
-			// and f.rootSnapshot as it was before the commit of c2 (ADR 0022
-			// section 8, K5).
+			rk5CheckKnowledge(t, f, rootKnown, true, "", "after the commit of c2", where)
+			if f.rootSnapshot != before.rootSnapshot {
+				t.Errorf("after the commit of c2, FS.rootSnapshot = %q, want %q, as it was: the read shows the "+
+					"root pointer unchanged (ADR 0022 section 3, probeUnchanged; %s)", f.rootSnapshot,
+					before.rootSnapshot, where)
+			}
 			if f.epoch != before.epoch {
 				t.Errorf("after the commit of c2, FS.epoch = %d, want %d, as it was: the read shows the root "+
 					"pointer unchanged (ADR 0022 section 3, probeUnchanged; %s)", f.epoch, before.epoch, where)
@@ -1112,9 +1388,11 @@ func TestSwapRefusedWhileTheRootIsUnchangedRetriesAtTheNextCommit(t *testing.T) 
 // commit of c2: Sync returns an error whose text contains "commit conflict";
 // the harness recorded the PutIfMatch passed through and refused by the inner
 // store, then exactly one GetWithETag of rootKey, and no Put, PutIfMatch or
-// Delete after it. f.mode.State() is mountDiverged, and a Create of c3
-// returns vfs.ErrStale. The captured records hold one at slog.LevelError
-// whose message contains "commit conflict" with writer "other-host/4242",
+// Delete after it. f.mode.State() is mountDiverged, f.rootKnowledge.State()
+// is rootInDoubt and FS.doubtKey is the key the refused attempt wrote, and a
+// Create of c3 returns vfs.ErrStale. The captured records hold one at
+// slog.LevelError whose message contains "commit conflict" with writer
+// "other-host/4242",
 // their_epoch the foreign root pointer's Epoch and their_snapshot its
 // Snapshot. A second Sync returns an error, and the harness recorded no Put,
 // PutIfMatch or Delete since the first (ADR 0014 section 11, M7).
@@ -1129,13 +1407,14 @@ func TestASwapLostToAnotherWriterDivergesAndNamesTheWriter(t *testing.T) {
 		rk5Config(h, logs.logger()))
 	before := rk5Read(t, fs, "reading the FS's fields before the foreign root pointer is written")
 
+	// The harness's records are read before the inner store is touched.
+	mark := len(h.records())
 	foreign, err := rk5WriteForeignRoot(ctx, h.inner, before.epoch+1, rk5Writer)
 	if err != nil {
 		t.Fatalf("setup: writing a foreign root pointer on the inner store: %v", err)
 	}
 
 	// c2: the swap fails its condition on the inner store.
-	mark := len(h.records())
 	err = rk5Commit(t, ctx, fs, "c2", where+": Sync of the commit of c2")
 	if err == nil || !strings.Contains(err.Error(), "commit conflict") {
 		t.Errorf("%s: Sync of the commit of c2, after another writer moved the root pointer, = %v, want an error "+
@@ -1163,9 +1442,10 @@ func TestASwapLostToAnotherWriterDivergesAndNamesTheWriter(t *testing.T) {
 				"section 3, probeTheirs; %s)", writes, where)
 		}
 	}
-	// round 2: f.rootKnowledge.State() == rootInDoubt and f.doubtKey ==
-	// attemptKey, the key the refused attempt wrote (ADR 0022 section 8, K6).
-	_ = attemptKey
+	f := rk5Read(t, fs, "reading the FS's fields after the commit of c2")
+	// ProbeTheirs fires no event on the machine, which stays InDoubt, and
+	// leaves FS.doubtKey naming the refused attempt (ADR 0022 section 3).
+	rk5CheckKnowledge(t, f, rootInDoubt, attemptKey != "", attemptKey, "after the commit of c2", where)
 
 	if got := rk5Mode(t, fs, "f.mode.State() after the commit of c2"); got != mountDiverged {
 		t.Errorf("after the commit of c2, f.mode.State() = %v, want %v: the read showed another writer's root "+
@@ -1196,13 +1476,18 @@ func TestASwapLostToAnotherWriterDivergesAndNamesTheWriter(t *testing.T) {
 //
 // One commit behind it, New's; the lost reply and the failed read armed; a
 // commit of c2: Sync returns an error whose text contains "in doubt";
-// f.mode.State() is mountWritable; FS.epoch and FS.rootETag are unchanged and
-// FS.dirty is true. A Create of c3 returns nil. Sync returns nil, and the
-// harness recorded since the failed read one GetWithETag of rootKey before any
-// Put under snapshotPrefix, then one Put under snapshotPrefix whose key
-// carries epoch 3, then one PutIfMatch of rootKey whose etag argument is the
-// MD5 of the root pointer the lost reply wrote; FS.epoch is 3. A remount has
-// c2 and c3.
+// f.mode.State() is mountWritable; f.rootKnowledge.State() is rootInDoubt
+// and FS.doubtKey the key the applied PutIfMatch wrote; FS.epoch and
+// FS.rootETag are unchanged and FS.dirty is true. A Create of c3 returns nil.
+// Sync returns nil, and the harness recorded since the failed read one
+// GetWithETag of rootKey before any Put under snapshotPrefix, then one Put
+// under snapshotPrefix whose key carries epoch 3, then one PutIfMatch of
+// rootKey whose etag argument is the MD5 of the root pointer the lost reply
+// wrote; f.rootKnowledge.State() is rootKnown, FS.doubtKey "" and FS.epoch 3.
+// A remount has c2 and c3.
+//
+// The failed read is armed to take effect at the swap, so that it is the
+// first read after it, whatever reads come before.
 //
 // At edcfc15 the second Sync diverges the mount.
 func TestInDoubtMountSettlesTheRootBeforeItsNextCommit(t *testing.T) {
@@ -1214,7 +1499,7 @@ func TestInDoubtMountSettlesTheRootBeforeItsNextCommit(t *testing.T) {
 	// c2: the swap is applied, its reply lost, and the read fails.
 	mark := len(h.records())
 	h.armLoseSwap()
-	h.armFailRead()
+	h.armFailReadAfterSwap()
 	err := rk5Commit(t, ctx, fs, "c2", where+": Sync of the commit of c2")
 	if err == nil || !strings.Contains(err.Error(), "in doubt") {
 		t.Errorf("%s: Sync of the commit of c2, whose swap lost its reply and whose read failed, = %v, want an "+
@@ -1239,9 +1524,7 @@ func TestInDoubtMountSettlesTheRootBeforeItsNextCommit(t *testing.T) {
 			"0022 section 1; %s)", got, mountWritable, where)
 	}
 	f := rk5Read(t, fs, "reading the FS's fields after the commit of c2")
-	// round 2: f.rootKnowledge.State() == rootInDoubt, and f.doubtKey ==
-	// rk5Named(lostData), the key the applied PutIfMatch wrote (ADR 0022
-	// section 8, K7).
+	rk5CheckKnowledge(t, f, rootInDoubt, lostData != nil, rk5Named(lostData), "after the commit of c2", where)
 	if f.epoch != before.epoch || f.rootETag != before.rootETag {
 		t.Errorf("after the commit of c2, FS.epoch and FS.rootETag = %d and %q, want %d and %q, as they were: "+
 			"probeFailed changes no field (ADR 0022 section 3; %s)", f.epoch, f.rootETag, before.epoch,
@@ -1284,7 +1567,7 @@ func TestInDoubtMountSettlesTheRootBeforeItsNextCommit(t *testing.T) {
 			rootKey, snapshotPrefix, seq, rootKey, snapshotPrefix, rootKey, want, where)
 	}
 	f = rk5Read(t, fs, "reading the FS's fields after the Sync of c3")
-	// round 2: f.rootKnowledge.State() == rootKnown (ADR 0022 section 8, K7).
+	rk5CheckKnowledge(t, f, rootKnown, true, "", "after the Sync of c3", where)
 	if f.epoch != 3 {
 		t.Errorf("after the Sync of c3, FS.epoch = %d, want 3: the adopted epoch, 2, plus one (ADR 0022 section 4; "+
 			"%s)", f.epoch, where)
@@ -1318,7 +1601,7 @@ func TestInDoubtMountDivergesWhenTheNextReadShowsAnotherWriter(t *testing.T) {
 	// c2: the swap is applied, its reply lost, and the read fails.
 	mark := len(h.records())
 	h.armLoseSwap()
-	h.armFailRead()
+	h.armFailReadAfterSwap()
 	if err := rk5Commit(t, ctx, fs, "c2", where+": Sync of the commit of c2"); err == nil {
 		t.Errorf("%s: Sync of the commit of c2, whose swap lost its reply and whose read failed, = nil, want an "+
 			"error (ADR 0022 section 4)", where)
@@ -1370,7 +1653,8 @@ func TestInDoubtMountDivergesWhenTheNextReadShowsAnotherWriter(t *testing.T) {
 //
 // One commit behind it, New's; the dropped ETag armed; a commit of c2: Sync
 // returns nil; the harness recorded exactly one GetWithETag of rootKey after
-// the PutIfMatch; FS.rootETag is the MD5 of the root pointer's bytes. A commit
+// the PutIfMatch; f.rootKnowledge.State() is rootKnown and FS.doubtKey "";
+// FS.rootETag is the MD5 of the root pointer's bytes. A commit
 // of c3: Sync returns nil, its PutIfMatch passed through with that MD5 as its
 // etag argument. A remount has c2 and c3.
 //
@@ -1398,7 +1682,7 @@ func TestSwapReplyWithoutETagIsSettledByOneRead(t *testing.T) {
 			"read settles it (ADR 0022 section 1, section 4; %s)", rootKey, reads, where)
 	}
 	f := rk5Read(t, fs, "reading the FS's fields after the commit of c2")
-	// round 2: f.rootKnowledge.State() == rootKnown (ADR 0022 section 8, K9).
+	rk5CheckKnowledge(t, f, rootKnown, true, "", "after the commit of c2", where)
 
 	// Through the inner store, after the records were read.
 	raw, _, ok := rk5Root(t, ctx, h.inner, where)
@@ -1434,7 +1718,8 @@ func TestSwapReplyWithoutETagIsSettledByOneRead(t *testing.T) {
 // before it writes, and commits again (ADR 0022 section 4; Assumption 10).
 //
 // K9's setup with the failed read armed too: the first Sync returns an error
-// whose text contains "no ETag"; FS.dirty is true; the root pointer on the
+// whose text contains "no ETag"; f.rootKnowledge.State() is rootInDoubt and
+// FS.doubtKey the attempt's key; FS.dirty is true; the root pointer on the
 // inner store names the attempt's key. Sync again, without a change: it
 // returns nil; the harness recorded a GetWithETag of rootKey before a Put
 // under snapshotPrefix whose key carries epoch 3; and a remount has c2.
@@ -1449,7 +1734,7 @@ func TestSwapReplyWithoutETagAndAFailedReadRetriesTheCommit(t *testing.T) {
 	// c2: the swap is applied with no ETag, and the read fails.
 	mark := len(h.records())
 	h.armDropSwapETag()
-	h.armFailRead()
+	h.armFailReadAfterSwap()
 	err := rk5Commit(t, ctx, fs, "c2", where+": Sync of the commit of c2")
 	if err == nil || !strings.Contains(err.Error(), "no ETag") {
 		t.Errorf("%s: Sync of the commit of c2, whose swap reply carried no ETag and whose read failed, = %v, want "+
@@ -1465,8 +1750,7 @@ func TestSwapReplyWithoutETagAndAFailedReadRetriesTheCommit(t *testing.T) {
 		attemptKey = rk5Named(calls[dropped].data)
 	}
 	f := rk5Read(t, fs, "reading the FS's fields after the commit of c2")
-	// round 2: f.rootKnowledge.State() == rootInDoubt (ADR 0022 section 8,
-	// K10).
+	rk5CheckKnowledge(t, f, rootInDoubt, attemptKey != "", attemptKey, "after the commit of c2", where)
 	if !f.dirty {
 		t.Errorf("after the commit of c2, FS.dirty is false, want true: the commit failed, so the next commit "+
 			"resolves the doubt first (ADR 0022 section 4; Assumption 10; %s)", where)
@@ -1512,7 +1796,8 @@ func TestSwapReplyWithoutETagAndAFailedReadRetriesTheCommit(t *testing.T) {
 // empty bucket, so the init commit goes through the fallback; the lost root
 // Put armed; a commit of c2: Sync returns nil; the harness recorded the Put of
 // rootKey it applied, no Head of rootKey after it, and exactly one GetWithETag
-// of rootKey; FS.epoch is 2. A commit of c3: Sync returns nil, through one Put
+// of rootKey; f.rootKnowledge.State() is rootKnown, FS.doubtKey "",
+// FS.rootSnapshot the key the Put named, and FS.epoch 2. A commit of c3: Sync returns nil, through one Put
 // and one Head of rootKey. A remount has c2 and c3.
 //
 // At edcfc15 the first Sync returns "write root pointer: ..." and FS.epoch
@@ -1557,9 +1842,11 @@ func TestLostFallbackReplyIsAdopted(t *testing.T) {
 		}
 	}
 	f := rk5Read(t, fs, "reading the FS's fields after the commit of c2")
-	// round 2: f.rootKnowledge.State() == rootKnown, and f.rootSnapshot ==
-	// putKey, the key the Put named (ADR 0022 section 8, K11).
-	_ = putKey
+	rk5CheckKnowledge(t, f, rootKnown, true, "", "after the commit of c2", where)
+	if putKey != "" && f.rootSnapshot != putKey {
+		t.Errorf("after the commit of c2, FS.rootSnapshot = %q, want %q, the key the lost Put named: the attempt "+
+			"is adopted (ADR 0022 section 3, probeOurs; %s)", f.rootSnapshot, putKey, where)
+	}
 	if f.epoch != before.epoch+1 {
 		t.Errorf("after the commit of c2, FS.epoch = %d, want %d: the adopted attempt's epoch (ADR 0022 section "+
 			"3, probeOurs; %s)", f.epoch, before.epoch+1, where)
@@ -1598,7 +1885,8 @@ func TestLostFallbackReplyIsAdopted(t *testing.T) {
 // nil; the harness recorded no Delete, exactly one Get of rootKey (the
 // reclaim's read) and then exactly one GetWithETag of rootKey (the probe);
 // the root pointer on the inner store names the key of the last Put under
-// snapshotPrefix, which exists; FS.epoch is the loaded epoch plus one. A
+// snapshotPrefix, which exists; f.rootKnowledge.State() is rootKnown and
+// FS.doubtKey ""; FS.epoch is the loaded epoch plus one. A
 // commit of c3, with the store honouring conditions: Sync returns nil, its
 // PutIfMatch passed through and applied. A remount has c1, c2 and c3.
 //
@@ -1645,7 +1933,7 @@ func TestA501ThatTookEffectIsAdopted(t *testing.T) {
 		last = snapPuts[len(snapPuts)-1].key
 	}
 	f := rk5Read(t, fs, "reading the FS's fields after the commit of c2")
-	// round 2: f.rootKnowledge.State() == rootKnown (ADR 0022 section 8, K12).
+	rk5CheckKnowledge(t, f, rootKnown, true, "", "after the commit of c2", where)
 	if f.epoch != before.epoch+1 {
 		t.Errorf("after the commit of c2, FS.epoch = %d, want %d, the loaded epoch plus one: the attempt is "+
 			"adopted (ADR 0022 section 3, probeOurs; %s)", f.epoch, before.epoch+1, where)
@@ -1686,7 +1974,8 @@ func TestA501ThatTookEffectIsAdopted(t *testing.T) {
 //
 // Over an empty bucket, the lost reply armed before New: New returns a
 // non-nil *FS and a nil error; the bucket's root pointer names the one key
-// under snapshotPrefix; FS.epoch is 1. In a second subtest, the lost reply and
+// under snapshotPrefix; f.rootKnowledge.State() is rootKnown, FS.doubtKey ""
+// and FS.rootSnapshot that key; FS.epoch is 1. In a second subtest, the lost reply and
 // the failed read armed: New returns a nil *FS and a non-nil error. The
 // failed read is armed to take effect at the swap, since New's own load reads
 // the root pointer with GetWithETag first.
@@ -1713,8 +2002,7 @@ func TestLostReplyOnTheFirstCommitIsAdoptedByNew(t *testing.T) {
 				where, calls)
 		}
 		f := rk5Read(t, r.fs, "reading the FS's fields after New")
-		// round 2: f.rootKnowledge.State() == rootKnown (ADR 0022 section 8,
-		// K13).
+		rk5CheckKnowledge(t, f, rootKnown, true, "", "after "+what, where)
 		if f.epoch != 1 {
 			t.Errorf("after %s, FS.epoch = %d, want 1 (%s)", what, f.epoch, where)
 		}
@@ -1728,6 +2016,10 @@ func TestLostReplyOnTheFirstCommitIsAdoptedByNew(t *testing.T) {
 			if len(infos) != 1 || rp.Snapshot != infos[0].Key {
 				t.Errorf("the inner store holds %d key(s) under %q, %v, and the root pointer names %q, want one "+
 					"key, which the root pointer names (%s)", len(infos), snapshotPrefix, infos, rp.Snapshot, where)
+			}
+			if f.rootSnapshot != rp.Snapshot {
+				t.Errorf("after %s, FS.rootSnapshot = %q, want %q, the key the root pointer names: the attempt is "+
+					"adopted (ADR 0022 section 3, probeOurs; %s)", what, f.rootSnapshot, rp.Snapshot, where)
 			}
 		}
 	})

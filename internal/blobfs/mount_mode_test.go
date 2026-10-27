@@ -461,13 +461,11 @@ func TestASwapLostToAnotherWriterDivergesTheMountAndItStoresNothingMore(t *testi
 	}
 
 	// Another writer moves the root pointer (ADR 0022 section 8, the foreign
-	// root pointer), at the mount's epoch plus one.
-	epoch := mm14Go(func() uint64 {
-		fs.mu.RLock()
-		defer fs.mu.RUnlock()
-		return fs.epoch
-	}).wait(t, "reading FS.epoch holding FS.mu for reading")
-	if _, err := rk5WriteForeignRoot(ctx, fake.inner, epoch+1, rk5Writer); err != nil {
+	// root pointer), at the mount's epoch plus one: 2, since New over an empty
+	// bucket initialises epoch 1 (ADR 0021 section 6, F1 step 1) and no commit
+	// has followed. The epoch is not read from FS.epoch, since ADR 0014
+	// section 11 lets this file read no unexported field but f.mode.
+	if _, err := rk5WriteForeignRoot(ctx, fake.inner, 2, rk5Writer); err != nil {
 		t.Fatalf("setup: writing a foreign root pointer on the inner store: %v", err)
 	}
 
@@ -623,8 +621,9 @@ func TestRefusedUnconditionalSwapLeavesTheMountWritable(t *testing.T) {
 	}
 	if got := mm14Mode(t, fs, "f.mode.State() after the refused swap"); got != mountWritable {
 		t.Errorf("after a Sync whose swap was answered store.ErrUnsupported, without AllowUnconditionalRoot, "+
-			"f.mode.State() = %v (%d), want %v (%d): ADR 0021's refusal fires nothing, and only "+
-			"store.ErrPrecondition fires mountDiverge (ADR 0014 section 7; section 11, M6; ADR 0021 section 2)",
+			"f.mode.State() = %v (%d), want %v (%d): ADR 0021's refusal fires nothing while its read shows "+
+			"another root pointer, and only a read of the root pointer that shows another writer's fires "+
+			"mountDiverge (ADR 0014 section 7; section 11, M6; ADR 0021 section 2; ADR 0022 sections 2 to 4)",
 			got, uint32(got), mountWritable, uint32(mountWritable))
 	}
 	if _, err := mm14Create(t, ctx, fs, owner, "b"); err != nil {
@@ -662,9 +661,9 @@ func TestNewWhoseFirstSwapLosesFailsWithoutPanicking(t *testing.T) {
 			mm14Bound)
 	}
 	if c.panicked {
-		t.Fatalf("%s panicked with %v, want it to return a nil *FS and an error: New makes f.mode before "+
-			"loadOrInit, since initEmpty's commit can fire mountDiverge (ADR 0014 section 7; section 11, M8)",
-			what, c.pval)
+		t.Fatalf("%s panicked with %v, want it to return a nil *FS and an error: New makes f.mode and "+
+			"f.rootKnowledge before loadOrInit, since initEmpty's commit fires on them (ADR 0014 section 7; "+
+			"section 11, M8; ADR 0022 section 2)", what, c.pval)
 	}
 	if !c.returned {
 		t.Fatalf("%s ended without returning (runtime.Goexit), want it to return (ADR 0011 section 7)", what)

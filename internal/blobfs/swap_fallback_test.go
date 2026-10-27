@@ -44,6 +44,11 @@ package blobfs
 //     Assumption 26).
 //
 // Elsewhere:
+//   - What the mount does after a 501 that took effect, which #5 owns, is
+//     decided by ADR 0022 section 4 and tested by K12,
+//     TestA501ThatTookEffectIsAdopted, in
+//     internal/blobfs/root_knowledge_test.go; G3 here asserts the same Sync
+//     result.
 //   - O5, the R8 update, is in internal/blobfs/prune_root_test.go.
 //   - C1 to C3, which call runCheck, are in cmd/strata/check_test.go.
 //
@@ -54,8 +59,7 @@ package blobfs
 //     the reclaim's Delete follows only a Get of rootKey that returned
 //     not-found or a root pointer naming another key, and only of the key
 //     the commit wrote; that the reclaim changes no field and not the error;
-//     what the mount does after a 501 that took effect (#5's); that the
-//     opt-in branch is the code of 247a276; who reads and writes
+//     that the opt-in branch is the code of 247a276; who reads and writes
 //     FS.allowUnconditionalRoot; the flag's wiring and help text; -check's
 //     severity; the TLA+ lines and trace.tsv rows.
 //   - Logs, whose attributes ADR 0021 Assumption 8 does not pin, and the
