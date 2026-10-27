@@ -60,7 +60,7 @@ func (l *Local) Get(ctx context.Context, key string) ([]byte, error) {
 // as Head does, so the ETag is always that of this body. It needs no lock:
 // Put renames a whole file into place, so one read sees one whole body.
 //
-// TLA+: docs/tla/CommitProtocol.tla GetRoot
+// TLA+: docs/tla/CommitProtocol.tla GetRoot, ProbeOurs, ProbeUnchanged, ProbeTheirs, ProbeFailed
 func (l *Local) GetWithETag(ctx context.Context, key string) ([]byte, string, error) {
 	p, err := l.path(key)
 	if err != nil {

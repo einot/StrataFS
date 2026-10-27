@@ -163,7 +163,7 @@ type s3Error struct {
 
 // errorFor turns a non-2xx response into a typed error.
 //
-// TLA+: docs/tla/CommitProtocol.tla SwapReplyLost, SwapFailed, SwapConflict, SwapUnsupported
+// TLA+: docs/tla/CommitProtocol.tla SwapReplyLost, SwapFailed, SwapConflict, SwapUnsupported, ProbeFailed
 func errorFor(method, key string, resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	resp.Body.Close()
@@ -199,7 +199,7 @@ func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
 // one body with another's ETag. A retried GET returns a later body with that
 // body's own ETag, so retrying keeps the pair consistent.
 //
-// TLA+: docs/tla/CommitProtocol.tla GetRoot
+// TLA+: docs/tla/CommitProtocol.tla GetRoot, ProbeOurs, ProbeUnchanged, ProbeTheirs, ProbeFailed
 func (s *S3) GetWithETag(ctx context.Context, key string) ([]byte, string, error) {
 	resp, err := s.do(ctx, http.MethodGet, s.url(key, nil), nil, nil, true)
 	if err != nil {
@@ -284,7 +284,7 @@ func (s *S3) Put(ctx context.Context, key string, data []byte) error {
 	return nil
 }
 
-// TLA+: docs/tla/CommitProtocol.tla SwapOK, SwapReplyLost, SwapFailed
+// TLA+: docs/tla/CommitProtocol.tla SwapOK, SwapReplyLost, SwapFailed, SwapNoETag
 func (s *S3) PutIfMatch(ctx context.Context, key string, data []byte, etag string) (string, error) {
 	if data == nil {
 		data = []byte{}

@@ -137,11 +137,28 @@ type FS struct {
 
 	// mode is the mount mode. It is read without a lock, by mutable() ahead of
 	// every change, so it is an fsm.Atomic rather than guarded by mu. Every
-	// Fire on it is made in commitLocked, holding mu for writing from Sync or
-	// from initEmpty before the FS is shared. Its one edge, Diverge, only
-	// narrows and is caused by the store's answer, so it needs no policy
-	// (ADR 0018 §5). New makes it and nothing reassigns it (ADR 0014 §7).
+	// Fire on it is made in resolveRoot, which only commitLocked calls, holding
+	// mu for writing from Sync or from initEmpty before the FS is shared. Its
+	// one edge, Diverge, only narrows and is caused by the store's answer, so
+	// it needs no policy (ADR 0018 §5). New makes it and nothing reassigns it
+	// (ADR 0014 §7; ADR 0022 §2).
 	mode *fsm.Atomic[mountMode, mountEvent]
+
+	// rootKnowledge is whether rootETag is known to be the current ETag of the
+	// root pointer that names rootSnapshot. Every read and every Fire is made
+	// holding mu for writing, in commitLocked, resolveRoot and loadOrInit, or
+	// before the FS is shared. No policy's request and no gate reads it, and
+	// every transition is caused by a store's answer, so no transition asks a
+	// policy (ADR 0018 §5; ADR 0022 §6). New makes it and nothing reassigns it.
+	rootKnowledge *fsm.Machine[rootState, rootEvent]
+	// rootSnapshot is the snapshot key the root pointer named when rootETag was
+	// last set: by loadOrInit, by a commit's success path, or by resolveRoot.
+	// "" means no root, as "" does in rootETag.
+	rootSnapshot string
+	// doubtKey is the snapshot key of the attempt whose write of the root
+	// pointer left the root in doubt, while rootKnowledge is InDoubt; ""
+	// otherwise.
+	doubtKey string
 
 	// retention is how many namespace snapshots to keep behind the current
 	// one; pruning guards against a busy mount filling the bucket.
@@ -274,8 +291,9 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 		st = store.ReadOnly{Store: cfg.Store}
 	}
 
-	// The mode is made before loadOrInit, since initEmpty's commit can
-	// diverge, and making it calls nothing on the store (ADR 0014 §7).
+	// The mode and the root knowledge are made before loadOrInit, since
+	// initEmpty's commit can fire on either, and making them calls nothing on
+	// the store (ADR 0014 §7; ADR 0022 §2).
 	initial := mountWritable
 	if cfg.ReadOnly {
 		initial = mountReadOnly
@@ -291,6 +309,7 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 		ownerGID:       cfg.OwnerGID,
 		skipVerify:     cfg.SkipChunkVerification,
 		mode:           fsm.NewAtomic(mountModes, initial),
+		rootKnowledge:  fsm.NewMachine(rootStates, rootKnown),
 		retention:      cfg.SnapshotRetention,
 		open:           make(map[uint64]*openFile),
 		budget:         newBudget(cfg.MaxDirtyBytes, cfg.Log),
