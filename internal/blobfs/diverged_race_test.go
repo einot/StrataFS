@@ -35,6 +35,7 @@ package blobfs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -53,18 +54,24 @@ const dr48Bound = 10 * time.Second
 
 // dr48Store is a store.Store over a *store.Local that passes every call
 // through, except that once armed, its next PutIfMatch of rootKey closes
-// entered, waits until release is closed or testCtx ends, and then fails with
-// store.ErrPrecondition without calling the inner store. It disarms itself as
-// it takes that call, so only one swap is held. It does not embed store.Store,
-// so that every method it has is one written here.
+// entered, waits until release is closed or testCtx ends, then writes a
+// foreign root pointer on the inner store, at the attempt's epoch, which is
+// the mount's plus one, and fails with store.ErrPrecondition without passing
+// the swap to the inner store. So the read of the root pointer that follows
+// the refusal finds another writer, and the Fire of mountDiverge that the
+// racing Write races still happens inside the held Sync (ADR 0022 sections 3,
+// 5 and 8). A failure to write the foreign root pointer is kept in foreignErr.
+// It disarms itself as it takes that call, so only one swap is held. It does
+// not embed store.Store, so that every method it has is one written here.
 type dr48Store struct {
 	inner   *store.Local
 	testCtx context.Context
 	entered chan struct{}
 	release chan struct{}
 
-	mu    sync.Mutex
-	armed bool
+	mu         sync.Mutex
+	armed      bool
+	foreignErr error
 }
 
 var _ store.Store = (*dr48Store)(nil)
@@ -122,9 +129,27 @@ func (s *dr48Store) PutIfMatch(ctx context.Context, key string, data []byte, eta
 		case <-s.release:
 		case <-s.testCtx.Done():
 		}
+		var attempt rootPointer
+		ferr := json.Unmarshal(data, &attempt)
+		if ferr == nil {
+			_, ferr = rk5WriteForeignRoot(ctx, s.inner, attempt.Epoch, rk5Writer)
+		}
+		if ferr != nil {
+			s.mu.Lock()
+			s.foreignErr = ferr
+			s.mu.Unlock()
+		}
 		return "", store.ErrPrecondition
 	}
 	return s.inner.PutIfMatch(ctx, key, data, etag)
+}
+
+// foreignFailure returns the error of writing the foreign root pointer, if
+// that failed.
+func (s *dr48Store) foreignFailure() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.foreignErr
 }
 
 func (s *dr48Store) Name() string {
@@ -279,6 +304,10 @@ func TestWriteRacingADivergingCommitIsNotADataRace(t *testing.T) {
 	_ = writeB.wait(t, "Write that started while that Sync was inside its root-pointer swap")
 
 	// 6. A's Sync failed, and the FS has diverged. B's result is not pinned.
+	if err := fake.foreignFailure(); err != nil {
+		t.Errorf("setup: the fake could not write the foreign root pointer that stands for another writer "+
+			"(ADR 0022 section 8): %v", err)
+	}
 	if errA == nil {
 		t.Errorf("Sync whose root-pointer swap failed with store.ErrPrecondition = nil, want an " +
 			"error: another writer moved the root pointer, so the filesystem has diverged " +
