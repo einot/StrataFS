@@ -1,5 +1,5 @@
 #spec	action	file	symbol	locks	decided
-CommitProtocol	Init	internal/blobfs/fs.go	New	none	ADR 0011 section 3; ADR 0021 section 2
+CommitProtocol	Init	internal/blobfs/fs.go	New	none	ADR 0011 section 3; ADR 0021 section 2; ADR 0014 section 7
 CommitProtocol	GetRoot	internal/blobfs/commit.go	FS.loadOrInit	none: New runs it before the FS is shared	ADR 0011 section 1; ADR 0020 section 2
 CommitProtocol	GetRoot	internal/store/s3.go	S3.GetWithETag	none of its own; called before the FS is shared	ADR 0020 section 2
 CommitProtocol	GetRoot	internal/store/local.go	Local.GetWithETag	none of its own; called before the FS is shared	ADR 0020 section 2
@@ -8,7 +8,7 @@ CommitProtocol	InitEmpty	internal/blobfs/commit.go	FS.loadOrInit	none: New runs 
 CommitProtocol	InitEmpty	internal/blobfs/commit.go	FS.initEmpty	none	-
 CommitProtocol	GetSnapshot	internal/blobfs/commit.go	FS.loadOrInit	none: New runs it before the FS is shared	ADR 0011 section 1
 CommitProtocol	GetSnapshot	internal/blobfs/commit.go	decodeSnapshot	none	-
-CommitProtocol	Mutate	internal/blobfs/fs.go	FS.mutable	none: readOnly is set once by New and diverged is atomic	ADR 0011 section 4; ADR 0003 section 5
+CommitProtocol	Mutate	internal/blobfs/fs.go	FS.mutable	none: mode is an fsm.Atomic, read in one atomic load	ADR 0011 section 4; ADR 0003 section 5; ADR 0014 section 7
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.SetAttr	FS.mu (write)	-
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.createEntry	FS.mu (write)	-
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.unlink	FS.mu (write)	-
@@ -36,7 +36,7 @@ CommitProtocol	SwapFailed	internal/store/local.go	Local.PutIfMatch	Local.mu, ins
 CommitProtocol	SwapConflict	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0003 section 5
 CommitProtocol	SwapConflict	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	-
 CommitProtocol	SwapConflict	internal/store/local.go	Local.PutIfMatch	Local.mu, inside commitLocked's locks	-
-CommitProtocol	Diverge	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0003 section 5
+CommitProtocol	Diverge	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0003 section 5; ADR 0014 section 7
 CommitProtocol	SwapUnsupported	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0021 section 2; docs/DESIGN.md section 2
 CommitProtocol	SwapUnsupported	internal/blobfs/commit.go	FS.fallbackAllowed	none: allowUnconditionalRoot is set once by New	ADR 0021 section 2
 CommitProtocol	SwapUnsupported	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	-
