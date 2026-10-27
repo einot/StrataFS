@@ -39,6 +39,9 @@ package blobfs
 //     TestStoreHonouringOnlyIfNoneMatchCreatesThenCommitsNothing: G1 to G5,
 //     section 6's tests added on review, for the reclaim of section 2
 //     (Assumptions 21, 22 and 24; the module's R12 and J14).
+//   - TestRefusedCommitReclaimsOnlyAgainstAPositiveRootPointer: G6, added on
+//     re-review, for the reclaim's guard (section 2, steps 2 and 4;
+//     Assumption 26).
 //
 // Elsewhere:
 //   - O5, the R8 update, is in internal/blobfs/prune_root_test.go.
@@ -81,7 +84,10 @@ package blobfs
 //     fails the next Delete under snapshotPrefix with sf91ErrInjected without
 //     calling the inner store; and logs, in one call order, every Get of
 //     rootKey (counted), every Delete with its key, and the key of every Put
-//     under snapshotPrefix, so that a test can see the order of the three.
+//     under snapshotPrefix, so that a test can see the order of the three;
+//   - and, for G6: when armed, one-shot, answers the next Get of rootKey with
+//     bytes the test gives and a nil error, without calling the inner store;
+//     that Get is logged and counted like any other.
 //
 // It takes no hold: every route here is sequential, and the 501 is injected
 // synchronously. Two mounts in one test share one harness.
@@ -223,6 +229,12 @@ type sf91Store struct {
 	// sf91ErrInjected without calling the inner store, once.
 	failDelete bool
 
+	// getRootArmed answers the next Get of rootKey with a copy of
+	// getRootBody and a nil error without calling the inner store, once. The
+	// Get is logged and counted like any other.
+	getRootArmed bool
+	getRootBody  []byte
+
 	// The records: every PutIfMatch of rootKey in call order, the bytes of
 	// every Put of rootKey in call order, the number of Heads of rootKey, and
 	// the numbers of Puts, Deletes and PutIfMatches of any key.
@@ -295,12 +307,27 @@ func (s *sf91Store) records() sf91Records {
 	return rec
 }
 
-// Get passes through, logging every Get of rootKey.
+// armGetRoot makes the next Get of rootKey answer body and a nil error,
+// without calling the inner store, once (ADR 0021 section 6, for G6).
+func (s *sf91Store) armGetRoot(body []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.getRootArmed = true
+	s.getRootBody = append([]byte(nil), body...)
+}
+
+// Get passes through, logging every Get of rootKey. When armGetRoot has
+// armed it, the next Get of rootKey is answered with the armed body instead.
 func (s *sf91Store) Get(ctx context.Context, key string) ([]byte, error) {
 	if key == rootKey {
 		s.mu.Lock()
 		s.events = append(s.events, sf91Event{op: "Get", key: key})
+		armed, body := s.getRootArmed, s.getRootBody
+		s.getRootArmed, s.getRootBody = false, nil
 		s.mu.Unlock()
+		if armed {
+			return append([]byte(nil), body...), nil
+		}
 	}
 	return s.inner.Get(ctx, key)
 }
@@ -1469,4 +1496,105 @@ func TestStoreHonouringOnlyIfNoneMatchCreatesThenCommitsNothing(t *testing.T) {
 	}
 
 	sf91CheckRemount(t, ctx, h.inner, nil, []string{"c2", "c3"}, "ADR 0021 section 6, G5")
+}
+
+// TestRefusedCommitReclaimsOnlyAgainstAPositiveRootPointer is G6 of ADR 0021
+// section 6, added on re-review: the reclaim deletes a refused commit's
+// snapshot only when its read of the root pointer positively shows a root
+// pointer other than the attempt's, a not-found or a body that decodes as
+// rootPointer of the current format version with a non-empty Snapshot other
+// than the attempt's key. Against any other body it deletes nothing (ADR 0021
+// section 2, the reclaim, steps 2 and 4; Assumption 26).
+//
+// One subtest per body, each on a fresh harness: c1 seeded on the inner
+// store; New on the harness in its unconditional mode, without the opt-in;
+// the inner store's keys under snapshotPrefix recorded; the next Get of
+// rootKey armed to answer the body; a commit of c2. In each, Sync returns
+// F3's error; the harness logged exactly one Get of rootKey since the mount
+// and no Delete; the inner store's keys under snapshotPrefix are the recorded
+// ones plus exactly one, the attempt's, which it still holds; and the root
+// pointer's bytes on the inner store are unchanged. The Debug records the
+// reclaim logs are not pinned, and not asserted.
+//
+// The bodies: null; {}; an error document served with 200; a document that
+// is not JSON, <Error/>; and a root pointer of another format version. At
+// c57ef58 the null, {}, error-document and other-version subtests are red,
+// on the Delete count and then the listing: the code there deletes on any
+// body that decodes without error whose Snapshot is not the attempt's key,
+// and each of those four decodes so, the first three with an empty Snapshot.
+// The <Error/> subtest is green there, since the body does not decode and
+// nothing is deleted, and it must stay green. G1, G2 and G3 cover the
+// positive cases: a current-version root pointer naming another key, a
+// not-found, and one naming the attempt's key.
+//
+// The root pointer's bytes are read after the seeding commit and before the
+// harness's mount, as in F3; the keys under snapshotPrefix after the
+// harness's records have been read.
+func TestRefusedCommitReclaimsOnlyAgainstAPositiveRootPointer(t *testing.T) {
+	bodies := []struct {
+		name string
+		body string
+	}{
+		{"null", `null`},
+		{"empty object", `{}`},
+		{"error document", `{"Code":"InternalError","Message":"boom"}`},
+		{"not JSON", `<Error/>`},
+		{"other version", `{"version":99,"epoch":7,"snapshot":"snapshots/00000000000000000007-ffffffffffff.json.gz","fsid":1,"written":1}`},
+	}
+	for _, b := range bodies {
+		t.Run(b.name, func(t *testing.T) {
+			where := fmt.Sprintf("ADR 0021 section 6, G6, the body %s", b.body)
+			h, ctx := sf91NewHarness(t, true)
+			rootBefore := sf91Seed(t, ctx, h.inner, "c1")
+
+			fs := sf91MustNew(t, ctx, "ADR 0021 section 6, G6: New, without the opt-in, on the harness in its "+
+				"unconditional mode, over the seeded bucket", sf91Config(h))
+			mark := len(h.records().events)
+			keysBefore := sf91SnapshotKeys(t, ctx, h.inner, "before the commit of c2")
+
+			h.armGetRoot([]byte(b.body))
+			err := sf91Commit(t, ctx, fs, "c2", "ADR 0021 section 6, G6: Sync of the commit of c2")
+			sf91CheckRefused(t, err, "Sync of the commit of c2, on a store that answers every PutIfMatch "+
+				"store.ErrUnsupported", where)
+
+			rec := h.records()
+			since := rec.events[mark:]
+			gets := 0
+			for _, e := range since {
+				if e.op == "Get" {
+					gets++
+				}
+			}
+			if gets != 1 {
+				t.Errorf("since the mount the harness logged %d Get(s) of the root pointer %q, want exactly one, "+
+					"the reclaim's read (ADR 0021 section 2, the reclaim, step 1; %s). Its log: %v", gets, rootKey,
+					where, since)
+			}
+			if dels := sf91DeletesOf(since); len(dels) != 0 {
+				t.Errorf("since the mount the harness logged the Deletes %v, want none: the read answered %s, "+
+					"which does not positively show a root pointer other than the attempt's, so the reclaim "+
+					"deletes nothing (ADR 0021 section 2, the reclaim, step 4; Assumption 26; %s). Its log: %v",
+					dels, b.body, where, since)
+			}
+			puts := sf91SnapPutsOf(since)
+			if len(puts) != 1 {
+				t.Errorf("since the mount the harness logged the Puts under %q %q, want exactly one, the "+
+					"attempt's snapshot (%s). Its log: %v", snapshotPrefix, puts, where, since)
+			}
+
+			// Through the inner store, after the records were read.
+			keysAfter := sf91SnapshotKeys(t, ctx, h.inner, "after the commit of c2")
+			if len(puts) == 1 {
+				want := append(append([]string(nil), keysBefore...), puts[0])
+				slices.Sort(want)
+				if !slices.Equal(keysAfter, want) {
+					t.Errorf("after the commit of c2 the inner store's keys under %q are %q, want %q: the ones "+
+						"recorded before it plus the attempt's, %q, which nothing may delete against the body "+
+						"%s (ADR 0021 section 2, the reclaim, step 4; Assumption 26; %s)", snapshotPrefix,
+						keysAfter, want, puts[0], b.body, where)
+				}
+			}
+			sf91CheckRootBytes(t, ctx, h.inner, rootBefore, "after the commit of c2", where)
+		})
+	}
 }
