@@ -22,6 +22,16 @@ of `37abe5d`; §11 adds M6 to M9, names the test file and extends what review
 checks; Assumptions 36 to 42 are added. The type, the table, the `String`
 values, the initial state, `New`'s ordering and `mutable()`'s mapping are
 unchanged, and every test this ADR pins stands.
+**Revised:** 2026-10-27 — cross-reference only, for ADR 0022, which decides
+the root-pointer knowledge machine §8 gave it. Two of §7's statements move
+with it: the mode's one `Fire` of `mountDiverge` is now made by
+`resolveRoot`, on the probe's verdict `ProbeTheirs`, called from
+`commitLocked` under the same hold, and `commitLocked`'s
+`store.ErrPrecondition` case fires `rootSwapUnknown` instead; and M3, M4
+and M7, which diverged a mount by a refusal against an unchanged root
+pointer, now diverge it by a second writer, as ADR 0022 §8 says. The type,
+the table, the `String` values, `mutable()`'s mapping and every other test
+are unchanged; a sentence at §7 and at §8 says so.
 **Issue:** #114
 
 ## Context
@@ -638,6 +648,10 @@ var mountModes = fsm.NewTable("mode",
   nothing: `store.ErrUnsupported` without the opt-in, which is ADR 0021 §2's
   refusal (M6); `store.ErrUnsupported` with it, the fallback; and
   `case err != nil`. So does every success path, and every other function.
+  Since ADR 0022 the one `Fire` is `resolveRoot`'s, on the verdict
+  `ProbeTheirs` of its read of the root pointer, made from `commitLocked`
+  under the same hold; the `store.ErrPrecondition` case leaves the root in
+  doubt instead (ADR 0022 §2, §4), and nothing else fires on the mode.
 - **Its readers:**
   - `mutable()` reads `f.mode` and nothing else, and returns:
     - nil for `mountWritable`;
@@ -729,7 +743,10 @@ var mountModes = fsm.NewTable("mode",
     `rootProbeOurs`, `rootProbeUnchanged`;
   - `ProbeTheirs` fires `mountDiverge` on the mount mode;
   - its ADR, for #5, names its type, decides its guards and the probe, and
-    specifies it in TLA+ first (ADR 0013 §8).
+    specifies it in TLA+ first (ADR 0013 §8). That ADR is ADR 0022, which
+    names the type `rootState`, keeps V2's names with two meanings widened,
+    and decides that the machine is not security-relevant, since
+    `mutable()` does not read it.
 - **The server, connection and process lifecycle**:
   - machines with the names V5 reserves, plus `mountClosed` and `mountClose`
     on the mount mode;

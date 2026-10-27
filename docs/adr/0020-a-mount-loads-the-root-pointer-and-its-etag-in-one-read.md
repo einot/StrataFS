@@ -20,6 +20,13 @@ the `Head` after it now follow a swap answered `store.ErrUnsupported` only on
 a mount whose operator set `Config.AllowUnconditionalRoot`; without the
 opt-in such a swap fails the commit and writes nothing more. The rule, the
 Go change and the configurations here are unchanged.
+**Revised:** 2026-10-27 — cross-reference only: ADR 0022 decided #103 and
+#5, which §2, Assumption 3 and *What this does not decide* leave to them. A
+swap reply with no ETag now leaves the root pointer in doubt, and one read of
+it, `GetWithETag`, supplies the ETag before the mount swaps again, so
+Assumption 3's asymmetry, a refusal at mount and nothing at a swap, is
+closed; §2's refusal at mount stands. The rule, the Go change and the
+configurations here are unchanged.
 **Issue:** #89
 
 ## Context

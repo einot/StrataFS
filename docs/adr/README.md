@@ -104,3 +104,4 @@ URL, and what was taken from it.
 | [0019](0019-a-prune-pass-deletes-only-below-its-own-commit.md) | A prune pass deletes only below its own commit's snapshot | Accepted |
 | [0020](0020-a-mount-loads-the-root-pointer-and-its-etag-in-one-read.md) | A mount loads the root pointer and its ETag in one read | Accepted |
 | [0021](0021-the-unconditional-root-write-needs-the-operators-opt-in.md) | The unconditional root write needs the operator's opt-in | Accepted |
+| [0022](0022-a-failed-root-swap-is-settled-by-one-read-of-the-root-pointer.md) | A failed root-pointer swap is settled by one read of the root pointer, never taken for a second writer | Accepted |

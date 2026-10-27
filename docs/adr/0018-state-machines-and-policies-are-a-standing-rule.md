@@ -2,6 +2,14 @@
 
 **Status:** Accepted
 **Date:** 2026-10-24
+**Revised:** 2026-10-27 — cross-reference only: ADR 0022 decided the
+root-pointer knowledge machine §5 left to the ADR for #5. It is not
+security-relevant, since `mutable()` reads the mode alone, so none of its
+transitions asks a policy and no exemption is granted; and the mode's
+`Diverge`, still a narrowing transition a store's answer causes, is now fired
+by `resolveRoot` on the read's verdict, from `commitLocked` under the same
+hold of `FS.mu` for writing. §5's paragraph on the machines gains a
+sentence; the rules, the register and the link are unchanged.
 **Issue:** #114
 
 ## Context
@@ -425,7 +433,10 @@ and to review. This section adds no name to `docs/vocabulary.md`.
   (ADR 0014 §8) apply this section. Root-pointer knowledge is
   security-relevant if the ADR for #5 has `mutable()` read it. `ProbeOurs`
   and `ProbeUnchanged` would then widen, with no caller causing them, so
-  that ADR would exempt them or extend ADR 0014 §5, as above.
+  that ADR would exempt them or extend ADR 0014 §5, as above. ADR 0022
+  decided it: `mutable()` does not read the machine, so it is not
+  security-relevant, and none of its transitions asks a policy (ADR 0022
+  §6).
 - **Link counts** are not security-relevant. `relink`'s changes only follow
   the removals and renames that `OpRemoveEntry` and `OpRename` allow, and run
   after stage E in the hold of `FS.mu` in which that check is made

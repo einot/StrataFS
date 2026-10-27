@@ -10,7 +10,11 @@
 \* Go symbols that perform each action, and docs/vocabulary.md, V3, gives
 \* every name.
 \*
-\* Checked against faeba5b
+\* Checked against faeba5b, for every action but those ADR 0022 adds or
+\*   changes (SwapNoETag, SwapUnknown, the four Probe actions, and the swap
+\*   outcomes that conjoin Unresolved), whose trace awaits coder's commit for
+\*   that ADR; this line is bumped once it is on the branch (ADR 0022,
+\*   Assumption 20).
 \* Revised: 2026-10-24 -- ADR 0019 (#88): with the Fixes member
 \*   PruneBelowCurrent, a prune pass deletes only the keys that sort below the
 \*   one its commit swapped the root pointer to, and keeps the Retention newest
@@ -47,19 +51,42 @@
 \*   the comments of Init, Diverge and SwapConflict name FS.mode in place of
 \*   FS.readOnly and FS.diverged. No configuration changes. Nothing else
 \*   moved.
+\* Revised: 2026-10-27 -- ADR 0022 (#5, #103): with the Fixes member
+\*   RootProbe, a write of the root pointer whose reply does not establish
+\*   its ETag leaves the mount's knowledge of the root pointer in doubt
+\*   (SwapUnknown, the machine of docs/vocabulary.md V2, now modelled as
+\*   rootKnowledge with doubtKey and rootSnapshot beside it), and one read of
+\*   the root pointer settles it before any further write: ProbeOurs adopts
+\*   the attempt, ProbeUnchanged takes the root pointer's ETag, ProbeTheirs
+\*   is where Diverge is fired, and ProbeFailed leaves the doubt for the next
+\*   commit. SwapReplyLost, SwapFailed, SwapConflict and the fallback's two
+\*   failing branches conjoin Unresolved, which is SwapUnknown with the member
+\*   and the old CommitFails, with Diverge for SwapConflict, without it. The
+\*   faults ProbeFailed and SwapNoETag, the action SwapNoETag (#103) and the
+\*   pc string "Probe" are added; NextStep gives "Probe" while the root is in
+\*   doubt, so no snapshot Put or swap is enabled then; Committed records
+\*   rootSnapshot. R11 is rewritten, R13 and R14 are added, J13 is rewritten,
+\*   J19 and J20 are added, and the Leaves-out list says what Go's rule
+\*   covers that the model does not reach. Without the member the module
+\*   describes commitLocked as it is at edcfc15, as before. Nothing else
+\*   moved.
 \*
 \* Scope
 \*   - One bucket, and the mount processes in Mounts.
 \*   - Loading: GetRoot, HeadRoot, GetSnapshot, RefuseEmpty and InitEmpty.
 \*   - Namespace changes: Mutate, and StrayDirty (Assumption J6).
 \*   - Commits: chunks, then the snapshot, then a conditional swap of the
-\*     root pointer, with five store outcomes (SwapOK, SwapReplyLost,
-\*     SwapFailed, SwapConflict, SwapUnsupported) and, after a 501, either
-\*     the refusal that FallbackOptIn adds, which writes nothing more, or
-\*     the fallback where FallbackAllowed (FallbackPut, FallbackHead). The
-\*     snapshot Put and the fallback's Put may each fail without taking
+\*     root pointer, with six store outcomes (SwapOK, SwapReplyLost,
+\*     SwapFailed, SwapConflict, SwapUnsupported, SwapNoETag) and, after a
+\*     501, either the refusal that FallbackOptIn adds, which writes nothing
+\*     more, or the fallback where FallbackAllowed (FallbackPut, FallbackHead).
+\*     The snapshot Put and the fallback's Put may each fail without taking
 \*     effect (PutFailed), or take effect and fail (SnapshotReplyLost,
 \*     FallbackReplyLost).
+\*   - Root-pointer knowledge (ADR 0022): a write whose reply did not
+\*     establish the root pointer's ETag leaves it in doubt (SwapUnknown),
+\*     and one read settles it (ProbeOurs, ProbeUnchanged, ProbeTheirs) or
+\*     fails to (ProbeFailed).
 \*   - Divergence (Diverge).
 \*   - Each mount's prune passes: StartPrune, PruneList, PruneDelete and
 \*     PruneEnd.
@@ -68,16 +95,19 @@
 \* Leaves out
 \*   - File data, the commit gate and its settle pass: FileData's.
 \*   - The write budget, and NFS acknowledgements: NfsDurability's.
-\*   - rootKnowledge, which the ADR for #5 adds (Assumption J13).
-\*   - A read of the root pointer that returns no ETag, which with AtomicLoad
-\*     makes New fail (ADR 0020 section 2). Here every root pointer has an
-\*     ETag (Assumption J3).
-\*   - Failed reads: a Get or a Head of the root pointer, or a Get of the
-\*     snapshot it names, failing other than with not-found. Each only makes
-\*     New fail.
+\*   - A read of the root pointer that returns no ETag at load, which with
+\*     AtomicLoad makes New fail (ADR 0020 section 2). Here every root
+\*     pointer has an ETag (Assumption J3); a swap reply that withholds it is
+\*     SwapNoETag, and a probe's read that withholds it is, in Go, a failed
+\*     probe (ADR 0022 section 3), which ProbeFailed stands for.
+\*   - Failed reads at load: a Get or a Head of the root pointer, or a Get of
+\*     the snapshot it names, failing other than with not-found. Each only
+\*     makes New fail. A failed read of the root pointer by the probe is in
+\*     (ProbeFailed).
 \*   - Failed List and Delete calls (Assumption J14).
-\*   - A swap reply with no ETag (#103), and a Head failing after the
-\*     fallback's Put.
+\*   - A Head failing after the fallback's Put. In Go that leaves the root in
+\*     doubt and the probe follows, as a swap reply with no ETag does (ADR
+\*     0022 section 4); here the Head always answers.
 \*   - A bucket whose mounts differ in Config.AllowUnconditionalRoot: here
 \*     every mount of a configuration is opted in or none is (J17).
 \*   - A 501 answered for a reason other than the condition: here a 501 is
@@ -86,7 +116,10 @@
 \*   - A swap answered 501 that took effect: here a 501 changes no object
 \*     (J4), so the read that guards the refused commit's Delete (ADR 0021
 \*     section 2) always finds the root pointer naming another key, and the
-\*     Delete always follows (R12).
+\*     Delete always follows (R12). In Go, a guard read that shows the
+\*     attempt's key, fails, or returns a body the mount does not understand
+\*     leaves the root in doubt and the probe follows (ADR 0022 section 4),
+\*     which this model does not reach.
 \*   - A Put or a Delete taking effect more than once through the retries
 \*     of S3.do, with other calls in between: here a call takes effect at
 \*     most once, at its own step (ADR 0013 Assumption 5).
@@ -117,23 +150,29 @@
 \*        FallbackOptIn and no opt-in the action ends at that call, and no
 \*        Put follows (ADR 0021 section 4).
 \*   R8.  StartPrune runs in the same hold of FS.mu as the swap's success
-\*        path, so it is part of SwapOK and of FallbackHead.
+\*        path, so it is part of SwapOK and of FallbackHead, and, with
+\*        RootProbe, of ProbeOurs at the failure site, whose success path is
+\*        the same code (ADR 0022 section 4).
 \*   R9.  The List loop is one step: it is exactly one call below 1,000 keys,
 \*        and every configuration stays far below that.
 \*   R10. PruneEnd stays a step of its own, because it does not commute with
 \*        schedulePrune's read of FS.pruning.
-\*   R11. A conflict diverges a "Writable" mount only (Diverge). Since ADR
-\*        0014 section 7's conversion, commitLocked fires mountDiverge on
-\*        FS.mode, whose table mountModes has one edge, from "Writable", so
-\*        a read-only mount's mode is left "ReadOnly": Go's Fire refuses and
-\*        commitLocked logs the refusal, and the mount, still dirty, tries
-\*        its commit again as a writable mount does after any failed swap.
-\*        Only a configuration without ReadOnlyFence reaches the case, since
-\*        store.ReadOnly answers every write of a fenced mount
-\*        store.ErrUnsupported, never store.ErrPrecondition. Before the
-\*        conversion, at 043927f, commitLocked set FS.diverged on any
-\*        store.ErrPrecondition, whatever FS.readOnly was, and this module
-\*        made a read-only mount "Diverged" too.
+\*   R11. Diverge moves a "Writable" mount only, and leaves any other mode as
+\*        it is: commitLocked, or since ADR 0022 resolveRoot, fires
+\*        mountDiverge on FS.mode, whose table mountModes has one edge, from
+\*        "Writable", so a read-only mount's mode is left "ReadOnly" and Go's
+\*        Fire refuses, which commitLocked logs; the mount, still dirty,
+\*        tries its commit again as a writable mount does after any failed
+\*        swap. Only a configuration without ReadOnlyFence reaches the case,
+\*        since store.ReadOnly answers every write of a fenced mount
+\*        store.ErrUnsupported, never store.ErrPrecondition. Without
+\*        RootProbe, SwapConflict conjoins Diverge, as commitLocked's
+\*        store.ErrPrecondition case fired it at edcfc15; with it, only
+\*        ProbeTheirs does, since no swap's error alone diverges a mount
+\*        (ADR 0022 section 1). Before the conversion, at 043927f,
+\*        commitLocked set FS.diverged on any store.ErrPrecondition, whatever
+\*        FS.readOnly was, and this module made a read-only mount "Diverged"
+\*        too.
 \*   R12. With FallbackOptIn and no opt-in, the swap's 501, commitLocked's
 \*        read of the root pointer and its Delete of the attempt's snapshot
 \*        are one action, SwapUnsupported's refusal branch, by the direct
@@ -148,6 +187,20 @@
 \*        names either, so no property here tells the two orders apart. A
 \*        crash between the calls leaves the orphan, as a crash before the
 \*        swap would, and so does a failed Delete (J14).
+\*   R13. With RootProbe, the probe's read of the root pointer is a store call
+\*        of its own, so it is a step (ADR 0013 section 4): pc "Probe" lies
+\*        between a failed write and the read, and another mount or this
+\*        mount's prune goroutine may act between them, which is exactly what
+\*        the verdict has to survive. classifyRoot and the Fire that follows
+\*        fold into the read: they touch only state FS.mu protects, which
+\*        commitLocked holds throughout (R4), so the read is the one access
+\*        outside that protection.
+\*   R14. At the top of a commit the read runs in the same hold as the
+\*        snapshot Put that follows it, and the model keeps them as two steps
+\*        from "Ready" with nsDirty set, which only keeps Mutate out (R4, and
+\*        Mutate needs ~nsDirty), while other mounts and the prune goroutine
+\*        may act between them, as they may in Go between any two store calls.
+\*        On ProbeFailed at "Ready" nothing moves, which is a stuttering step.
 \*
 \* Assumptions (judgement calls, not requirements)
 \*   J1.  Commit ids are lineage ids, [writer, epoch]. They are unique,
@@ -171,7 +224,10 @@
 \*        can take effect and the call still return an error, since its
 \*        reply can be lost and S3.do sends it again after a transport
 \*        error, a 5xx or a 429. Local.Put cannot, since its last step is
-\*        the rename that applies it.
+\*        the rename that applies it. SwapNoETag is S3.PutIfMatch's: a 200
+\*        whose ETag header is missing (#103). ProbeFailed is GetWithETag's,
+\*        from a transport error, a 5xx after S3.do's retries, or a body the
+\*        mount does not understand (ADR 0022 section 3).
 \*   J5.  Start = "Loaded" is a reachable state, used to isolate a defect
 \*        without assuming a fix that does not exist. Its commit was made
 \*        outside the model and is no mount's acknowledgement, so acked
@@ -222,10 +278,16 @@
 \*        residual ADR 0019 Assumption 4 left: a swap through the window
 \*        names a key below the one a pass was begun for, a failed attempt's
 \*        orphan above it fills the retention, and the pass deletes the root
-\*        pointer's snapshot.
+\*        pointer's snapshot. With RootProbe (ADR 0022), the envelope also
+\*        covers lost swap replies, failed reads and a crash for one writer
+\*        pruning at Retention 1 (CommitProtocol_PruneProbe): an adopted
+\*        attempt is the key the root pointer already names, so it is at or
+\*        above every pass's key, and the swap after it is one epoch higher.
 \*   J12. The configurations' bounds and tiers are judgement calls.
-\*   J13. rootKnowledge is not modelled; the ADR for #5 adds it. AtomicLoad
-\*        is, since ADR 0020: GetRoot consults it.
+\*   J13. rootKnowledge is modelled since ADR 0022, with doubtKey and
+\*        rootSnapshot beside it, and the four Probe actions consult
+\*        RootProbe through NextStep: only with the member can a mount reach
+\*        "InDoubt". AtomicLoad is, since ADR 0020: GetRoot consults it.
 \*   J14. Failed List and Delete calls are left out, and ADR 0019's argument
 \*        does not need them: a List or a Delete that fails deletes nothing,
 \*        a Delete that takes effect and is sent again deletes the same key,
@@ -279,6 +341,25 @@
 \*        at its first write call, before any swap, and NoSelfDivergence
 \*        looks only at "Diverged". A member would add a configuration pair
 \*        and a calibration that show nothing (ADR 0014, Assumption 40).
+\*   J19. The probe's verdict is by the key the root pointer names, not by
+\*        its ETag, and the ETag the read returns is what the mount takes
+\*        (ADR 0022 section 3, Assumption 3). ProbeOurs needs
+\*        bucketRoot.key = doubtKey[m], which with Nonce only this mount's
+\*        write can have made; ProbeUnchanged needs bucketRoot.key =
+\*        rootSnapshot[m], which no other mount's write can restore, since
+\*        every write names a fresh key, so it never takes another writer's
+\*        ETag; ProbeTheirs is the rest. NoLostAck and NoSelfDivergence
+\*        together pin the three in CommitProtocol_ProbeTwoWriters: a verdict
+\*        too eager to adopt or to proceed breaks the first, one too eager to
+\*        diverge breaks the second.
+\*   J20. ProbeOurs at the failure site is Committed, the same success path
+\*        as SwapOK's, since the snapshot the root pointer names holds the
+\*        namespace as it stood in the same hold (ADR 0022 Assumption 9). At
+\*        the top of a later commit it adopts only: epoch, rootETag and base
+\*        take the attempt, and nsDirty, acked and the pass are left to the
+\*        commit that follows. A clean in-doubt mount is unreachable, since
+\*        every path to "InDoubt" leaves nsDirty set, so NextStep's "Probe"
+\*        needs nsDirty as a commit does.
 
 EXTENDS Naturals, FiniteSets
 
@@ -305,6 +386,8 @@ CONSTANTS
 \*     typed is returned.
 \*   Fault "SwapConflict409": a swap is not applied, and a 409 is returned
 \*     while its condition holds; errorFor maps it to ErrPrecondition.
+\*   Fault "SwapNoETag": a swap is applied, and a 200 is returned whose ETag
+\*     header is missing, so S3.PutIfMatch returns "" (#103).
 \*   Fault "PutFailed": a snapshot Put, with the chunk uploads folded before
 \*     it, or the fallback's root Put, is not applied.
 \*   Fault "SnapshotReplyLost": a snapshot Put is applied, with the chunk
@@ -313,6 +396,9 @@ CONSTANTS
 \*     the context ended.
 \*   Fault "FallbackReplyLost": the fallback's root Put is applied, and an
 \*     error is returned, in the same ways.
+\*   Fault "ProbeFailed": the probe's read of the root pointer, GetWithETag,
+\*     fails, or returns a body the mount does not understand (ADR 0022
+\*     section 3), so the root stays in doubt.
 
 \* What the Fixes members mean (docs/vocabulary.md, V3, gives each one's Go):
 \*   IfNoneMatchInit, Nonce, ChunksFirst, ReadOnlyFence: in the code since
@@ -333,11 +419,19 @@ CONSTANTS
 \*     nothing more written. Without it, or on an opted-in mount, which
 \*     behave alike (J17), the fallback's Put and Head follow every 501, as
 \*     at 247a276.
+\*   RootProbe: ADR 0022 sections 1 to 4. A write of the root pointer whose
+\*     reply did not establish its ETag leaves the mount in doubt, and it
+\*     writes the root pointer no further until one read of it has shown the
+\*     root pointer naming the attempt (adopted), the key the namespace
+\*     descends from (its ETag taken), or another key (the mount diverges).
+\*     Without it commitLocked keeps its old ETag after such a write and
+\*     diverges on store.ErrPrecondition, as at edcfc15.
 
 AllFixes  == {"IfNoneMatchInit", "Nonce", "ChunksFirst", "ReadOnlyFence",
-              "PruneBelowCurrent", "AtomicLoad", "FallbackOptIn"}
-AllFaults == {"SwapReplyLost", "SwapFailed", "SwapConflict409", "PutFailed",
-              "SnapshotReplyLost", "FallbackReplyLost"}
+              "PruneBelowCurrent", "AtomicLoad", "FallbackOptIn", "RootProbe"}
+AllFaults == {"SwapReplyLost", "SwapFailed", "SwapConflict409", "SwapNoETag",
+              "PutFailed", "SnapshotReplyLost", "FallbackReplyLost",
+              "ProbeFailed"}
 
 ASSUME
   /\ Mounts # {}
@@ -368,6 +462,10 @@ VARIABLES
   attempt,       \* commitLocked's key: the attempt in progress, or NoKey
   rpSnapshot,    \* loadOrInit's rp.Snapshot, between GetRoot and GetSnapshot
   base,          \* the commits FS.inodes includes
+  rootKnowledge, \* FS.rootKnowledge: "Known" or "InDoubt" (ADR 0022)
+  doubtKey,      \* FS.doubtKey: the attempt in doubt, or NoKey
+  rootSnapshot,  \* FS.rootSnapshot: the key the root pointer named when
+                 \* rootETag was last set, or NoKey
   \* Each mount's prune pass.
   pruning,       \* "Idle", "Listing" or "Deleting"; FS.pruning is the last two
   pruneCurrent,  \* pruneSnapshots' current: the key the pass's commit swapped
@@ -470,9 +568,14 @@ FirstStep == IF "ChunksFirst" \in Fixes THEN "PutSnapshot" ELSE "Swap"
 
 \* The commit step due at m, or "None". At "Ready" a commit starts when the
 \* namespace is dirty, unless the mount has diverged: commitLocked's refusal.
+\* While the root pointer is in doubt the step due is the probe's read, which
+\* commitLocked makes before it writes anything (ADR 0022 section 3), so no
+\* snapshot Put and no swap is enabled then (J13, J20).
 NextStep(m) ==
   IF pc[m] = "Ready"
-    THEN IF nsDirty[m] /\ mode[m] # "Diverged" THEN FirstStep ELSE "None"
+    THEN IF nsDirty[m] /\ mode[m] # "Diverged"
+           THEN IF rootKnowledge[m] = "InDoubt" THEN "Probe" ELSE FirstStep
+           ELSE "None"
     ELSE pc[m]
 
 \* Whether the bucket would apply m's swap to the root pointer naming k. An
@@ -485,7 +588,8 @@ SwapCondition(m, k) ==
     ELSE bucketRoot.etag = rootETag[m]
 
 BucketVars == <<bucketRoot, snapshots, chunks>>
-MountVars  == <<pc, mode, rootETag, epoch, nsDirty, attempt, rpSnapshot, base>>
+MountVars  == <<pc, mode, rootETag, epoch, nsDirty, attempt, rpSnapshot, base,
+                rootKnowledge, doubtKey, rootSnapshot>>
 PruneVars  == <<pruning, pruneCurrent, pruneDoomed>>
 GhostVars  == <<acked, used, overtaken, roWrites>>
 Vars       == <<BucketVars, MountVars, PruneVars, GhostVars, crashes>>
@@ -505,6 +609,27 @@ CommitFails(m, k) ==
   /\ pc' = [pc EXCEPT ![m] = IF k.epoch = 1 THEN "Failed" ELSE "Ready"]
   /\ attempt' = [attempt EXCEPT ![m] = NoKey]
 
+\* SwapUnknown: the event of docs/vocabulary.md, V2: commitLocked's Fire of
+\* rootSwapUnknown on FS.rootKnowledge after a write of the root pointer
+\* whose reply did not establish its ETag, with doubtKey recording the
+\* attempt. The read that settles it is due next (ADR 0022 sections 2 to 4).
+\* Go (trace.tsv): FS.commitLocked.
+SwapUnknown(m, k) ==
+  /\ rootKnowledge' = [rootKnowledge EXCEPT ![m] = "InDoubt"]
+  /\ doubtKey' = [doubtKey EXCEPT ![m] = k]
+  /\ pc' = [pc EXCEPT ![m] = "Probe"]
+  /\ attempt' = [attempt EXCEPT ![m] = NoKey]
+
+\* Unresolved: what a write of the root pointer whose reply did not establish
+\* its ETag does to the mount: with RootProbe, SwapUnknown; without it,
+\* commitLocked's old return, which keeps rootETag as it was (ADR 0022
+\* section 4; before it, commitLocked's "case err != nil" at edcfc15).
+Unresolved(m, k) ==
+  IF "RootProbe" \in Fixes
+    THEN SwapUnknown(m, k)
+    ELSE /\ CommitFails(m, k)
+         /\ UNCHANGED <<rootKnowledge, doubtKey>>
+
 \* The chunk of m's commit at k's epoch is stored (Assumption J2).
 FlushEffect(m, k) ==
   chunks' = IF k.epoch = 1 THEN chunks ELSE chunks \cup {CommitIdOf(m, k)}
@@ -519,11 +644,13 @@ SnapshotEffect(m, k) ==
   /\ used' = used \cup {k}
   /\ IF "ChunksFirst" \in Fixes THEN FlushEffect(m, k) ELSE UNCHANGED chunks
 
-\* Diverge: the event of docs/vocabulary.md, V1: commitLocked's Fire of
-\* mountDiverge on FS.mode after store.ErrPrecondition (ADR 0014 section 7).
-\* The table mountModes has one edge, "Writable" to "Diverged", so a mount
-\* in any other mode is left as it is (R11).
-\* Go (trace.tsv): FS.commitLocked.
+\* Diverge: the event of docs/vocabulary.md, V1: the Fire of mountDiverge on
+\* FS.mode (ADR 0014 section 7), made by resolveRoot on ProbeTheirs with
+\* RootProbe, and by commitLocked's store.ErrPrecondition case, which
+\* SwapConflict conjoins, without it (R11; ADR 0022 section 2). The table
+\* mountModes has one edge, "Writable" to "Diverged", so a mount in any other
+\* mode is left as it is.
+\* Go (trace.tsv): FS.resolveRoot; FS.commitLocked at edcfc15.
 Diverge(m) ==
   mode' = [mode EXCEPT ![m] = IF @ = "Writable" THEN "Diverged" ELSE @]
 
@@ -540,10 +667,13 @@ StartPrune(m, k) ==
          /\ UNCHANGED pruneDoomed
     ELSE UNCHANGED PruneVars
 
-\* commitLocked's success path, with the root pointer's new ETag et.
+\* commitLocked's success path, with the root pointer's new ETag et. Since
+\* ADR 0022 it also records the key the root pointer now names, which the
+\* probe's verdict compares against (J19).
 Committed(m, k, et) ==
   /\ epoch' = [epoch EXCEPT ![m] = k.epoch]
   /\ rootETag' = [rootETag EXCEPT ![m] = et]
+  /\ rootSnapshot' = [rootSnapshot EXCEPT ![m] = k]
   /\ nsDirty' = [nsDirty EXCEPT ![m] = FALSE]
   /\ base' = [base EXCEPT ![m] = @ \cup {CommitIdOf(m, k)}]
   /\ acked' = acked \cup {CommitIdOf(m, k)}
@@ -580,13 +710,17 @@ TypeOK ==
   /\ DOMAIN attempt = Mounts
   /\ DOMAIN rpSnapshot = Mounts
   /\ DOMAIN base = Mounts
+  /\ DOMAIN rootKnowledge = Mounts
+  /\ DOMAIN doubtKey = Mounts
+  /\ DOMAIN rootSnapshot = Mounts
   /\ DOMAIN pruning = Mounts
   /\ DOMAIN pruneCurrent = Mounts
   /\ DOMAIN pruneDoomed = Mounts
   /\ DOMAIN overtaken = Mounts
   /\ \A m \in Mounts :
        /\ pc[m] \in {"GetRoot", "HeadRoot", "GetSnapshot", "Ready",
-                     "PutSnapshot", "Swap", "FallbackHead", "Flush", "Failed"}
+                     "PutSnapshot", "Swap", "Probe", "FallbackHead", "Flush",
+                     "Failed"}
        /\ mode[m] \in {"Writable", "ReadOnly", "Diverged"}
        /\ rootETag[m] \in ETags
        /\ epoch[m] \in 0..MaxEpoch
@@ -594,6 +728,9 @@ TypeOK ==
        /\ attempt[m] \in Keys \cup {NoKey}
        /\ rpSnapshot[m] \in Keys \cup {NoKey}
        /\ base[m] \subseteq CommitIds
+       /\ rootKnowledge[m] \in {"Known", "InDoubt"}
+       /\ doubtKey[m] \in Keys \cup {NoKey}
+       /\ rootSnapshot[m] \in Keys \cup {NoKey}
        /\ pruning[m] \in {"Idle", "Listing", "Deleting"}
        /\ pruneCurrent[m] \in Keys \cup {NoKey}
        /\ pruneDoomed[m] \subseteq Keys
@@ -608,8 +745,9 @@ TypeOK ==
 
 \* Init: New, before its first store call. New makes FS.mode at
 \* InitialMode(m), "ReadOnly" when Config.ReadOnly is set and "Writable"
-\* otherwise (ADR 0014 section 7), puts a read-only mount's store behind
-\* store.ReadOnly, and sets FS.allowUnconditionalRoot from
+\* otherwise (ADR 0014 section 7), makes FS.rootKnowledge at "Known" with no
+\* attempt in doubt (ADR 0022 section 2), puts a read-only mount's store
+\* behind store.ReadOnly, and sets FS.allowUnconditionalRoot from
 \* Config.AllowUnconditionalRoot, which FallbackAllowed stands for (J17).
 \* With Start = "Empty" the bucket is empty and every mount is at
 \* loadOrInit's first read. With Start = "Loaded" the bucket holds a
@@ -622,6 +760,8 @@ Init ==
   /\ nsDirty = [m \in Mounts |-> FALSE]
   /\ attempt = [m \in Mounts |-> NoKey]
   /\ rpSnapshot = [m \in Mounts |-> NoKey]
+  /\ rootKnowledge = [m \in Mounts |-> "Known"]
+  /\ doubtKey = [m \in Mounts |-> NoKey]
   /\ pruning = [m \in Mounts |-> "Idle"]
   /\ pruneCurrent = [m \in Mounts |-> NoKey]
   /\ pruneDoomed = [m \in Mounts |-> {}]
@@ -635,6 +775,7 @@ Init ==
             /\ used = {}
             /\ pc = [m \in Mounts |-> "GetRoot"]
             /\ rootETag = [m \in Mounts |-> NoETag]
+            /\ rootSnapshot = [m \in Mounts |-> NoKey]
             /\ epoch = [m \in Mounts |-> 0]
             /\ base = [m \in Mounts |-> {}]
        ELSE /\ bucketRoot = [key |-> LoadedKey,
@@ -644,6 +785,7 @@ Init ==
             /\ used = {LoadedKey}
             /\ pc = [m \in Mounts |-> "Ready"]
             /\ rootETag = [m \in Mounts |-> ETagOf(LoadedKey, "")]
+            /\ rootSnapshot = [m \in Mounts |-> LoadedKey]
             /\ epoch = [m \in Mounts |-> 1]
             /\ base = [m \in Mounts |-> {LoadedCommit}]
 
@@ -651,24 +793,27 @@ Init ==
 \* Loading.
 
 \* GetRoot: loadOrInit's read of the root pointer, and its parse, when the
-\* bucket holds one. It records the snapshot key the root pointer names. With
-\* AtomicLoad the read is GetWithETag, whose ETag comes in the same response
-\* as the body, so it becomes FS.rootETag here (R2) and the next read is the
-\* snapshot's. Without it the read is Get, and the ETag waits for HeadRoot:
-\* #89's window.
+\* bucket holds one. It records the snapshot key the root pointer names, as
+\* rpSnapshot for GetSnapshot and, since ADR 0022, as rootSnapshot for the
+\* probe's verdict. With AtomicLoad the read is GetWithETag, whose ETag comes
+\* in the same response as the body, so it becomes FS.rootETag here (R2) and
+\* the next read is the snapshot's. Without it the read is Get, and the ETag
+\* waits for HeadRoot: #89's window.
 \* Go (trace.tsv): FS.loadOrInit; S3.GetWithETag; Local.GetWithETag.
 GetRoot(m) ==
   /\ pc[m] = "GetRoot"
   /\ bucketRoot.key # NoKey
   /\ rpSnapshot' = [rpSnapshot EXCEPT ![m] = bucketRoot.key]
+  /\ rootSnapshot' = [rootSnapshot EXCEPT ![m] = bucketRoot.key]
   /\ IF "AtomicLoad" \in Fixes
        THEN /\ rootETag' = [rootETag EXCEPT ![m] = bucketRoot.etag]
             /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
             /\ pc' = [pc EXCEPT ![m] = "GetSnapshot"]
        ELSE /\ pc' = [pc EXCEPT ![m] = "HeadRoot"]
             /\ UNCHANGED <<rootETag, overtaken>>
-  /\ UNCHANGED <<BucketVars, mode, epoch, nsDirty, attempt, base, PruneVars,
-                 acked, used, roWrites, crashes>>
+  /\ UNCHANGED <<BucketVars, mode, epoch, nsDirty, attempt, base,
+                 rootKnowledge, doubtKey, PruneVars, acked, used, roWrites,
+                 crashes>>
 
 \* RefuseEmpty: loadOrInit's not-found branch on a read-only mount, which
 \* makes New fail, having written nothing (ADR 0011 section 2).
@@ -679,10 +824,12 @@ RefuseEmpty(m) ==
   /\ m \in ReadOnlyMounts
   /\ pc' = [pc EXCEPT ![m] = "Failed"]
   /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty, attempt,
-                 rpSnapshot, base, PruneVars, GhostVars, crashes>>
+                 rpSnapshot, base, rootKnowledge, doubtKey, rootSnapshot,
+                 PruneVars, GhostVars, crashes>>
 
 \* InitEmpty: loadOrInit's not-found branch on a writable mount, calling
-\* initEmpty, which sets epoch 0 and an empty rootETag and then commits.
+\* initEmpty, which sets epoch 0, an empty rootETag and no root snapshot, and
+\* then commits.
 \* Go (trace.tsv): FS.loadOrInit; FS.initEmpty.
 InitEmpty(m) ==
   /\ pc[m] = "GetRoot"
@@ -691,11 +838,12 @@ InitEmpty(m) ==
   /\ pc' = [pc EXCEPT ![m] = FirstStep]
   /\ epoch' = [epoch EXCEPT ![m] = 0]
   /\ rootETag' = [rootETag EXCEPT ![m] = NoETag]
+  /\ rootSnapshot' = [rootSnapshot EXCEPT ![m] = NoKey]
   /\ base' = [base EXCEPT ![m] = {}]
   /\ nsDirty' = [nsDirty EXCEPT ![m] = FALSE]
   /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
-  /\ UNCHANGED <<BucketVars, mode, attempt, rpSnapshot, PruneVars, acked,
-                 used, roWrites, crashes>>
+  /\ UNCHANGED <<BucketVars, mode, attempt, rpSnapshot, rootKnowledge,
+                 doubtKey, PruneVars, acked, used, roWrites, crashes>>
 
 \* HeadRoot: without AtomicLoad, loadOrInit's Head of the root pointer, whose
 \* ETag becomes FS.rootETag (R2). Another writer's swap between GetRoot and
@@ -710,7 +858,8 @@ HeadRoot(m) ==
   /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
   /\ pc' = [pc EXCEPT ![m] = "GetSnapshot"]
   /\ UNCHANGED <<BucketVars, mode, epoch, nsDirty, attempt, rpSnapshot, base,
-                 PruneVars, acked, used, roWrites, crashes>>
+                 rootKnowledge, doubtKey, rootSnapshot, PruneVars, acked,
+                 used, roWrites, crashes>>
 
 \* GetSnapshot: loadOrInit's Get of the snapshot the root pointer named, and
 \* decodeSnapshot. A missing snapshot makes New fail with its "read snapshot"
@@ -725,14 +874,15 @@ GetSnapshot(m) ==
             /\ pc' = [pc EXCEPT ![m] = "Ready"]
        ELSE /\ pc' = [pc EXCEPT ![m] = "Failed"]
             /\ UNCHANGED <<base, epoch>>
-  /\ UNCHANGED <<BucketVars, mode, rootETag, nsDirty, attempt, PruneVars,
-                 GhostVars, crashes>>
+  /\ UNCHANGED <<BucketVars, mode, rootETag, nsDirty, attempt, rootKnowledge,
+                 doubtKey, rootSnapshot, PruneVars, GhostVars, crashes>>
 
 -----------------------------------------------------------------------------
 \* Namespace changes.
 
 \* Mutate: mutable(), folded with the hold of FS.mu in which a change sets
-\* FS.dirty (R3, R4).
+\* FS.dirty (R3, R4). mutable() reads the mode alone: a mount whose root
+\* pointer is in doubt still accepts changes (ADR 0022 section 6).
 \* Go (trace.tsv): FS.mutable; FS.SetAttr; FS.createEntry; FS.unlink;
 \* FS.Rename; FS.bufferWrite; FS.truncate.
 Mutate(m) ==
@@ -741,7 +891,8 @@ Mutate(m) ==
   /\ ~nsDirty[m]
   /\ nsDirty' = [nsDirty EXCEPT ![m] = TRUE]
   /\ UNCHANGED <<BucketVars, pc, mode, rootETag, epoch, attempt, rpSnapshot,
-                 base, PruneVars, GhostVars, crashes>>
+                 base, rootKnowledge, doubtKey, rootSnapshot, PruneVars,
+                 GhostVars, crashes>>
 
 \* StrayDirty: a path that dirties a read-only mount (Assumption J6).
 \* Go: none; trace.tsv has no row for it.
@@ -751,7 +902,8 @@ StrayDirty(m) ==
   /\ ~nsDirty[m]
   /\ nsDirty' = [nsDirty EXCEPT ![m] = TRUE]
   /\ UNCHANGED <<BucketVars, pc, mode, rootETag, epoch, attempt, rpSnapshot,
-                 base, PruneVars, GhostVars, crashes>>
+                 base, rootKnowledge, doubtKey, rootSnapshot, PruneVars,
+                 GhostVars, crashes>>
 
 -----------------------------------------------------------------------------
 \* Commits.
@@ -763,7 +915,7 @@ StrayDirty(m) ==
 \* (PutFailed), is applied, or is applied and answers with an error
 \* (SnapshotReplyLost); each failure is commitLocked returning an error.
 \* commitLocked's refusal while a file is unsettled (ADR 0012 section 4) is
-\* FileData's.
+\* FileData's. It is never due while the root pointer is in doubt (NextStep).
 \* Go (trace.tsv): FS.commitLocked; ReadOnly.Put; S3.Put.
 PutSnapshot(m) ==
   /\ NextStep(m) = "PutSnapshot"
@@ -771,13 +923,15 @@ PutSnapshot(m) ==
        \/ /\ Fenced(m)
           /\ CommitFails(m, k)
           /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty,
-                         rpSnapshot, base, PruneVars, GhostVars, crashes>>
+                         rpSnapshot, base, rootKnowledge, doubtKey,
+                         rootSnapshot, PruneVars, GhostVars, crashes>>
        \/ /\ ~Fenced(m)
           /\ "PutFailed" \in Faults
           /\ WriteCall(m)
           /\ CommitFails(m, k)
           /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty,
-                         rpSnapshot, base, PruneVars, acked, used, overtaken,
+                         rpSnapshot, base, rootKnowledge, doubtKey,
+                         rootSnapshot, PruneVars, acked, used, overtaken,
                          crashes>>
        \/ /\ ~Fenced(m)
           /\ WriteCall(m)
@@ -790,16 +944,16 @@ PutSnapshot(m) ==
                     /\ attempt' = [attempt EXCEPT ![m] =
                                      IF k.epoch = 1 THEN NoKey ELSE k]
           /\ UNCHANGED <<bucketRoot, mode, rootETag, epoch, nsDirty,
-                         rpSnapshot, base, PruneVars, acked, overtaken,
-                         crashes>>
+                         rpSnapshot, base, rootKnowledge, doubtKey,
+                         rootSnapshot, PruneVars, acked, overtaken, crashes>>
        \/ /\ ~Fenced(m)
           /\ "SnapshotReplyLost" \in Faults
           /\ WriteCall(m)
           /\ SnapshotEffect(m, k)
           /\ CommitFails(m, k)
           /\ UNCHANGED <<bucketRoot, mode, rootETag, epoch, nsDirty,
-                         rpSnapshot, base, PruneVars, acked, overtaken,
-                         crashes>>
+                         rpSnapshot, base, rootKnowledge, doubtKey,
+                         rootSnapshot, PruneVars, acked, overtaken, crashes>>
 
 \* Flush: Sync's first pass and settle pass, flushOpen, and putChunk, as a
 \* step of its own only without ChunksFirst (Assumption J7).
@@ -812,10 +966,12 @@ Flush(m) ==
   /\ pc' = [pc EXCEPT ![m] = "Ready"]
   /\ attempt' = [attempt EXCEPT ![m] = NoKey]
   /\ UNCHANGED <<bucketRoot, snapshots, mode, rootETag, epoch, nsDirty,
-                 rpSnapshot, base, PruneVars, acked, used, overtaken, crashes>>
+                 rpSnapshot, base, rootKnowledge, doubtKey, rootSnapshot,
+                 PruneVars, acked, used, overtaken, crashes>>
 
-\* SwapOK: commitLocked's PutIfMatch succeeds, then its success path and
-\* schedulePrune (R8).
+\* SwapOK: commitLocked's PutIfMatch succeeds with an ETag, then its success
+\* path and schedulePrune (R8). It is also V2's SwapOK event, "Known" to
+\* "Known", which changes no variable of the machine (ADR 0022 section 4).
 \* Go (trace.tsv): FS.commitLocked; S3.PutIfMatch; Local.PutIfMatch.
 SwapOK(m) ==
   /\ NextStep(m) = "Swap"
@@ -827,10 +983,13 @@ SwapOK(m) ==
        /\ overtaken' = [x \in Mounts |-> x # m]
        /\ Committed(m, k, ETagOf(k, m))
   /\ WriteCall(m)
-  /\ UNCHANGED <<snapshots, chunks, mode, rpSnapshot, crashes>>
+  /\ UNCHANGED <<snapshots, chunks, mode, rpSnapshot, rootKnowledge, doubtKey,
+                 crashes>>
 
-\* SwapReplyLost: the swap is applied, but an error is returned, so
-\* commitLocked takes its "case err != nil" branch and keeps its rootETag.
+\* SwapReplyLost: the swap is applied, but an error is returned. With
+\* RootProbe the root is in doubt and the probe's read is due (Unresolved);
+\* without it commitLocked takes its "case err != nil" branch and keeps its
+\* rootETag.
 \* Go (trace.tsv): FS.commitLocked; S3.PutIfMatch; errorFor.
 SwapReplyLost(m) ==
   /\ NextStep(m) = "Swap"
@@ -841,28 +1000,59 @@ SwapReplyLost(m) ==
        /\ SwapCondition(m, k)
        /\ WriteRoot(m, k)
        /\ overtaken' = [x \in Mounts |-> IF x = m THEN overtaken[m] ELSE TRUE]
-       /\ CommitFails(m, k)
+       /\ Unresolved(m, k)
   /\ WriteCall(m)
   /\ UNCHANGED <<snapshots, chunks, mode, rootETag, epoch, nsDirty,
-                 rpSnapshot, base, PruneVars, acked, crashes>>
+                 rpSnapshot, rootSnapshot, base, PruneVars, acked, crashes>>
 
 \* SwapFailed: the swap is not applied, and an error that is not typed is
-\* returned.
+\* returned. With RootProbe the root is in doubt all the same, since the
+\* mount cannot tell this reply from a lost one (Unresolved).
 \* Go (trace.tsv): FS.commitLocked; S3.PutIfMatch; errorFor;
 \* Local.PutIfMatch.
 SwapFailed(m) ==
   /\ NextStep(m) = "Swap"
   /\ "SwapFailed" \in Faults
   /\ ~Fenced(m)
-  /\ \E k \in KeyFor(m) : CommitFails(m, k)
+  /\ \E k \in KeyFor(m) : Unresolved(m, k)
   /\ WriteCall(m)
-  /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty, rpSnapshot, base,
-                 PruneVars, acked, used, overtaken, crashes>>
+  /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty, rpSnapshot,
+                 rootSnapshot, base, PruneVars, acked, used, overtaken,
+                 crashes>>
+
+\* SwapNoETag: the swap is applied and answers 200 with no ETag header, so
+\* S3.PutIfMatch returns "" (#103). With RootProbe the reply did not
+\* establish the root pointer's ETag, so the root is in doubt and the probe's
+\* read is due (SwapUnknown; ADR 0022 section 4). Without it commitLocked
+\* stores the empty ETag on its success path, as at edcfc15, so its next
+\* swap is If-None-Match against a root pointer that exists and conflicts.
+\* Go (trace.tsv): FS.commitLocked; S3.PutIfMatch.
+SwapNoETag(m) ==
+  /\ NextStep(m) = "Swap"
+  /\ "SwapNoETag" \in Faults
+  /\ Capability \in {"Conditional", "Flaky"}
+  /\ ~Fenced(m)
+  /\ \E k \in KeyFor(m) :
+       /\ SwapCondition(m, k)
+       /\ WriteRoot(m, k)
+       /\ IF "RootProbe" \in Fixes
+            THEN /\ overtaken' = [x \in Mounts |->
+                                    IF x = m THEN overtaken[m] ELSE TRUE]
+                 /\ SwapUnknown(m, k)
+                 /\ UNCHANGED <<rootETag, epoch, nsDirty, rootSnapshot, base,
+                                acked, PruneVars>>
+            ELSE /\ overtaken' = [x \in Mounts |-> x # m]
+                 /\ Committed(m, k, NoETag)
+                 /\ UNCHANGED <<rootKnowledge, doubtKey>>
+  /\ WriteCall(m)
+  /\ UNCHANGED <<snapshots, chunks, mode, rpSnapshot, crashes>>
 
 \* SwapConflict: store.ErrPrecondition, from errorFor's 412 or 409 or from
-\* Local's ETag check, and commitLocked's Fire of mountDiverge on FS.mode,
-\* which is Diverge. With SwapConflict409 it may also come while the
-\* condition holds. A read-only mount's mode is left as it is (R11).
+\* Local's ETag check. With SwapConflict409 it may also come while the
+\* condition holds. With RootProbe no swap's error alone diverges a mount:
+\* the root is in doubt and the probe's read decides (SwapUnknown; ADR 0022
+\* section 1). Without it commitLocked fires mountDiverge here, which is
+\* Diverge, and a read-only mount's mode is left as it is (R11).
 \* Go (trace.tsv): FS.commitLocked; errorFor; Local.PutIfMatch.
 SwapConflict(m) ==
   /\ NextStep(m) = "Swap"
@@ -870,11 +1060,16 @@ SwapConflict(m) ==
   /\ ~Fenced(m)
   /\ \E k \in KeyFor(m) :
        /\ (~SwapCondition(m, k) \/ "SwapConflict409" \in Faults)
-       /\ Diverge(m)
-       /\ CommitFails(m, k)
+       /\ IF "RootProbe" \in Fixes
+            THEN /\ SwapUnknown(m, k)
+                 /\ UNCHANGED mode
+            ELSE /\ Diverge(m)
+                 /\ CommitFails(m, k)
+                 /\ UNCHANGED <<rootKnowledge, doubtKey>>
   /\ WriteCall(m)
-  /\ UNCHANGED <<BucketVars, rootETag, epoch, nsDirty, rpSnapshot, base,
-                 PruneVars, acked, used, overtaken, crashes>>
+  /\ UNCHANGED <<BucketVars, rootETag, epoch, nsDirty, rpSnapshot,
+                 rootSnapshot, base, PruneVars, acked, used, overtaken,
+                 crashes>>
 
 \* SwapUnsupported: store.ErrUnsupported, from errorFor's 501 or from
 \* ReadOnly.PutIfMatch. store.ReadOnly refuses the swap when the mount is
@@ -886,7 +1081,9 @@ SwapConflict(m) ==
 \* unconditional Put of the root pointer
 \* follows (FallbackPut, R7), which reaches the bucket and is not applied
 \* (PutFailed), is applied, or is applied and answers with an error
-\* (FallbackReplyLost), which leaves rootETag as it was.
+\* (FallbackReplyLost). With RootProbe either failure of that Put leaves the
+\* root in doubt, since S3.do retries it and it may have taken effect
+\* (Unresolved; ADR 0022 section 4); without it rootETag is left as it was.
 \* Go (trace.tsv): FS.commitLocked; FS.fallbackAllowed; errorFor;
 \* ReadOnly.PutIfMatch.
 SwapUnsupported(m) ==
@@ -895,18 +1092,19 @@ SwapUnsupported(m) ==
   /\ \E k \in KeyFor(m) :
        \/ /\ Fenced(m)
           /\ CommitFails(m, k)
-          /\ UNCHANGED <<BucketVars, GhostVars>>
+          /\ UNCHANGED <<BucketVars, GhostVars, rootKnowledge, doubtKey>>
        \/ /\ ~Fenced(m)
           /\ ~FallbackAllowed
           /\ WriteCall(m)
           /\ snapshots' = [x \in DOMAIN snapshots \ {k} |-> snapshots[x]]
           /\ CommitFails(m, k)
-          /\ UNCHANGED <<bucketRoot, chunks, acked, used, overtaken>>
+          /\ UNCHANGED <<bucketRoot, chunks, acked, used, overtaken,
+                         rootKnowledge, doubtKey>>
        \/ /\ ~Fenced(m)
           /\ FallbackAllowed
           /\ "PutFailed" \in Faults
           /\ WriteCall(m)
-          /\ CommitFails(m, k)
+          /\ Unresolved(m, k)
           /\ UNCHANGED <<BucketVars, acked, used, overtaken>>
        \/ /\ ~Fenced(m)
           /\ FallbackAllowed
@@ -914,25 +1112,114 @@ SwapUnsupported(m) ==
           /\ FallbackPut(m, k)
           /\ pc' = [pc EXCEPT ![m] = "FallbackHead"]
           /\ attempt' = [attempt EXCEPT ![m] = k]
-          /\ UNCHANGED <<snapshots, chunks, acked>>
+          /\ UNCHANGED <<snapshots, chunks, acked, rootKnowledge, doubtKey>>
        \/ /\ ~Fenced(m)
           /\ FallbackAllowed
           /\ "FallbackReplyLost" \in Faults
           /\ WriteCall(m)
           /\ FallbackPut(m, k)
-          /\ CommitFails(m, k)
+          /\ Unresolved(m, k)
           /\ UNCHANGED <<snapshots, chunks, acked>>
-  /\ UNCHANGED <<mode, rootETag, epoch, nsDirty, rpSnapshot, base, PruneVars,
-                 crashes>>
+  /\ UNCHANGED <<mode, rootETag, epoch, nsDirty, rpSnapshot, rootSnapshot,
+                 base, PruneVars, crashes>>
 
 \* FallbackHead: the Head of the root pointer after the fallback's Put, then
-\* the success path. The Head may return another writer's ETag.
+\* the success path. The Head may return another writer's ETag. It is also
+\* V2's SwapOK event, which changes no variable of the machine; a Head that
+\* fails is left out (Leaves out).
 \* Go (trace.tsv): FS.commitLocked.
 FallbackHead(m) ==
   /\ pc[m] = "FallbackHead"
   /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
   /\ Committed(m, attempt[m], bucketRoot.etag)
+  /\ UNCHANGED <<BucketVars, mode, rpSnapshot, rootKnowledge, doubtKey, used,
+                 roWrites, crashes>>
+
+-----------------------------------------------------------------------------
+\* The probe (ADR 0022 section 3). Each action is one read of the root
+\* pointer, GetWithETag of rootKey, made by resolveRoot while the root is in
+\* doubt: at pc "Probe", straight after the write that raised the doubt, or
+\* at "Ready" at the top of a later commit, before it writes anything
+\* (NextStep; R13, R14). The verdict is by the key the root pointer names,
+\* and the ETag the read returns is what the mount takes (J19).
+
+\* ProbeOurs: the root pointer names the attempt in doubt, so the write took
+\* effect, and the mount adopts it. At the failure site that is the success
+\* path whole, Committed, with StartPrune (R8); at the top of a later commit
+\* it adopts only, and the commit that follows writes the namespace as it
+\* stands (J20).
+\* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitLocked;
+\* S3.GetWithETag; Local.GetWithETag.
+ProbeOurs(m) ==
+  /\ NextStep(m) = "Probe"
+  /\ bucketRoot.key = doubtKey[m]
+  /\ rootKnowledge' = [rootKnowledge EXCEPT ![m] = "Known"]
+  /\ doubtKey' = [doubtKey EXCEPT ![m] = NoKey]
+  /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
+  /\ IF pc[m] = "Probe"
+       THEN Committed(m, doubtKey[m], bucketRoot.etag)
+       ELSE /\ epoch' = [epoch EXCEPT ![m] = doubtKey[m].epoch]
+            /\ rootETag' = [rootETag EXCEPT ![m] = bucketRoot.etag]
+            /\ rootSnapshot' = [rootSnapshot EXCEPT ![m] = doubtKey[m]]
+            /\ base' = [base EXCEPT ![m] = @ \cup {CommitIdOf(m, doubtKey[m])}]
+            /\ UNCHANGED <<pc, attempt, nsDirty, acked, PruneVars>>
   /\ UNCHANGED <<BucketVars, mode, rpSnapshot, used, roWrites, crashes>>
+
+\* ProbeUnchanged: the root pointer names the key the mount's namespace
+\* descends from, so the write did not take effect; the mount takes the root
+\* pointer's ETag, which is the one it should have swapped against, and its
+\* next swap proceeds. At the failure site the commit fails, with no retry in
+\* line (ADR 0022 Assumption 7); at the top of a later commit the commit
+\* continues.
+\* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitLocked;
+\* S3.GetWithETag; Local.GetWithETag.
+ProbeUnchanged(m) ==
+  /\ NextStep(m) = "Probe"
+  /\ bucketRoot.key = rootSnapshot[m]
+  /\ bucketRoot.key # doubtKey[m]
+  /\ rootKnowledge' = [rootKnowledge EXCEPT ![m] = "Known"]
+  /\ doubtKey' = [doubtKey EXCEPT ![m] = NoKey]
+  /\ rootETag' = [rootETag EXCEPT ![m] = bucketRoot.etag]
+  /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
+  /\ IF pc[m] = "Probe"
+       THEN CommitFails(m, doubtKey[m])
+       ELSE UNCHANGED <<pc, attempt>>
+  /\ UNCHANGED <<BucketVars, mode, epoch, nsDirty, rpSnapshot, rootSnapshot,
+                 base, PruneVars, acked, used, roWrites, crashes>>
+
+\* ProbeTheirs: the root pointer names neither, or is gone: another writer
+\* owns the bucket. The mount diverges (Diverge, R11), the machine stays
+\* "InDoubt", and the commit fails. The record that names the writer is
+\* Go's (ADR 0022 section 3).
+\* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitLocked;
+\* S3.GetWithETag; Local.GetWithETag.
+ProbeTheirs(m) ==
+  /\ NextStep(m) = "Probe"
+  /\ bucketRoot.key # doubtKey[m]
+  /\ bucketRoot.key # rootSnapshot[m]
+  /\ Diverge(m)
+  /\ IF pc[m] = "Probe"
+       THEN CommitFails(m, doubtKey[m])
+       ELSE UNCHANGED <<pc, attempt>>
+  /\ UNCHANGED <<BucketVars, rootKnowledge, doubtKey, rootSnapshot, rootETag,
+                 epoch, nsDirty, rpSnapshot, base, PruneVars, GhostVars,
+                 crashes>>
+
+\* ProbeFailed: the read fails, or returns a body the mount does not
+\* understand (J4), so nothing is decided: the root stays in doubt, the
+\* commit fails, and the next commit reads again before it writes anything.
+\* At "Ready" nothing moves (R14).
+\* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitLocked;
+\* S3.GetWithETag; Local.GetWithETag; errorFor.
+ProbeFailed(m) ==
+  /\ NextStep(m) = "Probe"
+  /\ "ProbeFailed" \in Faults
+  /\ IF pc[m] = "Probe"
+       THEN CommitFails(m, doubtKey[m])
+       ELSE UNCHANGED <<pc, attempt>>
+  /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty, rpSnapshot, base,
+                 rootKnowledge, doubtKey, rootSnapshot, PruneVars, GhostVars,
+                 crashes>>
 
 -----------------------------------------------------------------------------
 \* Prune passes.
@@ -986,7 +1273,8 @@ PruneEnd(m) ==
 \* Crash: process death, or an exit that skips the final commit (ADR 0013
 \* section 4). The mount's memory and its prune goroutine are lost, every
 \* store call that took effect stays, and the restart is New, at
-\* loadOrInit's first read (Assumption J9).
+\* loadOrInit's first read (Assumption J9). A root in doubt is forgotten
+\* with the rest: the restart loads whatever the bucket holds.
 \* Go (trace.tsv): New.
 Crash(m) ==
   /\ crashes < MaxCrashes
@@ -999,6 +1287,9 @@ Crash(m) ==
   /\ attempt' = [attempt EXCEPT ![m] = NoKey]
   /\ rpSnapshot' = [rpSnapshot EXCEPT ![m] = NoKey]
   /\ base' = [base EXCEPT ![m] = {}]
+  /\ rootKnowledge' = [rootKnowledge EXCEPT ![m] = "Known"]
+  /\ doubtKey' = [doubtKey EXCEPT ![m] = NoKey]
+  /\ rootSnapshot' = [rootSnapshot EXCEPT ![m] = NoKey]
   /\ pruning' = [pruning EXCEPT ![m] = "Idle"]
   /\ pruneCurrent' = [pruneCurrent EXCEPT ![m] = NoKey]
   /\ pruneDoomed' = [pruneDoomed EXCEPT ![m] = {}]
@@ -1022,9 +1313,14 @@ Next ==
     \/ SwapOK(m)
     \/ SwapReplyLost(m)
     \/ SwapFailed(m)
+    \/ SwapNoETag(m)
     \/ SwapConflict(m)
     \/ SwapUnsupported(m)
     \/ FallbackHead(m)
+    \/ ProbeOurs(m)
+    \/ ProbeUnchanged(m)
+    \/ ProbeTheirs(m)
+    \/ ProbeFailed(m)
     \/ PruneList(m)
     \/ PruneDelete(m)
     \/ PruneEnd(m)
