@@ -257,11 +257,16 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		// prune pass reaches it while the root pointer stands still, so it is
 		// reclaimed: otherwise a store that answers every swap 501 gains an
 		// orphan per attempt. A 501 is taken to change nothing, but the Delete
-		// waits on one read of the root pointer rather than on that assumption,
-		// since deleting a snapshot the root names would leave a bucket no mount
-		// can load. The reclaim changes neither the error returned nor any field
-		// of the FS. It is the module's R12 (ADR 0021 §2, the reclaim;
-		// Assumptions 21, 22).
+		// waits on one read of the root pointer that positively shows another
+		// root rather than on that assumption, since deleting a snapshot the
+		// root names would leave a bucket no mount can load. The reclaim
+		// changes neither the error returned nor any field of the FS. It is the
+		// module's R12 (ADR 0021 §2, the reclaim; Assumptions 21, 22, 26).
+		//
+		// The read and the Delete run under the locks commitLocked holds, as
+		// its other store calls do. #43 records those calls as a defect to fix
+		// for all of them, and when it is fixed the reclaim moves off the lock
+		// with them (ADR 0021 Assumption 25).
 		f.log.Error("commit refused: the store does not support conditional writes, and this mount may not write the root pointer unconditionally",
 			"our_epoch", f.epoch, "attempted", epoch)
 		raw, rerr := f.store.Get(ctx, rootKey)
@@ -271,18 +276,27 @@ func (f *FS) commitLocked(ctx context.Context) error {
 			// it says can show that the root names another key.
 			rerr = json.Unmarshal(raw, &cur)
 		}
+		// A body that is JSON but no root pointer, as null, {} or an error
+		// document served with 200 are, decodes with an empty Snapshot, and a
+		// root pointer of another format version is not one this build
+		// understands; neither shows which key the root names, so neither
+		// may lead to a Delete (ADR 0021 Assumption 26).
+		understood := rerr == nil && cur.Version == snapshotVersion && cur.Snapshot != ""
 		switch {
-		case errors.Is(rerr, store.ErrNotFound) || (rerr == nil && cur.Snapshot != key):
+		case errors.Is(rerr, store.ErrNotFound) || (understood && cur.Snapshot != key):
 			if derr := f.store.Delete(ctx, key); derr != nil {
 				// The orphan stays for a later prune pass (ADR 0019 §3).
 				f.log.Debug("could not reclaim a refused commit's snapshot", "key", key, "err", derr)
 			}
-		case rerr == nil:
+		case understood:
 			// The store applied a write it answered 501. The mount is left as it
 			// is: its next swap, made with the old ETag, fails its condition and
 			// diverges it, which is #5's to resolve.
 			f.log.Error("a root-pointer swap the store answered as unsupported took effect: the root pointer names the refused commit's snapshot, which is kept",
 				"snapshot", key, "attempted", epoch)
+		case rerr == nil:
+			f.log.Debug("the root pointer read is not a root pointer this build understands, so a refused commit's snapshot is kept",
+				"key", key, "version", cur.Version, "snapshot", cur.Snapshot)
 		default:
 			f.log.Debug("could not read the root pointer, so a refused commit's snapshot is kept", "key", key, "err", rerr)
 		}
