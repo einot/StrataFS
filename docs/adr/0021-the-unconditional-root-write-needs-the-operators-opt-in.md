@@ -1102,9 +1102,38 @@ Each is mine unless it says otherwise.
     write it answered 501 and then serves a stale root pointer, from a
     replica or before the write lands, defeats the guard: the read shows the
     previous root, the attempt's snapshot is deleted, and the root pointer
-    names a snapshot the bucket no longer holds, so no mount can load it
-    until another commit lands, where before the reclaim the same two faults
-    left an orphan and a false divergence. The rule the auditor offered as
+    names a snapshot the bucket no longer holds. A fresh `New` then fails at
+    `read snapshot ...: not found`, and on a bucket whose mounts all lack
+    the opt-in no commit lands on its own, for a reason that differs by
+    case. If the store goes on answering 501, every swap is refused and each
+    mount stays writable and dirty, so nothing lands, unless the store
+    applies a later 501'd write of some such mount's and answers that
+    attempt's guard read fresh, so that its snapshot is kept and the root
+    pointer names it: chance. If the store has started honouring
+    conditions, every mount loaded before holds the previous ETag, which the
+    applied write replaced, so its next swap fails its condition and it
+    diverges. A mount with the opt-in is the exception: its fallback `Put`
+    lands, and the root pointer again names a snapshot the bucket holds; a
+    bucket whose mounts differ in the opt-in is otherwise left open
+    (Assumption 12). Short of that, the repair is by hand: a root pointer,
+    written with an S3 client in the format `rootPointer` gives, that names
+    the snapshot the previous root pointer named. Only that target drops
+    nothing acknowledged: what it drops, the refused attempt's changes, was
+    never acknowledged, since `Sync` returned an error. No other key is safe
+    to pick by its position. The newest key below the deleted one may be a
+    refused attempt whose guard read failed, kept at the same epoch under
+    another nonce, or a losing writer's attempt at the previous epoch, which
+    ADR 0019 §3 keeps while it sorts above the root; either lacks
+    acknowledged changes. Strata keeps no record that identifies the target:
+    the root pointer object that named it has been overwritten, and no rule
+    pinned in these ADRs identifies it safely from what the bucket or a
+    mount holds. Finding it reliably is #10's, and strata has no tool for
+    any of this. On `initEmpty`'s
+    first commit the same route runs through the not-found case, a stale 404
+    after the 501'd create took effect, and the repair is to delete the root
+    pointer, since there is no earlier snapshot and nothing was
+    acknowledged. Before the reclaim the same two faults left an orphan and
+    a false divergence. The rule the auditor offered as
     the other remedy, deleting only when the root pointer the read names
     sorts below the attempt's key, does not close this: a stale read names
     the previous root, which sorts below the attempt's key, so it passes that
