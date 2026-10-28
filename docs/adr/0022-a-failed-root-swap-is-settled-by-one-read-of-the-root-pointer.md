@@ -1237,7 +1237,10 @@ behind it and `c1`'s key is `rootSnapshot`.
   `Sync` again, without a change: returns nil; the harness recorded one
   `GetWithETag` of `rootKey` before a `Put` under `snapshotPrefix` whose
   key carries epoch 3, then a `Put` and a `Head` of `rootKey`; `rootKnown`;
-  `epoch` 3; a remount has `c2`.
+  `epoch` 3; a remount has `c2`. At `edcfc15` the first `Sync` returns nil,
+  with `FS.rootETag` `""` and no read, as K16's does there, and clears
+  `FS.dirty`, so the test fails there on the first `Sync`'s result and on
+  the read.
 - **K18, a refused swap whose read fails**
   (`TestRefusedSwapWhoseReadFailsLeavesTheMountInDoubtNotDiverged`; §4's
   `store.ErrPrecondition` case, `probeFailed`). One commit behind it; arm
@@ -1397,11 +1400,12 @@ session to record:
 > another mount's root pointer no longer marks the mount diverged: the mount
 > reads the root pointer once and, if it names the attempt, counts the
 > commit as done, if it is unchanged, retries at its next commit, and only
-> if another mount moved it diverges, logging that mount's writer id, epoch
-> and snapshot; before, a lost reply, a 409 Conflict, an unconditional root
-> write that took effect and returned an error, a swap reply without an
-> ETag, or a 501 that took effect left the mount refusing every change as if
-> a second writer had taken the bucket, until it was remounted.
+> if another mount moved or removed it diverges, logging that mount's writer
+> id, epoch and snapshot; before, a lost reply, a 409 Conflict, an
+> unconditional root write that took effect and returned an error, a swap
+> reply without an ETag, or a 501 that took effect left the mount refusing
+> every change as if a second writer had taken the bucket, until it was
+> remounted.
 
 On review, on 2026-10-28, two more lines, each a behaviour the review found
 the line above omits and this ADR intends (Assumption 19):
@@ -1619,8 +1623,8 @@ Each is mine unless it says otherwise.
     `design` for an architectural decision an ADR makes, `ops` for running it
     in production; not `correctness`, since nothing that exists is wrong by
     staying diverged, and not `bug`.
-19. **Not `BREAKING:`, and one `CHANGES` line** (§9; revised 2026-10-28). No
-    client, flag, wire format or object format changes, and no deployment
+19. **Not `BREAKING:`, and three `CHANGES` lines** (§9; revised 2026-10-28).
+    No client, flag, wire format or object format changes, and no deployment
     needs action: a mount that would have diverged keeps running, and one
     that should diverge still does, with more in its log. CLAUDE.md
     prefixes `BREAKING:` when a running deployment needs action to keep

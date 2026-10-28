@@ -1168,7 +1168,7 @@ ProbeOurs(m) ==
 \* line (ADR 0022 Assumption 7); at the top of a later commit the commit
 \* continues.
 \* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitLocked;
-\* S3.GetWithETag; Local.GetWithETag.
+\* S3.GetWithETag; Local.GetWithETag; errorFor.
 ProbeUnchanged(m) ==
   /\ NextStep(m) = "Probe"
   /\ bucketRoot.key = rootSnapshot[m]
@@ -1188,7 +1188,7 @@ ProbeUnchanged(m) ==
 \* "InDoubt", and the commit fails. The record that names the writer is
 \* Go's (ADR 0022 section 3).
 \* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitLocked;
-\* S3.GetWithETag; Local.GetWithETag.
+\* S3.GetWithETag; Local.GetWithETag; errorFor.
 ProbeTheirs(m) ==
   /\ NextStep(m) = "Probe"
   /\ bucketRoot.key # doubtKey[m]
