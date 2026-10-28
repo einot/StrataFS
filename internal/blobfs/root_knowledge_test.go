@@ -138,8 +138,9 @@ package blobfs
 //   - where a test has a harness, the bucket is inspected through the inner
 //     *store.Local only after the harness's records have been read, never
 //     through the harness; the inner store is written to only to seed a
-//     filesystem or to stand for another writer (the foreign root pointer of
-//     section 8);
+//     filesystem, to stand for another writer (the foreign root pointer of
+//     section 8), or to delete rootKey as a root pointer removed by hand
+//     (ADR 0022 section 8, K19);
 //   - an FS field is read only holding FS.mu for reading, and only the fields
 //     section 8 names: FS.dirty, FS.epoch, FS.rootETag, FS.rootSnapshot,
 //     FS.doubtKey and f.rootKnowledge.State(); f.mode.State() is read without
