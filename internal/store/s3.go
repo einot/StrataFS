@@ -163,7 +163,7 @@ type s3Error struct {
 
 // errorFor turns a non-2xx response into a typed error.
 //
-// TLA+: docs/tla/CommitProtocol.tla SwapReplyLost, SwapFailed, SwapConflict, SwapUnsupported, ProbeFailed
+// TLA+: docs/tla/CommitProtocol.tla SwapReplyLost, SwapFailed, SwapConflict, SwapUnsupported, ProbeUnchanged, ProbeTheirs, ProbeFailed
 func errorFor(method, key string, resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	resp.Body.Close()
