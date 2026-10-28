@@ -2,6 +2,22 @@
 
 **Status:** Accepted
 **Date:** 2026-10-27
+**Revised:** 2026-10-28 — after coder's commit `71fee34` and the tests' two
+rounds, against the code at that commit, read and not run. §4's
+top-of-commit `probeFailed` error no longer "wraps the read's error", which
+§3's pinned signature cannot carry and which a read that decided nothing
+need not have (Assumption 25); §4's `TLA+:` line for `commitLocked` loses
+`Diverge`, which it no longer performs (Assumption 26); §2's pinned doc
+comment for `rootKnowledge` no longer names `loadOrInit`, which neither
+reads nor fires it, and §2 gives `mode.go` the corrected comment for
+`mountDiverge` (Assumption 27); §3 pins the record attributes, the second
+conflict message and the `attempted` value coder chose (Assumption 28); §8
+corrects K5's, K11's and K12's text, adds the harness's after-swap arm that
+K13 needs, gives K4 the assertion that a commit begun `Known` reads nothing
+before its swap, and says why K7, K8 and K10 keep that arm (Assumption 29);
+§7 and Assumption 20 record the module's `Checked against` bump to
+`71fee34`. The rule, the machine, the verdict, the model and the
+configurations are unchanged, and no code changes but the two comments.
 **Issue:** #5
 
 ## Context
@@ -248,10 +264,11 @@ var rootStates = fsm.NewTable("rootKnowledge",
   ```go
   // rootKnowledge is whether rootETag is known to be the current ETag of the
   // root pointer that names rootSnapshot. Every read and every Fire is made
-  // holding mu for writing, in commitLocked, resolveRoot and loadOrInit, or
-  // before the FS is shared. No policy's request and no gate reads it, and
-  // every transition is caused by a store's answer, so no transition asks a
-  // policy (ADR 0018 §5; ADR 0022 §6). New makes it and nothing reassigns it.
+  // in commitLocked or resolveRoot, holding mu for writing from Sync, or
+  // before the FS is shared, from initEmpty. No policy's request and no gate
+  // reads it, and every transition is caused by a store's answer, so no
+  // transition asks a policy (ADR 0018 §5; ADR 0022 §6). New makes it and
+  // nothing reassigns it.
   rootKnowledge *fsm.Machine[rootState, rootEvent]
   // rootSnapshot is the snapshot key the root pointer named when rootETag was
   // last set: by loadOrInit, by a commit's success path, or by resolveRoot.
@@ -268,6 +285,12 @@ var rootStates = fsm.NewTable("rootKnowledge",
   §2). `loadOrInit` sets `f.rootSnapshot = rp.Snapshot` beside
   `f.rootETag = etag`; `initEmpty` sets both to `""`. `rootSnapshot` and
   `doubtKey` are values, not named states (ADR 0018 §2), as `rootETag` is.
+  While `rootKnowledge` is `InDoubt`, `doubtKey` is at epoch `FS.epoch + 1`:
+  the attempt was written at that epoch, and no field moves while the root
+  is in doubt, since no commit succeeds before the doubt is settled and
+  `probeOurs` clears it (§3, §4). The doc comment above named `loadOrInit`
+  as a site until 2026-10-28; `loadOrInit` neither reads nor fires the
+  machine, and the pinned text is corrected (Assumption 27).
 - **Every write of the state goes through `Fire`** (ADR 0014 §3): the sites
   are those §4 lists, and nothing else fires anything. A `Fire` that fails is
   logged at `Error` with ADR 0014 §9's keys `machine`, `from`, `event` and
@@ -283,7 +306,13 @@ var rootStates = fsm.NewTable("rootKnowledge",
   for writing, or before the FS is shared, as the mode's doc comment says
   (ADR 0014 §7; ADR 0018 §5); that comment now names `resolveRoot` too. The
   `store.ErrPrecondition` case of `commitLocked` fires `rootSwapUnknown`
-  instead, and nothing else moves the mode.
+  instead, and nothing else moves the mode. In `internal/blobfs/mode.go` the
+  comment on `mountDiverge`, which ADR 0014 §7 pinned as
+  `// a swap failed with store.ErrPrecondition`, is since this ADR
+  `// a read of the root pointer showed another writer's root pointer, or none (ADR 0022 §3)`;
+  this replaces that one comment of ADR 0014 §7's pinned block, and
+  `mountDiverged`'s, `lost a swap to another writer; terminal`, stands
+  (Assumption 27).
 - **The lock.** `rootKnowledge` is an `fsm.Machine`, read and fired only
   under `FS.mu` for writing or before the FS is shared, as ADR 0014 §8
   decided; `mutable()` does not read it (§6), so no `fsm.Atomic` is needed.
@@ -394,19 +423,29 @@ func (f *FS) resolveRoot(ctx context.Context) probeVerdict
 - **`probeUnchanged`.** Fire `rootProbeUnchanged`. Then `f.rootETag = etag`;
   `f.doubtKey = ""`; `f.epoch` and `f.rootSnapshot` as they were. Log one
   record at `Warn` whose message contains `unchanged`, with the ETag the mount
-  held and the one it took, so that a store that refuses a condition that
-  holds is visible in the log (Assumption 3).
+  held and the one it took, as `held_etag` and `etag`, and the key both name
+  as `snapshot`, so that a store that refuses a condition that holds is
+  visible in the log (Assumption 3; Assumption 28).
 - **`probeTheirs`.** Fire `mountDiverge` on `f.mode`, with ADR 0014 §7's
   record if that fails; `rootKnowledge` stays `InDoubt` and `f.doubtKey` as
   it is. Log one record at `Error` whose message contains `commit conflict`,
   carrying the attributes `writer` (the body's `Writer`; `""` when the root
   pointer is missing), `their_epoch` (its `Epoch`), `their_snapshot` (its
-  `Snapshot`), `our_epoch` and `attempted`. This is the record ADR 0014 §9
-  calls the record of `Diverge`, with the writer named, which is the issue's
-  second done-when (Assumption 15).
+  `Snapshot`), `our_epoch` and `attempted`, which is `f.epoch + 1`, the
+  attempt's epoch (§2). When the root pointer is missing the message is a
+  second one, also containing `commit conflict`, which says that the root
+  pointer the mount descends from is gone, and `their_epoch` and
+  `their_snapshot` are zero, as `writer` is (Assumption 5; Assumption 28).
+  This is the record ADR 0014 §9 calls the record of `Diverge`, with the
+  writer named, which is the issue's second done-when (Assumption 15).
 - **`probeFailed`.** Fire nothing; change no field. Log one record at `Error`
-  whose message contains `in doubt`, with the read's error, or with what was
-  read where it was a body the mount does not understand.
+  whose message contains `in doubt`, with `attempt`, the key in doubt, and
+  the read's error as `err`; or, where the read returned a body the mount
+  does not understand, or one it understands with no ETag, with `version`,
+  `snapshot`, `etag` and `bytes`, the decoded fields, the ETag and the
+  body's length, rather than the body itself, as ADR 0021's record of a body
+  not understood carries its fields (Assumption 28). A body that does not
+  decode shows as version 0 with an empty snapshot.
 - A `Fire` of `rootProbeOurs` or `rootProbeUnchanged` that fails is logged
   as §2 says, nothing is adopted or taken, and the verdict returned is
   `probeFailed`.
@@ -431,8 +470,13 @@ outcome, so that the mount is left as the old code left it (Assumption 2).
 **At the top**, in this order: the `mountDiverged` refusal, storing nothing,
 as now; the unsettled-file refusal, as now; then, **only if `rootKnowledge`
 is `InDoubt`**, `resolveRoot`:
-- `probeFailed`: return an error whose text contains `in doubt`, wrapping the
-  read's error. Nothing is written.
+- `probeFailed`: return an error whose text contains `in doubt`. It wraps
+  nothing: `resolveRoot` returns the verdict alone (§3); the read's error,
+  where there was one, is in the `in doubt` record of §3; and a read that
+  decided nothing may have returned no error at all, a body not understood
+  or a reply with no ETag, so there is not always one to wrap. Until
+  2026-10-28 this said "wrapping the read's error" (Assumption 25). Nothing
+  is written.
 - `probeTheirs`: return the conflict error (below). Nothing is written.
 - `probeOurs`: the attempt is adopted, and the commit continues: the snapshot
   it writes is at the adopted epoch plus one, and holds the namespace as it
@@ -505,7 +549,9 @@ is `InDoubt`**, `resolveRoot`:
   `probeTheirs` the conflict error.
 
 **The conflict error** is the one `commitLocked` returns at `edcfc15`, whose
-text contains `commit conflict`; the rest of the text is not pinned.
+text contains `commit conflict`; the rest of the text is not pinned. One
+value serves both sites, the top of a commit and the read after a write
+(Assumption 28).
 
 **From `initEmpty`**, the same paths run before the FS is shared: a lost
 reply on the create is adopted and `New` succeeds; a verdict that fails the
@@ -515,7 +561,9 @@ Rule 1 of `classifyRoot` is the only one an empty `rootSnapshot` reaches.
 
 **`TLA+:` lines** (ADR 0013 §6). `commitLocked`'s gains `SwapNoETag`,
 `SwapUnknown`, `ProbeOurs`, `ProbeUnchanged`, `ProbeTheirs` and
-`ProbeFailed`; `resolveRoot` and `classifyRoot` carry the lines above;
+`ProbeFailed`, and loses `Diverge`, which it no longer performs: `trace.tsv`
+has one row per action and symbol, and its `Diverge` row names `resolveRoot`
+alone (Assumption 26); `resolveRoot` and `classifyRoot` carry the lines above;
 `S3.GetWithETag` and `Local.GetWithETag` gain `ProbeOurs, ProbeUnchanged,
 ProbeTheirs, ProbeFailed`; `S3.PutIfMatch` gains `SwapNoETag`; `errorFor`
 gains `ProbeFailed`. `docs/tla/trace.tsv` gains the rows §7 lists, and the
@@ -680,10 +728,12 @@ In `docs/tla/CommitProtocol.tla`, under a `Revised: 2026-10-27` line
   and describes the code as it is with this ADR (Assumption 16).
 - In `docs/tla/manifest.tsv` the three flipped rows and the eight new rows
   have `exit` and `log` `-` until the session has run them (ADR 0013 §7,
-  §10). The module's `Checked against` stays `faeba5b` for every action but
-  those this ADR adds or changes, whose trace is checked against coder's
-  commit once it is on the branch, and the line is bumped then
-  (Assumption 20).
+  §10). The module's `Checked against` stayed `faeba5b` for every action but
+  those this ADR adds or changes until coder's commit, `71fee34`, was on the
+  branch; on 2026-10-28 the architect checked every row this ADR added or
+  changed against that commit, its symbol, the locks held and the action
+  performed, found each to hold, and set the line to `71fee34` for every
+  action (Assumption 20).
 
 ### 8. The test surface
 
@@ -792,6 +842,12 @@ func (m *Machine[S, E]) State() S
   `rootKey` whose `etag` argument is the ETag the mount last loaded, was
   returned, or took from a read of the root pointer; its epoch is the mount's
   epoch plus one, and the key it writes carries that epoch as twenty digits.
+- A commit that begins with `rootKnowledge` `Known` makes no `GetWithETag`
+  of `rootKey` before its `PutIfMatch` of `rootKey`, and one whose swap's
+  reply gives the ETag makes none at all: the probe runs only after a write
+  whose reply did not, and never while `Known` (§3). `New` makes one
+  `GetWithETag` of `rootKey`, its load, before `initEmpty`'s swap
+  (ADR 0020 §2).
 - On a `*store.Local`, an object's ETag is the lowercase hexadecimal MD5 of
   its body, the same from `Head`, from `GetWithETag` and as `PutIfMatch`
   returns it; `PutIfMatch` with an `etag` that is not the current body's MD5
@@ -841,6 +897,15 @@ inner store and, when armed, one-shot, in addition:
   `GetWithETag` of `rootKey` with `nil`, `""` and `rk5ErrInjected` without
   calling the inner store (`ProbeFailed`); or **answers it** with bytes and
   an ETag the test gives;
+- **fails the first read of the root pointer after the next swap**: at the
+  next `PutIfMatch` of `rootKey`, however that call is answered, arms the
+  failed read above, so that the first `GetWithETag` of `rootKey` after it
+  fails and every one before it passes through. K13's second subtest needs
+  it: `New`'s load reads `rootKey` with `GetWithETag` before `initEmpty`'s
+  swap, and a failure armed before `New` would be spent on the load. K7, K8
+  and K10 use it too, so that the arm names the read it fails; that a commit
+  begun `Known` makes no read of `rootKey` before its swap is K4's
+  assertion, not theirs (Assumption 29);
 - in its **unconditional mode**, set before the first call and never changed,
   answers every `PutIfMatch` of any key with `store.ErrUnsupported` without
   calling the inner store;
@@ -890,16 +955,22 @@ the branch.
 - **K4, a lost reply** (`TestLostSwapReplyIsAdoptedNotTakenForASecondWriter`;
   `CommitProtocol_SelfDiverge`, the issue's first done-when). `New` over an
   empty bucket on the harness; arm the lost reply; commit `c2`. **`Sync`
-  returns nil.** The harness recorded, after the `PutIfMatch` it applied,
-  exactly one `GetWithETag` of `rootKey`, and no further `PutIfMatch` of
-  `rootKey`. `f.mode.State()` is `mountWritable`, `rootKnown`, `doubtKey`
-  `""`, `rootSnapshot` the key the applied `PutIfMatch` wrote, `epoch` 2,
-  `rootETag` the MD5 of the root pointer's bytes on the inner store, and
-  `FS.dirty` false. Commit `c3`: `Sync` returns nil, its `PutIfMatch` passed
-  through with an `etag` argument equal to that MD5, and its key carries
-  epoch 3. A remount on the inner store has `c2` and `c3`. At `edcfc15` the
-  first `Sync` returns an error, and the second's swap fails with
-  `store.ErrPrecondition` and diverges the mount.
+  returns nil.** The harness recorded, since the commit began, no
+  `GetWithETag` of `rootKey` before the `PutIfMatch` it applied, and after
+  it exactly one `GetWithETag` of `rootKey` and no further `PutIfMatch` of
+  `rootKey`: the read follows the write that raised the doubt and never
+  precedes it (§3; the fact above). `f.mode.State()` is `mountWritable`,
+  `rootKnown`, `doubtKey` `""`, `rootSnapshot` the key the applied
+  `PutIfMatch` wrote, `epoch` 2, `rootETag` the MD5 of the root pointer's
+  bytes on the inner store, and `FS.dirty` false. Commit `c3`: `Sync`
+  returns nil, its `PutIfMatch` passed through with an `etag` argument equal
+  to that MD5, its key carries epoch 3, and the harness recorded no
+  `GetWithETag` of `rootKey` in that commit at all: the probe never runs
+  while `Known` (§3). A remount on the inner store has `c2` and `c3`. At
+  `edcfc15` the first `Sync` returns an error, and the second's swap fails
+  with `store.ErrPrecondition` and diverges the mount. The two assertions on
+  reads, before `c2`'s swap and in `c3`, were added on 2026-10-28
+  (Assumption 29).
 - **K5, a 409, and an untyped error**
   (`TestSwapRefusedWhileTheRootIsUnchangedRetriesAtTheNextCommit`;
   `CommitProtocol_SelfDiverge409`). Two subtests, one arming
@@ -913,11 +984,12 @@ the branch.
   `c3` returns nil. `Sync`: returns nil; its `PutIfMatch` passed through with
   that MD5 as its `etag` argument. A remount has `c2` and `c3`. At `edcfc15`
   the first subtest's mount diverges and the `Create` returns
-  `vfs.ErrStale`; the second subtest's `Sync` after `c3` is refused as a
-  conflict too, since the first attempt's error left the ETag as it was and
-  the store honoured the retry, so at `edcfc15` the second subtest passes its
-  `Sync` and fails only on the `GetWithETag` count. Its purpose is the
-  `rootKnown` and the single read.
+  `vfs.ErrStale`; the second subtest's `Sync` after `c3` is not refused,
+  since the first attempt's error left the ETag as it was and the store
+  honours the retry, so at `edcfc15` the second subtest passes its `Sync`
+  and fails only on the `GetWithETag` count (until 2026-10-28 this sentence
+  began "is refused as a conflict too", which its own end contradicted;
+  Assumption 29). Its purpose is the `rootKnown` and the single read.
 - **K6, a real second writer**
   (`TestASwapLostToAnotherWriterDivergesAndNamesTheWriter`; the issue's
   second done-when; `CommitProtocol_TwoWriters`' loser, through
@@ -984,7 +1056,11 @@ the branch.
   `GetWithETag` of `rootKey`; `rootKnown`; `rootSnapshot` the key the `Put`
   named; `epoch` 2. Commit `c3`: `Sync` returns nil, through a `Put` and a
   `Head` of `rootKey`. A remount has `c2` and `c3`. At `edcfc15` the first
-  `Sync` returns `write root pointer: ...` and the second diverges the mount.
+  `Sync` returns `write root pointer: ...`, `FS.epoch` stays 1 and no read
+  is made; the second succeeds through the fallback, whose `Put` has no
+  condition to fail, so this test diverges no mount there (until 2026-10-28
+  this said the second diverges it, which is untrue in the harness's
+  unconditional mode; Assumption 29).
 - **K12, a 501 that took effect** (`TestA501ThatTookEffectIsAdopted`; ADR 0021
   §2 step 3; the issue's comment of 2026-10-27). Seed `c1` on the inner
   store; `New` on the harness, not in unconditional mode, without the
@@ -992,9 +1068,11 @@ the branch.
   harness recorded no `Delete`, one `Get` of `rootKey` (the reclaim's read)
   and then one `GetWithETag` of `rootKey` (the probe); the root pointer on
   the inner store names the key of the last `Put` under `snapshotPrefix`,
-  which exists; `rootKnown`; `epoch` 2. Commit `c3` with the store honouring
-  conditions: `Sync` returns nil, its `PutIfMatch` passed through. A remount
-  has `c1`, `c2` and `c3`. At `edcfc15` the first `Sync` returns ADR 0021's
+  which exists; `rootKnown`; `epoch` the loaded epoch plus one, which is 3
+  when `c1` is seeded by a `New` on the inner store and one commit, since
+  `New`'s create is epoch 1 (until 2026-10-28 this said 2; Assumption 29).
+  Commit `c3` with the store honouring conditions: `Sync` returns nil, its
+  `PutIfMatch` passed through. A remount has `c1`, `c2` and `c3`. At `edcfc15` the first `Sync` returns ADR 0021's
   error and the second diverges the mount. **G3** in
   `internal/blobfs/swap_fallback_test.go`
   (`TestRefusedCommitKeepsASnapshotTheRootPointerNames`) asserts the old
@@ -1007,9 +1085,11 @@ the branch.
   Over an empty bucket, arm the lost reply before `New`: `New` returns a
   non-nil `*FS` and a nil error; the bucket's root pointer names the one key
   under `snapshotPrefix`; `rootKnown`; `epoch` 1. In a second subtest, arm
-  the lost reply and the failed read: `New` returns a nil `*FS` and a
-  non-nil error (ADR 0011 §7's rule stands), and does not panic. At
-  `edcfc15` the first subtest's `New` returns an error.
+  the lost reply and the failed read after the next swap, the harness's
+  after-swap arm, since `New`'s load would spend a failure armed before it:
+  `New` returns a nil `*FS` and a non-nil error (ADR 0011 §7's rule stands),
+  and does not panic. At `edcfc15` the first subtest's `New` returns an
+  error.
 
 **Changes to existing tests**, each the smallest that keeps the test's
 purpose (Assumption 23):
@@ -1349,7 +1429,18 @@ Each is mine unless it says otherwise.
     commit the rest of the trace was checked at, with the new rows marked as
     awaiting coder's commit, as ADR 0014 Assumption 41 had it; once coder's
     change is on the branch, the architect bumps it and marks V2's entries,
-    `RootProbe` and `ClassifyRoot` *exists* in `docs/vocabulary.md`.
+    `RootProbe` and `ClassifyRoot` *exists* in `docs/vocabulary.md`. Done on
+    2026-10-28, against `71fee34`, coder's commit: the line reads `71fee34`
+    for every action, and `docs/vocabulary.md` marks V2's entries,
+    `RootProbe`, `SwapUnknown`, the variables `doubtKey[m]` and
+    `rootSnapshot[m]` and `ClassifyRoot` as existing as of that commit, with
+    `Unresolved`, the `pc` string `"Probe"` and the faults `"ProbeFailed"`
+    and `"SwapNoETag"`, which only the spec uses, still reserved, as `Below`
+    is by ADR 0019. That check was by reading, as the rest of this ADR's
+    were; the session's runs at `aee963f`, which it reported as `gofmt`,
+    `go vet` and `go test -race ./...` clean, with every K-, M-, G- and
+    R-test passing 30 repeats, are the session's evidence and not the
+    architect's.
 21. **One trace row per probe action and symbol** (§4, §7), as the swap's
     outcomes each have a row for `S3.PutIfMatch` and `errorFor`; the read
     that the four actions share is one call, and `trace.tsv` has one row per
@@ -1387,6 +1478,95 @@ Each is mine unless it says otherwise.
     only, where a sentence of theirs described the code or a test this ADR
     changes; none of their decisions moves. `README.md`'s sentence that a
     losing mount marks itself diverged stays true and is not touched.
+25. **The top-of-commit error wraps nothing** (§4; revised 2026-10-28). §3
+    pins `resolveRoot(ctx) probeVerdict`, so the read's error never reaches
+    `commitLocked`, and §4's first text, which said the error "wraps the
+    read's error", asked for what that signature cannot do, as coder found.
+    Two ways out: widen the signature to return the error beside the
+    verdict, or drop the wrap. The wrap is dropped. The read's error, where
+    there is one, is in the `in doubt` record of §3, which every path logs,
+    so the operator loses nothing; a read that decided nothing need not have
+    returned an error at all, a body not understood or a reply with no ETag,
+    so there is not always one to wrap; §4's failure-site errors wrap the
+    write's error, not the read's, so the top-of-commit error now matches
+    them; and nothing calls `errors.Is` on `Sync`'s error for the read's
+    cause, since the committer logs it and the NFS `COMMIT` path maps it to
+    a status. The cost is that the committer's `periodic commit failed`
+    record names the doubt and not its cause, which the record logged one
+    line earlier does. Coder kept the signature and returns an error whose
+    text contains `in doubt` and wraps nothing, which is what §4 now says;
+    no code and no test changes for this.
+26. **`Diverge` leaves `commitLocked`'s `TLA+:` line** (§4; revised
+    2026-10-28). §4 said the line "gains" six actions and did not say what it
+    loses. `commitLocked` no longer fires on the mode; `trace.tsv` has one
+    row per action and symbol (ADR 0013 §6), and its `Diverge` row names
+    `resolveRoot` alone, as §4 asked; a line that kept `Diverge` would name
+    an action the function does not perform and the trace does not give it.
+    Coder removed it, which is confirmed.
+27. **Two comments** (§2; revised 2026-10-28). The pinned doc comment for
+    `rootKnowledge` named `loadOrInit` as a site. `loadOrInit` sets
+    `rootSnapshot` and `rootETag` and neither reads nor fires the machine;
+    `initEmpty`, which it calls, reaches the machine only through
+    `commitLocked`. The text is corrected to name `commitLocked` and
+    `resolveRoot`, the two sites, with the hold each runs under. Coder kept
+    the pinned text, as it should have, so the correction is a coder change
+    to `internal/blobfs/fs.go`. And `mode.go`'s comment on `mountDiverge`,
+    "a swap failed with store.ErrPrecondition", which ADR 0014 §7 pinned, is
+    untrue since §2 moved the `Fire` into `resolveRoot`; §2 gives the new
+    text, which replaces that one comment of ADR 0014 §7's block under
+    `docs/adr/README.md`'s rule that a later ADR may replace one part of an
+    earlier decision and say which. ADR 0014's `Revised` line of 2026-10-27
+    already records that the `Fire` moved; its pinned block is left as the
+    record, and this ADR was not allowed to touch it in this pass.
+28. **Coder's recorded choices, confirmed** (§3, §4; revised 2026-10-28).
+    Six, each confirmed and pinned where a test might come to use it:
+    (1) the conflict record's `attempted` is `f.epoch + 1`, which is the
+    attempt's epoch on both paths, since `doubtKey` is written at that epoch
+    and no field moves while the root is in doubt (§2); parsing the epoch
+    out of `doubtKey` would add code for the same number. (2) A missing root
+    pointer gets a second conflict message, that the root pointer the mount
+    descends from is gone, which is what Assumption 5 asked the log to say;
+    both messages contain `commit conflict`, which is all §3 and K6 pin.
+    (3) The `unchanged` record carries `held_etag` and `etag`; §3 had named
+    the values and not the keys. (4) The `in doubt` record for a body not
+    understood carries `version`, `snapshot`, `etag` and `bytes`, not the
+    body: such a body may be an error document or anything else the store
+    served, its decoded fields and length say what was read, and ADR 0021's
+    record of the same case has that shape; a bounded quotation of the body
+    is the alternative, not taken, so that the two records agree. (5) A
+    fallback `Head` that succeeds with an empty ETag raises doubt: that is
+    §4's own text, "the `Head` fails or returns `""`", and not a choice.
+    (6) One `errCommitConflict`, with `edcfc15`'s text, serves the top of a
+    commit and the read after a write; §4 pins only that the text contains
+    `commit conflict`.
+29. **The tests, after two rounds** (§8; revised 2026-10-28). Three
+    sentences of §8 were wrong against the tests the routes need, and are
+    corrected: K12 said `epoch` 2, where seeding `c1` by a `New` on the
+    inner store and one commit loads epoch 2, so `c2` is 3, and the test
+    rightly asserts the loaded epoch plus one; K11 said the second `Sync`
+    diverges the mount at `edcfc15`, where in the harness's unconditional
+    mode the second commit goes through the fallback, whose `Put` has no
+    condition to fail, and succeeds; K5 said the untyped subtest's second
+    `Sync` "is refused as a conflict too" in a sentence whose own end says it
+    passes, and the end is right. K13's second subtest needs an arm §8 did
+    not list, since `New`'s load is a `GetWithETag` of `rootKey` and would
+    spend a failure armed before `New`; the harness gains it. In round 2
+    test-author moved K7, K8 and K10 to that arm too, giving ADR 0011 §7 as
+    the reason; that rule, that a test does not rely on which reads `New`
+    makes, is about `New`'s reads, and the three arm after `New` has
+    returned, so it does not apply, as supervisor found. They keep the arm
+    all the same, for a reason that holds: it names the read it fails, the
+    first after the swap, so that a failure in those tests reads as what it
+    is. What the move gave up, that a commit begun `Known` makes no read of
+    `rootKey` before its swap, is a property of this ADR, §3's "never while
+    `Known`", and is worth one assertion of its own: an implementation that
+    read the root pointer before every swap would be a pre-check rather than
+    a probe, at a read per commit; with `armFailRead` the three tests pinned
+    it only by accident, and a breach would have failed them at a later
+    assertion with a message about the swap. So K4 pins it, in both its
+    commits, with a message that names it, and the three tests' doc
+    comments and the file's header give the reason above in place of
+    ADR 0011 §7.
 
 ## Alternatives considered
 
@@ -1422,6 +1602,8 @@ Each is mine unless it says otherwise.
 - **Recover from divergence in this ADR** (Assumption 18).
 - **Make `rootKnowledge` an `fsm.Atomic`.** Nothing reads it without
   `FS.mu` (§2, §6).
+- **Widen `resolveRoot` to return the read's error** beside the verdict, so
+  that the top-of-commit error could wrap it (Assumption 25).
 
 ## Consequences
 

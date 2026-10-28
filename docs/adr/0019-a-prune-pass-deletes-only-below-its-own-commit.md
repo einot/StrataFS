@@ -21,6 +21,12 @@ R8, which observe that `Sync` returning an error, change as ADR 0022 §8
 says; §1's argument stands, since an adopted key is the one the root pointer
 already names (ADR 0022 §5). The rule, the Go change and the configurations
 here are unchanged.
+**Revised:** 2026-10-28 — cross-reference only, to make the line above
+plain: §6's text for R7 and R8 is kept as the record and still describes the
+code before ADR 0022. Since that ADR, the `Sync` after `armSwapLost` or
+`armRootPutLost` returns nil, the root pointer names the applied key as
+before, and the retry each test then makes needs a change made first, since
+the namespace is clean (ADR 0022 §8). Nothing else moved.
 **Issue:** #88
 
 ## Context

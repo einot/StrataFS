@@ -43,6 +43,13 @@ assertion on that error as ADR 0022 §8 says; its positive cases, the
 `Delete` and the error are unchanged, and the guard read stays a `Get`. An
 opted-in fallback `Put` or `Head` that fails leaves the root in doubt too.
 The rule, the flag, the model and the rest of the Go change are unchanged.
+**Revised:** 2026-10-28 — cross-reference only, to make the line above
+plain: §6's G3 says it "must stay green: it guards the reclaim". It stays
+green, and it still guards the reclaim, with one assertion changed: since
+ADR 0022 the `Sync` of its commit `c2` returns nil, not F3's error, because
+the 501 that took effect is adopted; its other assertions, no `Delete`, the
+root pointer naming the attempt's key, which exists, and the remount with
+`c1` and `c2`, stand (ADR 0022 §8, K12). Nothing else moved.
 **Issue:** #91
 
 ## Context

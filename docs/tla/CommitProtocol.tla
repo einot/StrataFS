@@ -10,11 +10,7 @@
 \* Go symbols that perform each action, and docs/vocabulary.md, V3, gives
 \* every name.
 \*
-\* Checked against faeba5b, for every action but those ADR 0022 adds or
-\*   changes (SwapNoETag, SwapUnknown, the four Probe actions, and the swap
-\*   outcomes that conjoin Unresolved), whose trace awaits coder's commit for
-\*   that ADR; this line is bumped once it is on the branch (ADR 0022,
-\*   Assumption 20).
+\* Checked against 71fee34.
 \* Revised: 2026-10-24 -- ADR 0019 (#88): with the Fixes member
 \*   PruneBelowCurrent, a prune pass deletes only the keys that sort below the
 \*   one its commit swapped the root pointer to, and keeps the Retention newest
