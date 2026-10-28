@@ -485,7 +485,8 @@ func TestASwapLostToAnotherWriterDivergesTheMountAndItStoresNothingMore(t *testi
 	}
 	if got := mm14Mode(t, fs, "f.mode.State() after the lost swap"); got != mountDiverged {
 		t.Errorf("after a Sync whose swap failed with store.ErrPrecondition, f.mode.State() = %v (%d), want %v "+
-			"(%d): commitLocked fires mountDiverge, Writable to Diverged (ADR 0014 section 7; section 11, M3)",
+			"(%d): resolveRoot fires mountDiverge, Writable to Diverged, on the read that shows another writer's "+
+			"root pointer (ADR 0022 sections 2 and 3; ADR 0014 section 11, M3)",
 			got, uint32(got), mountDiverged, uint32(mountDiverged))
 	}
 
