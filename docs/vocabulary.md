@@ -207,8 +207,8 @@ Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
 | `FallbackPut` | `commitLocked`'s unconditional root `Put` after it | merged with `SwapUnsupported`: an operator of that action's fallback branches, taken only where `FallbackAllowed` (ADR 0021 §4), not a step of its own |
 | `FallbackHead` | the `Head` after `FallbackPut` | only where `FallbackAllowed`; also V2's `SwapOK` event |
 | `ProbeOurs` | `resolveRoot` and `classifyRoot`, through `commitLocked`'s call; `S3.GetWithETag`; `Local.GetWithETag` | one read of the root pointer, which names the attempt in doubt: adopt it. At `pc` `"Probe"` it is `Committed`, the success path whole; at `"Ready"` it adopts only (ADR 0022 §3, §4; the module's J20) |
-| `ProbeUnchanged` | the same | the read shows the root pointer naming `rootSnapshot[m]`: take its ETag; at `"Probe"` the commit fails, with no retry in line |
-| `ProbeTheirs` | the same | the read shows neither: `Diverge` (V1), and the machine stays `"InDoubt"` |
+| `ProbeUnchanged` | the same, and `errorFor`, whose not-found decides it when the mount descends from no root (ADR 0022 §3, rule 1) | the read shows the root pointer naming `rootSnapshot[m]`: take its ETag; at `"Probe"` the commit fails, with no retry in line |
+| `ProbeTheirs` | the same, and `errorFor`, whose not-found decides it when the root pointer the mount descends from is gone (ADR 0022 §3, rule 2) | the read shows neither: `Diverge` (V1), and the machine stays `"InDoubt"` |
 | `ProbeFailed` | the same, and `errorFor` | the read fails, or returns a body the mount does not understand: nothing moves but, at `"Probe"`, the commit failing |
 | `StartPrune` | `schedulePrune`'s guard, and its setting of `FS.pruning` | an operator that `SwapOK` and `FallbackHead` conjoin, since it runs in the same hold of `FS.mu`; not a step of its own. The pass is begun for the key the commit swapped the root pointer to (ADR 0019 §2) |
 | `PruneList` | `pruneSnapshots`' `List` loop, then `prunable` | with `PruneBelowCurrent`, what the pass deletes is `Prunable` (ADR 0019 §2) |
@@ -268,7 +268,7 @@ machine's states (rule 3).
 | `ReadOnlyMounts` | a subset of `Mounts` | `Config.ReadOnly` | the mounts that have it set | exists |
 | `Fixes` | a subset of the `Fixes` members below | none | the fixes a configuration includes (ADR 0013 §7) | reserved, ADR 0013 |
 | `Capability` | `"Conditional"`, `"Unconditional"` or `"Flaky"` | none | what the backend does with a conditional write (below) | reserved, ADR 0013 |
-| `Faults` | a subset of `"SwapReplyLost"`, `"SwapFailed"`, `"SwapConflict409"`, `"SwapNoETag"`, `"PutFailed"`, `"SnapshotReplyLost"`, `"FallbackReplyLost"` and `"ProbeFailed"` | none | the failure outcomes the bucket may give (below) | reserved, ADR 0013; the last two, ADR 0022 |
+| `Faults` | a subset of `"SwapReplyLost"`, `"SwapFailed"`, `"SwapConflict409"`, `"SwapNoETag"`, `"PutFailed"`, `"SnapshotReplyLost"`, `"FallbackReplyLost"` and `"ProbeFailed"` | none | the failure outcomes the bucket may give (below) | reserved, ADR 0013; `"SwapNoETag"` and `"ProbeFailed"`, ADR 0022 |
 | `Start` | `"Empty"` or `"Loaded"` | none | the bucket as a behaviour begins (below) | reserved, ADR 0013 |
 | `Retention` | a natural number | `FS.retention` | how many snapshots a prune pass keeps; 0 turns pruning off | exists |
 | `MaxEpoch` | a positive natural number | none | a bound: the highest epoch a commit may reach | reserved, ADR 0013 |

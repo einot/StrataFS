@@ -49,11 +49,13 @@ CommitProtocol	ProbeUnchanged	internal/blobfs/commit.go	FS.commitLocked	commitGa
 CommitProtocol	ProbeUnchanged	internal/blobfs/commit.go	FS.resolveRoot	commitGate (write) and FS.mu (write), held by commitLocked from Sync; none from initEmpty	ADR 0022 section 3
 CommitProtocol	ProbeUnchanged	internal/blobfs/commit.go	classifyRoot	none: a pure function of its arguments	ADR 0022 section 3
 CommitProtocol	ProbeUnchanged	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	ProbeUnchanged	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	ADR 0022 section 3
 CommitProtocol	ProbeUnchanged	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitLocked's locks	ADR 0022 section 3
 CommitProtocol	ProbeTheirs	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0022 section 3; ADR 0022 section 4
 CommitProtocol	ProbeTheirs	internal/blobfs/commit.go	FS.resolveRoot	commitGate (write) and FS.mu (write), held by commitLocked from Sync; none from initEmpty	ADR 0022 section 3
 CommitProtocol	ProbeTheirs	internal/blobfs/commit.go	classifyRoot	none: a pure function of its arguments	ADR 0022 section 3
 CommitProtocol	ProbeTheirs	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	ProbeTheirs	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	ADR 0022 section 3
 CommitProtocol	ProbeTheirs	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitLocked's locks	ADR 0022 section 3
 CommitProtocol	ProbeFailed	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0022 section 3; ADR 0022 section 4
 CommitProtocol	ProbeFailed	internal/blobfs/commit.go	FS.resolveRoot	commitGate (write) and FS.mu (write), held by commitLocked from Sync; none from initEmpty	ADR 0022 section 3
