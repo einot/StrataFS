@@ -82,9 +82,12 @@ package blobfs
 //   - fails the next read of the root pointer: answers the next GetWithETag of
 //     rootKey with nil, "" and rk5ErrInjected without calling the inner store
 //     (ProbeFailed); or arms that failure only at the next PutIfMatch of
-//     rootKey, so that the read it fails is the first one after the swap,
-//     whatever reads come before it (New's own load reads the root pointer,
-//     and ADR 0011 section 7 lets no test rely on which reads New makes); or
+//     rootKey, so that the first GetWithETag of rootKey after that swap fails
+//     and every one before it passes through: K13's second subtest needs it,
+//     since New's own load reads the root pointer with GetWithETag before
+//     initEmpty's swap, and K7, K8 and K10 use it so that the arm names the
+//     read it fails; that a commit begun Known makes no read of rootKey before
+//     its swap is K4's assertion (ADR 0022 section 8; Assumption 29); or
 //     answers the next GetWithETag of rootKey with bytes and an ETag the test
 //     gives;
 //   - in its unconditional mode, set before the first call and never changed,
@@ -1149,14 +1152,21 @@ func TestNewStartsKnownWithTheRootPointersKey(t *testing.T) {
 // against the ETag the read gave (ADR 0022 sections 1, 3 and 4).
 //
 // New over an empty bucket on the harness; the lost reply armed; a commit of
-// c2: Sync returns nil; the harness recorded, after the PutIfMatch it applied,
-// exactly one GetWithETag of rootKey and no further PutIfMatch of rootKey;
+// c2: Sync returns nil; the harness recorded, since the commit began, no
+// GetWithETag of rootKey before the PutIfMatch it applied, and after it
+// exactly one GetWithETag of rootKey and no further PutIfMatch of rootKey: the
+// read follows the write that raised the doubt and never precedes it;
 // f.mode.State() is mountWritable, f.rootKnowledge.State() rootKnown,
 // FS.doubtKey "", FS.rootSnapshot the key the applied PutIfMatch wrote,
 // FS.epoch 2, FS.rootETag the MD5 of the root pointer's bytes on the inner
-// store, which names the applied attempt's key, and FS.dirty false. A commit of c3: Sync returns nil, its PutIfMatch
-// passed through with that MD5 as its etag argument, and its key carries
-// epoch 3. A remount on the inner store has c2 and c3.
+// store, which names the applied attempt's key, and FS.dirty false. A commit
+// of c3: Sync returns nil, its PutIfMatch passed through with that MD5 as its
+// etag argument, its key carries epoch 3, and the harness recorded no
+// GetWithETag of rootKey since that commit began at all: the probe never runs
+// while rootKnowledge is Known. A remount on the inner store has c2 and c3.
+//
+// The two assertions on reads, before c2's swap and in c3, pin ADR 0022
+// section 3's "never while Known" (section 8, K4; Assumption 29).
 //
 // At edcfc15 the first Sync returns an error, and the second's swap fails
 // with store.ErrPrecondition and diverges the mount.
@@ -1185,6 +1195,11 @@ func TestLostSwapReplyIsAdoptedNotTakenForASecondWriter(t *testing.T) {
 	}
 	if applied >= 0 {
 		appliedKey = rk5Named(calls[applied].data)
+		if early := rk5Filter(calls[:applied], rk5IsRootRead); len(early) != 0 {
+			t.Errorf("before the PutIfMatch whose reply was lost the commit of c2 made the GetWithETag calls of %q "+
+				"%v, want none before the swap: the read follows the write that raised the doubt and never precedes "+
+				"it (ADR 0022 section 3; section 8, K4). Every call since the commit began: %v", rootKey, early, calls)
+		}
 		if reads := rk5Filter(calls[applied+1:], rk5IsRootRead); len(reads) != 1 {
 			t.Errorf("after the PutIfMatch whose reply was lost the harness recorded the GetWithETag calls of %q "+
 				"%v, want exactly one: the one read that settles the doubt (ADR 0022 section 3; %s). Every call "+
@@ -1233,7 +1248,13 @@ func TestLostSwapReplyIsAdoptedNotTakenForASecondWriter(t *testing.T) {
 		t.Errorf("%s: Sync of the commit of c3 = %v, want nil: its swap is conditioned on the ETag the read gave, "+
 			"which is the root pointer's", where, err)
 	}
-	swaps = rk5Filter(h.records()[mark:], rk5IsRootSwap)
+	c3Calls := h.records()[mark:]
+	if reads := rk5Filter(c3Calls, rk5IsRootRead); len(reads) != 0 {
+		t.Errorf("the commit of c3 made the GetWithETag calls of %q %v, want none: the probe never runs while "+
+			"rootKnowledge is Known (ADR 0022 section 3; section 8, K4). Every call since the commit began: %v",
+			rootKey, reads, c3Calls)
+	}
+	swaps = rk5Filter(c3Calls, rk5IsRootSwap)
 	if len(swaps) != 1 {
 		t.Errorf("the commit of c3 made the PutIfMatch calls of the root pointer %q %v, want exactly one (%s)",
 			rootKey, swaps, where)
@@ -1486,8 +1507,10 @@ func TestASwapLostToAnotherWriterDivergesAndNamesTheWriter(t *testing.T) {
 // wrote; f.rootKnowledge.State() is rootKnown, FS.doubtKey "" and FS.epoch 3.
 // A remount has c2 and c3.
 //
-// The failed read is armed to take effect at the swap, so that it is the
-// first read after it, whatever reads come before.
+// The failed read is armed to take effect at the swap, so that the arm names
+// the read it fails, the first after the swap; that no read of rootKey comes
+// before a Known commit's swap is K4's assertion (ADR 0022 section 8;
+// Assumption 29).
 //
 // At edcfc15 the second Sync diverges the mount.
 func TestInDoubtMountSettlesTheRootBeforeItsNextCommit(t *testing.T) {
