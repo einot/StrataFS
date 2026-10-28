@@ -23,7 +23,7 @@ const (
 
 type mountEvent uint8
 
-const mountDiverge mountEvent = 1 // a swap failed with store.ErrPrecondition
+const mountDiverge mountEvent = 1 // a read of the root pointer showed another writer's root pointer, or none (ADR 0022 §3)
 
 var mountModes = fsm.NewTable("mode",
 	fsm.Edge[mountMode, mountEvent]{From: mountWritable, On: mountDiverge, To: mountDiverged})

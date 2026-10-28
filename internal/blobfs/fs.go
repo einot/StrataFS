@@ -146,10 +146,11 @@ type FS struct {
 
 	// rootKnowledge is whether rootETag is known to be the current ETag of the
 	// root pointer that names rootSnapshot. Every read and every Fire is made
-	// holding mu for writing, in commitLocked, resolveRoot and loadOrInit, or
-	// before the FS is shared. No policy's request and no gate reads it, and
-	// every transition is caused by a store's answer, so no transition asks a
-	// policy (ADR 0018 §5; ADR 0022 §6). New makes it and nothing reassigns it.
+	// in commitLocked or resolveRoot, holding mu for writing from Sync, or
+	// before the FS is shared, from initEmpty. No policy's request and no gate
+	// reads it, and every transition is caused by a store's answer, so no
+	// transition asks a policy (ADR 0018 §5; ADR 0022 §6). New makes it and
+	// nothing reassigns it.
 	rootKnowledge *fsm.Machine[rootState, rootEvent]
 	// rootSnapshot is the snapshot key the root pointer named when rootETag was
 	// last set: by loadOrInit, by a commit's success path, or by resolveRoot.
