@@ -32,6 +32,17 @@ and M7, which diverged a mount by a refusal against an unchanged root
 pointer, now diverge it by a second writer, as ADR 0022 §8 says. The type,
 the table, the `String` values, `mutable()`'s mapping and every other test
 are unchanged; a sentence at §7 and at §8 says so.
+**Revised:** 2026-10-28 — cross-reference only, for ADR 0022 §2, revised
+on 2026-10-28, which replaces one comment of §7's pinned `mode.go` block,
+`mountDiverge`'s. Pinned as `// a swap failed with store.ErrPrecondition`,
+it is since ADR 0022, and in the code since `b9c819f`,
+`// a read of the root pointer showed another writer's root pointer, or none (ADR 0022 §3)`,
+because the event's one `Fire` is now `resolveRoot`'s, on the verdict
+`ProbeTheirs` of its read of the root pointer, as the line above records,
+and a swap's failure no longer fires it. The block stays as the record, as
+`docs/adr/README.md` has it for a part a later ADR replaces;
+`mountDiverged`'s comment, `lost a swap to another writer; terminal`,
+stands (ADR 0022 Assumption 27); and no test changes for it.
 **Issue:** #114
 
 ## Context
