@@ -28,15 +28,14 @@ package blobfs
 //   - U6, TestASecondSyncWithNothingNewMakesNoStoreCall;
 //   - U7, TestStableWriteDuringACommitIsDurableWhenItReturns;
 //   - U8, TestTheTopOfCommitProbeHoldsNoLock;
-//   - U9, TestADivergedMountsSyncMakesNoStoreCall.
+//   - U9, TestADivergedMountsSyncMakesNoStoreCall;
+//   - U10, TestEveryChangeAdvancesTheChangeCount.
 //
-// Written in two parts. Part 1, this file as it stands, uses only names that
-// exist at d75d14a, so that the package builds there and the session can take
-// a red run. Every assertion section 11 makes on FS.changes, which is new in
-// ADR 0023 (sections 2 and 3), is left for part 2 and marked "// part 2" where
-// it goes: U3's two reads of the count, and U10
-// (TestEveryChangeAdvancesTheChangeCount) whole, of which only the doc comment
-// is written here.
+// Written in two parts. The first used only names that exist at d75d14a, so
+// that the package built there and the session could take a red run. The
+// second, written once ADR 0023's code was on the branch, added every
+// assertion section 11 makes on FS.changes, which is new in ADR 0023
+// (sections 2 and 3): U3's two reads of the count, and U10 whole.
 //
 // Not covered, on purpose: what section 11 does not pin, namely the lock
 // order itself, that FS.commitMu is the lock that serialises commits (no test
@@ -87,9 +86,9 @@ package blobfs
 //     harness's records have been read, and the inner store is written to only
 //     to stand for another writer (U9's foreign root pointer);
 //   - an FS field is read only holding FS.mu for reading, inside uc43Go, and
-//     only the fields section 11 names: FS.dirty, FS.epoch, FS.rootSnapshot
-//     and f.rootKnowledge.State(); f.mode.State() is read without a lock (ADR
-//     0014 section 11); no field is written.
+//     only the fields section 11 names: FS.dirty, FS.epoch, FS.rootSnapshot,
+//     FS.changes and f.rootKnowledge.State(); f.mode.State() is read without
+//     a lock (ADR 0014 section 11; ADR 0023 section 11); no field is written.
 
 import (
 	"bytes"
@@ -842,11 +841,13 @@ type uc43Fields struct {
 	dirty        bool
 	epoch        uint64
 	rootSnapshot string
+	changes      uint64
 	knowledge    rootState
 }
 
-// read reads FS.dirty, FS.epoch, FS.rootSnapshot and f.rootKnowledge.State()
-// in one hold of FS.mu for reading (ADR 0022 section 8; ADR 0023 section 11).
+// read reads FS.dirty, FS.epoch, FS.rootSnapshot, FS.changes and
+// f.rootKnowledge.State() in one hold of FS.mu for reading (ADR 0022 section
+// 8; ADR 0023 section 11, the facts).
 func (e *uc43Env) read(fs *FS, what, where string) uc43Fields {
 	e.t.Helper()
 	return uc43Go(e, func() uc43Fields {
@@ -856,6 +857,7 @@ func (e *uc43Env) read(fs *FS, what, where string) uc43Fields {
 			dirty:        fs.dirty,
 			epoch:        fs.epoch,
 			rootSnapshot: fs.rootSnapshot,
+			changes:      fs.changes,
 			knowledge:    fs.rootKnowledge.State(),
 		}
 	}).wait(e.t, what, where)
@@ -1237,8 +1239,9 @@ func TestNamespaceOperationsDoNotWaitForTheRootPointerSwap(t *testing.T) {
 // Released: Sync returns nil; FS.dirty is true; FS.epoch is 2; a remount has
 // c2 and not c3. Sync again: returns nil, with a second Put under
 // snapshotPrefix whose key carries epoch 3 and a second PutIfMatch of rootKey;
-// FS.dirty is false; a remount has c2 and c3. Section 11's reads of
-// FS.changes, before the Sync and after c3's Create, are part 2.
+// FS.dirty is false; a remount has c2 and c3. FS.changes, read holding FS.mu
+// for reading before the Sync started and again after c3's Create returned
+// while held, is greater the second time.
 //
 // At d75d14a it hangs to the 10 s bound at the Create of c3 while held, since
 // FS.mu is held across the snapshot Put. A build that runs the store calls off
@@ -1254,9 +1257,7 @@ func TestAChangeMadeWhileACommitIsInFlightStaysDirty(t *testing.T) {
 
 	hold := e.h.armHoldSnapshotPut()
 	e.create(fs, root, "c2", where)
-	// part 2: read FS.changes here, holding FS.mu for reading inside uc43Go,
-	// before the Sync starts (ADR 0023 section 11, U3). FS.changes does not
-	// exist at d75d14a.
+	beforeSync := e.read(fs, "reading FS.changes before the Sync started", where)
 	mark := len(e.h.records())
 	syncA := e.startSync(fs)
 	e.waitEntered(hold, syncA, "the Sync of the commit of c2", where)
@@ -1268,10 +1269,17 @@ func TestAChangeMadeWhileACommitIsInFlightStaysDirty(t *testing.T) {
 		t.Fatalf("Create %q, while %s is held, = %v, want success (ADR 0023 section 11; %s)", "c3", hold.what, err,
 			where)
 	}
-	// part 2: read FS.changes again here, after c3's Create returned and while
-	// the hold is still held, and require it to be greater than the value read
-	// before the Sync started: every change that dirties the namespace advances
-	// the count (ADR 0023 section 3; section 11, U3).
+	afterC3 := uc43Held(e, hold, "reading FS.changes after c3's Create returned", where, func() uint64 {
+		fs.mu.RLock()
+		defer fs.mu.RUnlock()
+		return fs.changes
+	}, a)
+	if afterC3 <= beforeSync.changes {
+		t.Errorf("FS.changes after c3's Create returned, while %s is held, = %d, want greater than %d, its value "+
+			"before the Sync started: every change that dirties the namespace advances the count, in the same "+
+			"hold of FS.mu (ADR 0023 section 3, the change count; section 11, U3; %s)", hold.what, afterC3,
+			beforeSync.changes, where)
+	}
 
 	hold.Release()
 	if err := syncA.wait(t, "the Sync of the commit of c2", where); err != nil {
@@ -1783,7 +1791,121 @@ func TestADivergedMountsSyncMakesNoStoreCall(t *testing.T) {
 // byte; SetAttr of a size; Rename; Remove; Rmdir. Each pair's second value is
 // greater than its first. A GetAttr, a Lookup and a Read advance nothing.
 //
-// part 2: U10 is written whole once FS.changes exists (ADR 0023 sections 2
-// and 3), since it reads FS.changes and nothing else; at d75d14a it cannot
-// build. No test function is declared here until then, so that nothing passes
-// in its name.
+// The mount is New on the harness's inner *store.Local, the plain store, over
+// its empty bucket; the harness itself is not used. The reads are made after
+// the Commit, of the file it flushed. Each step's value is read in its own
+// hold of FS.mu for reading, and nothing else runs on the mount meanwhile.
+//
+// It cannot build at d75d14a, where FS.changes does not exist.
+func TestEveryChangeAdvancesTheChangeCount(t *testing.T) {
+	const where = "ADR 0023 section 11, U10"
+	e := uc43Setup(t)
+	ctx, local := e.ctx, e.h.inner
+	nr := uc43Go(e, func() uc43R[*FS] {
+		fs, err := New(ctx, uc43Config(local))
+		return uc43R[*FS]{fs, err}
+	}).wait(t, "New over an empty bucket on a plain *store.Local", where)
+	if nr.err != nil || nr.v == nil {
+		t.Fatalf("New over an empty bucket on a plain *store.Local = (%v, %v), want a *FS and nil (%s)", nr.v,
+			nr.err, where)
+	}
+	fs := nr.v
+	root := e.root(fs, where)
+
+	// count reads FS.changes holding FS.mu for reading (ADR 0023 section 11,
+	// the facts).
+	count := func(when string) uint64 {
+		t.Helper()
+		return e.read(fs, "reading FS.changes "+when, where).changes
+	}
+	// advances runs a change, which must succeed, and requires it to advance
+	// FS.changes.
+	advances := func(what string, fn func() error) {
+		t.Helper()
+		before := count("before " + what)
+		if err := uc43Go(e, fn).wait(t, what, where); err != nil {
+			t.Fatalf("%s = %v, want success (%s)", what, err, where)
+		}
+		if after := count("after " + what); after <= before {
+			t.Errorf("FS.changes after %s = %d, want greater than %d, its value before: every change that dirties "+
+				"the namespace advances the count (ADR 0023 section 3, the change count; %s)", what, after, before,
+				where)
+		}
+	}
+	// still runs a read, which must succeed, and requires it to leave
+	// FS.changes as it was.
+	still := func(what string, fn func() error) {
+		t.Helper()
+		before := count("before " + what)
+		if err := uc43Go(e, fn).wait(t, what, where); err != nil {
+			t.Fatalf("%s = %v, want success (%s)", what, err, where)
+		}
+		if after := count("after " + what); after != before {
+			t.Errorf("FS.changes after %s = %d, want %d, its value before: a read changes nothing, so it advances "+
+				"nothing (ADR 0023 section 3; %s)", what, after, before, where)
+		}
+	}
+
+	// fileH is written by the Create's goroutine and read only after wait
+	// has returned, which the goroutine's close of its done channel orders.
+	var fileH vfs.Handle
+	advances(`Create of the file "f1"`, func() error {
+		h, _, err := fs.Create(ctx, uc43Caller, root, "f1", vfs.SetAttr{}, true)
+		fileH = h
+		return err
+	})
+	advances(`Mkdir of "dir"`, func() error {
+		_, _, err := fs.Mkdir(ctx, uc43Caller, root, "dir", vfs.SetAttr{})
+		return err
+	})
+	advances(`Symlink of "lnk" to "f1"`, func() error {
+		_, _, err := fs.Symlink(ctx, uc43Caller, root, "lnk", "f1", vfs.SetAttr{})
+		return err
+	})
+	mode := uint32(0o640)
+	advances(`SetAttr of "f1"'s mode`, func() error {
+		_, err := fs.SetAttr(ctx, uc43Caller, fileH, vfs.SetAttr{Mode: &mode})
+		return err
+	})
+	advances(`a Write of one byte at 0 of "f1", vfs.Unstable`, func() error {
+		n, _, err := fs.Write(ctx, uc43Caller, fileH, 0, []byte{'x'}, vfs.Unstable)
+		if err == nil && n != 1 {
+			return fmt.Errorf("wrote %d bytes, want 1", n)
+		}
+		return err
+	})
+	advances(`Commit of "f1", whose flush stores the byte`, func() error {
+		return fs.Commit(ctx, fileH, 0, 0)
+	})
+
+	still(`GetAttr of "f1"`, func() error {
+		_, err := fs.GetAttr(ctx, fileH)
+		return err
+	})
+	still(`Lookup of "f1"`, func() error {
+		_, _, err := fs.Lookup(ctx, uc43Caller, root, "f1")
+		return err
+	})
+	still(`Read of "f1"`, func() error {
+		data, _, err := fs.Read(ctx, uc43Caller, fileH, 0, 1)
+		if err == nil && !bytes.Equal(data, []byte{'x'}) {
+			return fmt.Errorf("read %q, want %q", data, "x")
+		}
+		return err
+	})
+
+	size := uint64(0)
+	advances(`SetAttr of "f1"'s size to 0`, func() error {
+		_, err := fs.SetAttr(ctx, uc43Caller, fileH, vfs.SetAttr{Size: &size})
+		return err
+	})
+	advances(`Rename of "f1" to "f2"`, func() error {
+		return fs.Rename(ctx, uc43Caller, root, "f1", root, "f2")
+	})
+	advances(`Remove of "f2"`, func() error {
+		return fs.Remove(ctx, uc43Caller, root, "f2")
+	})
+	advances(`Rmdir of "dir"`, func() error {
+		return fs.Rmdir(ctx, uc43Caller, root, "dir")
+	})
+}
