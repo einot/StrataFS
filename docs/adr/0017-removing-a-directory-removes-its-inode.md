@@ -2,6 +2,13 @@
 
 **Status:** Accepted
 **Date:** 2026-10-22
+**Revised:** 2026-10-30 — cross-reference only: ADR 0024 §3 decided #144,
+and replaces the part of §2 that says an entry naming no inode is "removed
+or replaced as now": `unlink` now leaves such an entry as it is and answers
+`vfs.ErrNoEnt`, as `Rename` does for such a source, and `Rename` still
+replaces one it is given as a target. §2's bullet gains a sentence saying
+so. The rule, `relink`, the counts, §5's no repair and §6's tests are
+unchanged.
 **Issue:** #50
 
 ## Context
@@ -118,7 +125,9 @@ lock and logs nothing.
   - `unlink` and `Rename` make no other change to a link count. `createEntry`
     and `allocInode` keep theirs.
   - An entry that names no inode is removed or replaced as now, with no call
-    to `relink`.
+    to `relink`. Since ADR 0024 §3, `unlink` leaves such an entry as it is
+    and answers `vfs.ErrNoEnt`; `Rename` still replaces one, with no call to
+    `relink`.
 
 ### 3. Link counts
 

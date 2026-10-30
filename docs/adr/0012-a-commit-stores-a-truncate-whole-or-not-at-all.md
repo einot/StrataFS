@@ -13,6 +13,15 @@ the settle pass and the seal. `commitLocked`, which §4 names for its check,
 is since that ADR `seal`, which makes the check under the gate as before.
 Rules C and D, the gate, the mark, the settle pass and §9's tests are
 unchanged.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0024 §2 decided #143,
+and replaces §2's paragraph allowing a `SETATTR`'s size and other attributes
+to land in two commits: `truncate` now checks every attribute `sa` sets
+before it takes the gate, checks them again in its hold of `openFile.mu` and
+`FS.mu` for writing, and applies the size change and the rest of `sa` in
+that one hold, before it releases the gate, so a `SETATTR` lands in one
+commit whole under Rule D, or not at all. The paragraph gains a sentence
+saying so. Rules C and D, the gate, the mark, the settle pass and §9's tests
+are unchanged.
 **Issue:** #64
 
 ## Context
@@ -184,6 +193,9 @@ rest of `sa`. So a `SETATTR` that sets a size and other attributes can land in
 two commits, the size in one and the rest in the next. RFC 1813 §3.3.2 allows
 it: "SETATTR is not guaranteed atomic" (*Sources*). At `48aa23a` it could
 happen too, since `truncate` released `FS.mu` before `SetAttr` took it again.
+Since ADR 0024 §2 it cannot: `truncate` applies the rest of `sa` in the same
+hold as the size change, before it releases the gate, so Rule D covers the
+whole `SETATTR`.
 
 ### 3. The unsettled mark
 

@@ -33,4 +33,4 @@ The rules are ADR 0018 §1's: the state rule, the policy rule and the link.
 | E10 | The `MaxFileSize` clamp | the clamp in `(*FS).Write`, in `internal/blobfs/fs.go` | the policy rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
 | E11 | The mount gate | `(*FS).mutable`, in `internal/blobfs/fs.go` | the policy rule's "in `internal/policy`" | ADR 0018 §4 | in force |
 | E12 | `ACCESS`'s read-only mask | the mask in `(*FS).Access`, in `internal/blobfs/fs.go` | the policy rule's "in `internal/policy`" | ADR 0018 §4 | in force |
-| E13 | The namespace dirty flag | `FS.dirty`, in `internal/blobfs/fs.go` | the state rule | ADR 0023 §8, with ADR 0018 §1's reasons (all pairs legal, a hot path, pinned and tested elsewhere) | in force |
+| E13 | The namespace dirty flag | `FS.dirty`, in `internal/blobfs/fs.go` | the state rule | ADR 0023 §8, with ADR 0018 §1's reasons (all pairs legal, a hot path, pinned and tested elsewhere); restated by ADR 0024 §4, since which §8's third fact, that every hold that changes the namespace calls `markDirty`, holds without qualification | in force |
