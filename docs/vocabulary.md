@@ -242,7 +242,7 @@ beside it.
 | `bucketRoot` | the object at `rootKey` | `[key, etag, writer]`: `rootPointer.Snapshot`, its ETag, `rootPointer.Writer` | exists |
 | `snapshots` | the objects under `snapshotPrefix` | a function from the keys present to sets of commit ids: a key's set stands for that snapshot's `snapshot.Inodes`, as the commits it includes | exists |
 | `chunks` | the objects under `chunkPrefix` | a set of commit ids: a commit is in it once its chunk is stored | exists |
-| `pc[m]` | none | where `New`, `loadOrInit` or `commitLocked` has got to, as one of the strings below | reserved, ADR 0013 |
+| `pc[m]` | none | where `New`, `loadOrInit` or a commit, `Sync`'s top, `seal` and `commitSealed` since ADR 0023 and `commitLocked` before it, has got to, as one of the strings below | reserved, ADR 0013 |
 | `mode[m]` | `FS.mode` (V1) | the mode's state, as `FS.mode.State()` gives it. Before ADR 0014 §7's conversion, at `043927f`, it stood for `FS.readOnly` and `FS.diverged`: `"Diverged"` while `FS.diverged` was set, `"ReadOnly"` while only `FS.readOnly` was, and `"Writable"` otherwise (V1's note) | exists, with ADR 0014 §7's conversion (V1's note) |
 | `rootKnowledge[m]` | `FS.rootKnowledge` (V2) | the machine's state, as `FS.rootKnowledge.State()` gives it | exists, as of `71fee34` |
 | `doubtKey[m]` | `FS.doubtKey` | the snapshot key of the attempt whose write of the root pointer left the root in doubt; `NoKey` while `"Known"` | exists, as of `71fee34` |
@@ -252,13 +252,13 @@ beside it.
 | `rootETag[m]` | `FS.rootETag` | | exists |
 | `epoch[m]` | `FS.epoch` | | exists |
 | `nsDirty[m]` | `FS.dirty` | | exists |
-| `attempt[m]` | `commitLocked`'s `key` | the key of the commit attempt in progress, from its first write that takes effect until the attempt ends; `NoKey` otherwise | exists |
+| `attempt[m]` | `sealedCommit.key`, which `seal` picks and `commitSealed` reads as `s.key`, since ADR 0023; `commitLocked`'s `key` before it | the key of the commit attempt in progress, from its first write that takes effect until the attempt ends; `NoKey` otherwise | exists |
 | `rpSnapshot[m]` | `loadOrInit`'s `rp.Snapshot` | the snapshot key the root pointer named when `GetRoot` read it, until `GetSnapshot`; `NoKey` otherwise | exists |
 | `base[m]` | `FS.inodes` | the set of commit ids the namespace in memory includes | exists |
 | `pruning[m]` | `FS.pruning` | in {`"Idle"`, `"Listing"`, `"Deleting"`}, which refine the bool: `FS.pruning` is true unless `"Idle"`. The three strings are reserved, ADR 0013 | exists |
 | `pruneCurrent[m]` | `schedulePrune`'s and `pruneSnapshots`' `current` | the snapshot key the pass's commit swapped the root pointer to, or `NoKey` while no pass has begun since `New` (ADR 0019 §2). At `13aebc4` Go's `current` is that key's epoch, which is all the pass then uses | exists |
 | `pruneDoomed[m]` | `pruneSnapshots`' `doomed` | the keys the pass has still to delete. With `PruneBelowCurrent` it is `Prunable`, which `prunable` computes; without it, `doomed` less the keys of the current epoch, which Go at `13aebc4` skips in its `Delete` loop and the spec at `PruneList` | exists |
-| `acked` | none: a ghost | the commits whose `commitLocked` returned nil, from `Sync` or from `initEmpty` | reserved, ADR 0013 |
+| `acked` | none: a ghost | the commits whose `commitSealed` returned nil (`commitLocked`'s before ADR 0023), from `Sync` or from `initEmpty` | reserved, ADR 0013 |
 | `used` | none: a ghost | the snapshot keys named by a snapshot `Put` or a write of the root pointer that took effect. A fresh key is one not in it, which is how the spec takes the nonce never to repeat (ADR 0013 §4) | reserved, ADR 0013 |
 | `overtaken[m]` | none: a ghost | another mount has written the root pointer since this mount last set `rootETag[m]` | reserved, ADR 0013 |
 | `roWrites` | none: a ghost | the read-only mounts from which a `Put`, `PutIfMatch` or `Delete` call has reached the bucket, whether or not it changed an object; a call `store.ReadOnly` refuses reaches nothing | reserved, ADR 0013 |
@@ -290,11 +290,12 @@ machine's states (rule 3).
 | `Start` | `"Empty"` or `"Loaded"` | none | the bucket as a behaviour begins (below) | reserved, ADR 0013 |
 | `Retention` | a natural number | `FS.retention` | how many snapshots a prune pass keeps; 0 turns pruning off | exists |
 | `MaxEpoch` | a positive natural number | none | a bound: the highest epoch a commit may reach | reserved, ADR 0013 |
-| `Nonces` | a non-empty set of positive natural numbers | none | a bound: the nonces a snapshot key may carry, standing for `commitLocked`'s six random bytes; nonce 0 means none | reserved, ADR 0013 |
+| `Nonces` | a non-empty set of positive natural numbers | none | a bound: the nonces a snapshot key may carry, standing for the six random bytes `seal` puts in a key (`commitLocked` before ADR 0023); nonce 0 means none | reserved, ADR 0013 |
 | `MaxCrashes` | a natural number | none | a bound on how many `Crash` steps a behaviour takes | reserved, ADR 0013 |
 
-- **`Capability`.** `"Conditional"` and `"Unconditional"` are `commitLocked`'s
-  two branches, the swap and what follows `store.ErrUnsupported`: the
+- **`Capability`.** `"Conditional"` and `"Unconditional"` are `commitSealed`'s
+  two branches (`commitLocked`'s before ADR 0023), the swap and what follows
+  `store.ErrUnsupported`: the
   fallback where `FallbackAllowed`, and otherwise the refusal ADR 0021 adds.
   `"Conditional"` honours every conditional write, and `"Unconditional"`
   answers every one 501. `"Flaky"` honours them, but may answer any one of
@@ -357,12 +358,12 @@ ADR 0022 reserves, and `InFlight`, which ADR 0023 reserves.
 | `KeyFor(m)` | the key of `m`'s attempt: `attempt[m]`, or else a fresh one |
 | `FirstStep` | a commit's first call: `"PutSnapshot"`, or without `ChunksFirst` `"Swap"` |
 | `InFlight(m)` | a commit of `m` is sealed and not yet ended: `ChunksFirst` is in `Fixes` and `pc[m]` is `"Swap"`, `"Probe"` or `"FallbackHead"`; where `Mutate` is enabled with `UnlockedCommit` (ADR 0023 §10; the module's J23); reserved, ADR 0023 |
-| `NextStep(m)` | the commit step due at `m`, or `"None"`. At `"Ready"` it is a commit's first call when `nsDirty[m]` is set, as `Sync` requires, and `m` has not diverged, as `commitLocked` requires; or `"Probe"` instead when the root is in doubt, since `commitLocked` reads the root pointer before it writes anything then (ADR 0022 §3) |
+| `NextStep(m)` | the commit step due at `m`, or `"None"`. At `"Ready"` it is a commit's first call when `nsDirty[m]` is set, as `Sync` requires, and `m` has not diverged, as `Sync` requires at the top of a commit (`commitLocked` before ADR 0023); or `"Probe"` instead when the root is in doubt, since `Sync` reads the root pointer before it writes anything then (ADR 0022 §3; ADR 0023 §2) |
 | `SwapCondition(m, k)` | whether the bucket would apply `m`'s swap to the root pointer naming `k`: If-None-Match for an empty `rootETag`, which is unconditional without `IfNoneMatchInit`, and If-Match otherwise |
 | `WriteCall(m)` | a `Put`, `PutIfMatch` or `Delete` call of `m`'s reaches the bucket: a read-only `m` joins `roWrites` |
 | `WriteRoot(m, k)` | `m` writes the root pointer, naming `k` |
-| `CommitFails(m, k)` | `commitLocked` returns an error: back to `"Ready"`, or to `"Failed"` for `initEmpty`'s commit |
-| `SwapUnknown(m, k)` | V2's event: `rootKnowledge[m]` becomes `"InDoubt"`, `doubtKey[m]` becomes `k`, and the probe's read is due (`pc` `"Probe"`). Go `(*FS).commitLocked`'s `Fire` of `rootSwapUnknown`; exists, as of `71fee34` |
+| `CommitFails(m, k)` | the commit returns an error, from `commitSealed` or from `Sync`'s top since ADR 0023 and from `commitLocked` before it: back to `"Ready"`, or to `"Failed"` for `initEmpty`'s commit |
+| `SwapUnknown(m, k)` | V2's event: `rootKnowledge[m]` becomes `"InDoubt"`, `doubtKey[m]` becomes `k`, and the probe's read is due (`pc` `"Probe"`). Go `(*FS).commitSealed`'s `Fire` of `rootSwapUnknown` since ADR 0023, `(*FS).commitLocked`'s before it; exists, as of `71fee34` |
 | `Unresolved(m, k)` | what a write of the root pointer whose reply did not establish its ETag does: `SwapUnknown(m, k)` with `RootProbe`, and `CommitFails(m, k)` with `rootETag[m]` kept without it, as `commitLocked` does at `edcfc15`; reserved, ADR 0022 |
 | `FlushEffect(m, k)` | the chunk of `m`'s commit at `k`'s epoch is stored; an epoch-1 commit has none |
 | `SnapshotEffect(m, k)` | `m`'s snapshot `Put` of `k` takes effect, and with `ChunksFirst` the chunk uploads folded before it too |
@@ -382,12 +383,12 @@ no acknowledged commit includes has `nsDirty[m]` set (ADR 0023 §10).
 | Member | What the fix does | Status |
 |---|---|---|
 | `IfNoneMatchInit` | `initEmpty` commits with an empty `rootETag`, so its swap is If-None-Match and two first mounts cannot both create a filesystem | exists |
-| `Nonce` | `commitLocked` puts six random bytes in every snapshot key, so two writers committing one epoch cannot overwrite each other's snapshot | exists |
+| `Nonce` | `seal` (`commitLocked` before ADR 0023) puts six random bytes in every snapshot key, so two writers committing one epoch cannot overwrite each other's snapshot | exists |
 | `ChunksFirst` | `Sync` stores every chunk before the snapshot that names it, and the snapshot before the swap | exists |
 | `ReadOnlyFence` | `New` puts a read-only mount's store behind `store.ReadOnly` (ADR 0011 §3) | exists |
 | `PruneBelowCurrent` | a prune pass deletes only the snapshot keys that sort below the one its commit swapped the root pointer to, and keeps the `Retention` newest of them, so the snapshot the root pointer names is never deleted (ADR 0019 §1, §2) | exists |
 | `AtomicLoad` | `loadOrInit` reads the root pointer's body and its ETag with one call, `store.Store.GetWithETag`, so the ETag its first commit swaps against is the ETag of the body it loaded, and a commit by another mount between a mount's reads is refused, not overwritten (ADR 0020 §1, §2) | exists, as of `c5068a0` |
-| `FallbackOptIn` | `commitLocked`, after `store.ErrUnsupported` from the swap, writes the root pointer unconditionally only on a mount whose operator set `Config.AllowUnconditionalRoot`, and otherwise fails the commit, writing nothing more and reclaiming the snapshot it uploaded, so one 501 never turns a conditional writer into an unconditional one (ADR 0021 §1, §2) | exists, as of `8415f61` |
+| `FallbackOptIn` | `commitSealed` (`commitLocked` before ADR 0023), after `store.ErrUnsupported` from the swap, writes the root pointer unconditionally only on a mount whose operator set `Config.AllowUnconditionalRoot`, and otherwise fails the commit, writing nothing more and reclaiming the snapshot it uploaded, so one 501 never turns a conditional writer into an unconditional one (ADR 0021 §1, §2) | exists, as of `8415f61` |
 | `RootProbe` | a write of the root pointer whose reply did not establish its ETag leaves the mount's knowledge of the root pointer in doubt, and the mount writes the root pointer no further until one read of it, `GetWithETag`, has shown it naming the attempt, which the mount adopts, the key its namespace descends from, whose ETag it takes, or another key, on which it diverges, naming the writer; so no swap's error alone is taken for a second writer (ADR 0022 §1 to §4) | exists, as of `71fee34` |
 | `UnlockedCommit` | a commit seals the namespace under `FS.mu`, in `seal`, and makes every store call, the snapshot `Put`, the swap, the probe's read, the reclaim and the fallback, holding neither `FS.mu` nor the commit gate, in `commitSealed` and `resolveRoot`, applying the outcome in a later hold; `FS.commitMu` serialises commits; so a change can be made while a commit is in flight (ADR 0023 §1, §2, §4) | exists, as of `d0fdcdf` |
 | `ClearIfUnchanged` | a commit's success clears `FS.dirty` only if nothing changed since the seal: `applyLocked` sets it to `FS.changes != s.changes`, so a change made during the flight is in the next commit; `markDirty` is the one site that advances `FS.changes` (ADR 0023 §3) | exists, as of `d0fdcdf` |
@@ -444,8 +445,9 @@ identifier.
 
 `docs/tla/FileData.tla`; one file of one mount, with no prune goroutine and
 no removal of the file (ADR 0013 §1); not Go machines. The Go column is
-indicative (rule 7); every site is in `internal/blobfs/fs.go` but `Sync` and
-`commitLocked`, which are in `internal/blobfs/commit.go`.
+indicative (rule 7); every site is in `internal/blobfs/fs.go` but `Sync`,
+`seal`, `commitSealed` and `applyLocked` (`commitLocked` before ADR 0023),
+which are in `internal/blobfs/commit.go`.
 
 **Actions.** All reserved, ADR 0013. ADR 0013 §4 says why `SyncCommit`,
 `FlushBody` and `WriteBody` may each be one action.

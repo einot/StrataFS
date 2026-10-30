@@ -18,66 +18,66 @@ CommitProtocol	Mutate	internal/blobfs/fs.go	FS.bufferWrite	openFile.mu, then FS.
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.truncate	commitGate (read), openFile.mu, FS.mu (write)	ADR 0012 section 2
 CommitProtocol	Flush	internal/blobfs/commit.go	FS.Sync	none for flushAll; commitMu from after flushAll until it returns; commitGate (write) from settleAll until the seal	ADR 0012 section 2; ADR 0023 section 2; README.md How a commit works
 CommitProtocol	Flush	internal/blobfs/fs.go	FS.flushAll	FS.mu (read) for its listing	ADR 0012 section 2
-CommitProtocol	Flush	internal/blobfs/fs.go	FS.settleAll	commitGate (write), held by Sync; FS.mu (read) for its listing	ADR 0012 section 2
+CommitProtocol	Flush	internal/blobfs/fs.go	FS.settleAll	commitMu and commitGate (write), held by Sync; FS.mu (read) for its listing	ADR 0012 section 2
 CommitProtocol	Flush	internal/blobfs/fs.go	FS.flushOpen	openFile.mu; FS.mu (write) for the repoint	ADR 0006 section 5; ADR 0012 section 3
 CommitProtocol	Flush	internal/blobfs/fs.go	FS.putChunk	openFile.mu, held by flushOpen	README.md How a commit works
 CommitProtocol	PutSnapshot	internal/blobfs/commit.go	FS.seal	FS.mu (write), which it takes for the encode and releases before any store call; commitMu and commitGate (write), held by Sync around it; none of those from initEmpty	ADR 0023 section 2; README.md How a commit works; ADR 0012 section 4
 CommitProtocol	PutSnapshot	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu and no commitGate around the Put; none from initEmpty	ADR 0023 section 2; README.md How a commit works
 CommitProtocol	PutSnapshot	internal/store/store.go	ReadOnly.Put	none of its own; called holding commitMu and no FS.mu	ADR 0011 section 3
-CommitProtocol	PutSnapshot	internal/store/s3.go	S3.Put	none of its own; called holding commitMu and no FS.mu	-
+CommitProtocol	PutSnapshot	internal/store/s3.go	S3.Put	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	-
 CommitProtocol	SwapOK	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu around the swap; FS.mu (write), which it takes for the Fire and applyLocked after it; none but FS.mu from initEmpty	ADR 0023 section 2; README.md How a commit works
 CommitProtocol	SwapOK	internal/blobfs/commit.go	FS.applyLocked	FS.mu (write), held by commitSealed	ADR 0023 section 2; ADR 0023 section 3
-CommitProtocol	SwapOK	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitMu and no FS.mu	README.md How a commit works
-CommitProtocol	SwapOK	internal/store/local.go	Local.PutIfMatch	Local.mu; called holding commitMu and no FS.mu	README.md How a commit works
+CommitProtocol	SwapOK	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	README.md How a commit works
+CommitProtocol	SwapOK	internal/store/local.go	Local.PutIfMatch	Local.mu; called holding commitMu and no FS.mu, or nothing, from initEmpty	README.md How a commit works
 CommitProtocol	SwapReplyLost	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu around the swap; FS.mu (write), which it takes for the Fire of rootSwapUnknown	ADR 0022 section 4; ADR 0023 section 2
-CommitProtocol	SwapReplyLost	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitMu and no FS.mu	-
-CommitProtocol	SwapReplyLost	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu	-
+CommitProtocol	SwapReplyLost	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	-
+CommitProtocol	SwapReplyLost	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	-
 CommitProtocol	SwapFailed	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu around the swap; FS.mu (write), which it takes for the Fire of rootSwapUnknown	ADR 0022 section 4; ADR 0023 section 2
-CommitProtocol	SwapFailed	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitMu and no FS.mu	-
-CommitProtocol	SwapFailed	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu	-
-CommitProtocol	SwapFailed	internal/store/local.go	Local.PutIfMatch	Local.mu; called holding commitMu and no FS.mu	-
+CommitProtocol	SwapFailed	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	-
+CommitProtocol	SwapFailed	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	-
+CommitProtocol	SwapFailed	internal/store/local.go	Local.PutIfMatch	Local.mu; called holding commitMu and no FS.mu, or nothing, from initEmpty	-
 CommitProtocol	SwapConflict	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu around the swap; FS.mu (write), which it takes for the Fire of rootSwapUnknown	ADR 0003 section 5; ADR 0022 section 4; ADR 0023 section 2
-CommitProtocol	SwapConflict	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu	-
-CommitProtocol	SwapConflict	internal/store/local.go	Local.PutIfMatch	Local.mu; called holding commitMu and no FS.mu	-
+CommitProtocol	SwapConflict	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	-
+CommitProtocol	SwapConflict	internal/store/local.go	Local.PutIfMatch	Local.mu; called holding commitMu and no FS.mu, or nothing, from initEmpty	-
 CommitProtocol	Diverge	internal/blobfs/commit.go	FS.resolveRoot	FS.mu (write), which it takes after its read; commitMu, held by Sync; none but FS.mu from initEmpty	ADR 0003 section 5; ADR 0014 section 7; ADR 0022 section 2; ADR 0023 section 5
 CommitProtocol	SwapUnknown	internal/blobfs/commit.go	FS.commitSealed	FS.mu (write), which it takes for the Fire; commitMu, held by Sync	ADR 0022 section 2; ADR 0022 section 4; ADR 0023 section 2
 CommitProtocol	SwapNoETag	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu around the swap; FS.mu (write), which it takes for the Fire of rootSwapUnknown	ADR 0022 section 4; ADR 0023 section 2
-CommitProtocol	SwapNoETag	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitMu and no FS.mu	ADR 0022 section 4
+CommitProtocol	SwapNoETag	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	ADR 0022 section 4
 CommitProtocol	ProbeOurs	internal/blobfs/commit.go	FS.Sync	commitMu; neither the commit gate nor FS.mu around resolveRoot's read, at the top of a commit	ADR 0022 section 4; ADR 0023 section 2
 CommitProtocol	ProbeOurs	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu around resolveRoot's read, at the failure site; FS.mu (write), which it takes for applyLocked after the verdict	ADR 0022 section 4; ADR 0023 section 2; ADR 0023 section 5
 CommitProtocol	ProbeOurs	internal/blobfs/commit.go	FS.applyLocked	FS.mu (write), held by commitSealed, in a hold after resolveRoot's	ADR 0023 section 2; ADR 0023 section 5
 CommitProtocol	ProbeOurs	internal/blobfs/commit.go	FS.resolveRoot	none for its read; FS.mu (write), which it takes for the verdict and what it applies; commitMu, held by Sync	ADR 0022 section 3; ADR 0023 section 5
 CommitProtocol	ProbeOurs	internal/blobfs/commit.go	classifyRoot	none: a pure function of its arguments, called in resolveRoot's hold	ADR 0022 section 3
-CommitProtocol	ProbeOurs	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitMu and no FS.mu	ADR 0022 section 3; ADR 0023 section 5
-CommitProtocol	ProbeOurs	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitMu and no FS.mu	ADR 0022 section 3; ADR 0023 section 5
+CommitProtocol	ProbeOurs	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	ADR 0022 section 3; ADR 0023 section 5
+CommitProtocol	ProbeOurs	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	ADR 0022 section 3; ADR 0023 section 5
 CommitProtocol	ProbeUnchanged	internal/blobfs/commit.go	FS.Sync	commitMu; neither the commit gate nor FS.mu around resolveRoot's read, at the top of a commit	ADR 0022 section 4; ADR 0023 section 2
 CommitProtocol	ProbeUnchanged	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu around resolveRoot's read, at the failure site	ADR 0022 section 4; ADR 0023 section 2
 CommitProtocol	ProbeUnchanged	internal/blobfs/commit.go	FS.resolveRoot	none for its read; FS.mu (write), which it takes for the verdict and what it applies; commitMu, held by Sync	ADR 0022 section 3; ADR 0023 section 5
 CommitProtocol	ProbeUnchanged	internal/blobfs/commit.go	classifyRoot	none: a pure function of its arguments, called in resolveRoot's hold	ADR 0022 section 3
-CommitProtocol	ProbeUnchanged	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitMu and no FS.mu	ADR 0022 section 3; ADR 0023 section 5
-CommitProtocol	ProbeUnchanged	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu	ADR 0022 section 3
-CommitProtocol	ProbeUnchanged	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitMu and no FS.mu	ADR 0022 section 3; ADR 0023 section 5
+CommitProtocol	ProbeUnchanged	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	ADR 0022 section 3; ADR 0023 section 5
+CommitProtocol	ProbeUnchanged	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	ADR 0022 section 3
+CommitProtocol	ProbeUnchanged	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	ADR 0022 section 3; ADR 0023 section 5
 CommitProtocol	ProbeTheirs	internal/blobfs/commit.go	FS.Sync	commitMu; neither the commit gate nor FS.mu around resolveRoot's read, at the top of a commit	ADR 0022 section 4; ADR 0023 section 2
 CommitProtocol	ProbeTheirs	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu around resolveRoot's read, at the failure site	ADR 0022 section 4; ADR 0023 section 2
 CommitProtocol	ProbeTheirs	internal/blobfs/commit.go	FS.resolveRoot	none for its read; FS.mu (write), which it takes for the verdict and the Fire of mountDiverge; commitMu, held by Sync	ADR 0022 section 3; ADR 0023 section 5
 CommitProtocol	ProbeTheirs	internal/blobfs/commit.go	classifyRoot	none: a pure function of its arguments, called in resolveRoot's hold	ADR 0022 section 3
-CommitProtocol	ProbeTheirs	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitMu and no FS.mu	ADR 0022 section 3; ADR 0023 section 5
-CommitProtocol	ProbeTheirs	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu	ADR 0022 section 3
-CommitProtocol	ProbeTheirs	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitMu and no FS.mu	ADR 0022 section 3; ADR 0023 section 5
+CommitProtocol	ProbeTheirs	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	ADR 0022 section 3; ADR 0023 section 5
+CommitProtocol	ProbeTheirs	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	ADR 0022 section 3
+CommitProtocol	ProbeTheirs	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	ADR 0022 section 3; ADR 0023 section 5
 CommitProtocol	ProbeFailed	internal/blobfs/commit.go	FS.Sync	commitMu; neither the commit gate nor FS.mu around resolveRoot's read, at the top of a commit	ADR 0022 section 4; ADR 0023 section 2
 CommitProtocol	ProbeFailed	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu around resolveRoot's read, at the failure site	ADR 0022 section 4; ADR 0023 section 2
 CommitProtocol	ProbeFailed	internal/blobfs/commit.go	FS.resolveRoot	none for its read; FS.mu (write), which it takes for the verdict; commitMu, held by Sync	ADR 0022 section 3; ADR 0023 section 5
 CommitProtocol	ProbeFailed	internal/blobfs/commit.go	classifyRoot	none: a pure function of its arguments, called in resolveRoot's hold	ADR 0022 section 3
-CommitProtocol	ProbeFailed	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitMu and no FS.mu	ADR 0022 section 3; ADR 0023 section 5
-CommitProtocol	ProbeFailed	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu	ADR 0022 section 3
-CommitProtocol	ProbeFailed	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitMu and no FS.mu	ADR 0022 section 3; ADR 0023 section 5
+CommitProtocol	ProbeFailed	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	ADR 0022 section 3; ADR 0023 section 5
+CommitProtocol	ProbeFailed	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	ADR 0022 section 3
+CommitProtocol	ProbeFailed	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	ADR 0022 section 3; ADR 0023 section 5
 CommitProtocol	SwapUnsupported	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu around the swap, the reclaim's Get and Delete, or the fallback's Put and Head; FS.mu (write), which it takes for a Fire	ADR 0021 section 2; ADR 0022 section 4; ADR 0023 section 2; ADR 0023 section 6; docs/DESIGN.md section 2
 CommitProtocol	SwapUnsupported	internal/blobfs/commit.go	FS.fallbackAllowed	none: allowUnconditionalRoot is set once by New	ADR 0021 section 2
-CommitProtocol	SwapUnsupported	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu	-
+CommitProtocol	SwapUnsupported	internal/store/s3.go	errorFor	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	-
 CommitProtocol	SwapUnsupported	internal/store/store.go	ReadOnly.PutIfMatch	none of its own; called holding commitMu and no FS.mu	ADR 0011 section 3
 CommitProtocol	FallbackPut	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu and no commitGate around the Put	ADR 0021 section 2; ADR 0023 section 2; docs/DESIGN.md section 2
 CommitProtocol	FallbackPut	internal/store/store.go	ReadOnly.Put	none of its own; called holding commitMu and no FS.mu	ADR 0011 section 3
-CommitProtocol	FallbackPut	internal/store/s3.go	S3.Put	none of its own; called holding commitMu and no FS.mu	-
+CommitProtocol	FallbackPut	internal/store/s3.go	S3.Put	none of its own; called holding commitMu and no FS.mu, or nothing, from initEmpty	-
 CommitProtocol	FallbackHead	internal/blobfs/commit.go	FS.commitSealed	commitMu, held by Sync; no FS.mu around the Head; FS.mu (write), which it takes for the Fire and applyLocked after it	ADR 0021 section 2; ADR 0023 section 2; docs/DESIGN.md section 2
 CommitProtocol	FallbackHead	internal/blobfs/commit.go	FS.applyLocked	FS.mu (write), held by commitSealed	ADR 0023 section 2; ADR 0023 section 3
 CommitProtocol	StartPrune	internal/blobfs/commit.go	FS.schedulePrune	FS.mu (write), held by commitSealed around applyLocked, from Sync or from initEmpty	README.md How a commit works; ADR 0019 section 2; ADR 0023 section 6

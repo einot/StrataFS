@@ -17,6 +17,26 @@ build that unlocks the store calls but skips the guard would show
 calibration, at `9bc9792`, and the module's `Checked against` bump to
 `d0fdcdf`. The rule, the pipeline, the guard, the model and the
 configurations are unchanged, and no code changes.
+**Revised:** 2026-10-30 — on `reviewer`'s findings against `d75d14a..a847158`,
+with the code at `a847158` read and not run. §8 exempts `FS.dirty` from the
+state rule, E13 in the register, since this ADR changed how the flag moves
+and ADR 0018 §3 brings it under the rule whole (Assumption 35). §2 pins that
+every hold of `FS.mu` in `commitSealed` is released by a deferred `Unlock`,
+reversing Assumption 31's acceptance of the explicit holds at `d0fdcdf`;
+coder's follow-up brings the code to it, and §4 has `settleAll`'s doc comment
+name `commitMu`. §2, §11 and Assumption 6 narrow "a diverged mount's `Sync`
+makes no store call at all" to the commit's own calls, since the first pass
+runs before the refusal and can upload a chunk a `Write` buffered before the
+mount diverged (Assumption 36). §11 gains U11 and U12, which hold the
+reclaim's `Get` and `Delete` and the fallback's `Put` and `Head`, the five
+harness arms they need, their red runs, and one more entry under *Changes to
+existing tests* (Assumption 37). `docs/tla/trace.tsv`'s rows for the
+store-level symbols now say what is held on `initEmpty`'s path, and
+`settleAll`'s row names `commitMu`; Assumption 23's reading note is
+corrected. `docs/vocabulary.md`'s rows that named `commitLocked` as current
+code name `Sync`, `seal`, `commitSealed` or `sealedCommit.key`. The rule,
+the pipeline's steps, the guard, the model and the configurations are
+unchanged, and the model needs no run.
 
 ## Context
 
@@ -180,7 +200,8 @@ at each step.
      (Assumption 7);
    - if `f.mode.State()` is `mountDiverged`, return the error whose text
      begins `filesystem diverged`, as `commitLocked` returned at `d75d14a`,
-     making no store call, not even a read (ADR 0014 §11's M7);
+     making no store call from here on, not even a read (ADR 0014 §11's M7;
+     step 1 ran before it, Assumption 36);
    - if the state read was `rootInDoubt`, call `resolveRoot` (§5), and act
      on its verdict as `commitLocked`'s top did at `d75d14a` (ADR 0022 §4):
      `probeFailed` returns the error whose text contains `in doubt`;
@@ -281,8 +302,14 @@ changes uint64
 ```
 
 **What `seal` checks, and what moved.** `commitLocked`'s diverged refusal is
-since this ADR `Sync`'s, at step 3, so that a diverged mount makes no store
-call at all, the probe's read included (Assumption 6). Its unsettled-file
+since this ADR `Sync`'s, at step 3, so that a diverged mount's commit makes
+no store call at all, the probe's read included (Assumption 6). The first
+pass runs before the refusal, as it ran before `commitLocked`'s at `d75d14a`:
+a `Write` that passed `mutable()` before the commit that diverged the mount
+can have buffered a chunk, which the next `Sync`'s first pass uploads under
+`chunkPrefix`, content-addressed and named by no snapshot, before the
+refusal. The refusal is not moved ahead of the first pass (Assumption 36).
+Its unsettled-file
 refusal stays at the seal, under the gate after the settle pass, where its
 argument lives (ADR 0012 §4); from `Sync` it is unreachable, as before, and
 from `initEmpty` `FS.open` is empty. The encode, the nonce and the key are
@@ -317,6 +344,19 @@ named, and nothing else moves:
   logged and their attributes are ADR 0022 §3 and §4's, ADR 0021 §2's and
   `d75d14a`'s, unchanged (Assumption 18).
 
+**The holds of `FS.mu` in `commitSealed`** are each released by a deferred
+`Unlock`, as `seal`'s and `resolveRoot`'s are and as `bufferWrite` states the
+package's convention: a panic inside a hold must not leave the lock held,
+since `internal/sunrpc` recovers a handler's panic and keeps serving, and a
+mount whose `FS.mu` is never released answers nothing from then on, every
+reader and every change included, where at `d75d14a` `Sync`'s deferred
+unlock released it. A hold after which `commitSealed` returns at once, the
+success path's and the failure-site adoption's, defers at function scope;
+the doubt-raising hold, past which the function goes on to `resolveRoot`'s
+read, is a closure with the deferred `Unlock` inside it, as `Sync`'s hold of
+the gate is. What each hold does, and the order of the calls around it, is
+unchanged (Assumption 31).
+
 **What coder's commit chose**, recorded against `d0fdcdf` where the pins
 above left room (Assumptions 29 to 32):
 
@@ -337,9 +377,12 @@ above left room (Assumptions 29 to 32):
 - In `Sync`, the gate is taken and released inside a closure around the
   settle pass and the seal, by a deferred unlock, so that it is released on
   an error and on a panic, before any store call, as step 5 asks.
-- `commitSealed` takes each of its holds of `FS.mu` with an explicit `Lock`
-  and `Unlock`; `seal` and `resolveRoot`, which each hold `FS.mu` once, use
-  `defer`.
+- `commitSealed` took each of its holds of `FS.mu` with an explicit `Lock`
+  and `Unlock` at `d0fdcdf`; `seal` and `resolveRoot`, which each hold
+  `FS.mu` once, use `defer`. Review found that a panic inside one of the
+  explicit holds would leave `FS.mu` held, and this ADR now pins a deferred
+  release for each (*The holds*, above; Assumption 31), which coder's
+  follow-up makes.
 - Two comments beside the list above were corrected in the same two files:
   `FS.mode`'s field comment, which names `Sync`'s unlocked read of the mode
   at the top of a commit and `resolveRoot`'s hold as the one place it is
@@ -422,7 +465,10 @@ then `openFile.mu`, then `FS.mu`; the budget's mutex, `knownMu` and the chunk
 cache's mutex stay leaves (ADR 0003 §3; ADR 0012 §5; ADR 0013 §4; ADR 0014
 §4). The `FS.mu` doc comment gives the new order, and `commitGate`'s doc
 comment says that `Sync` holds the gate from the end of its first pass until
-the seal.
+the seal. `settleAll`'s doc comment says its caller holds `commitMu` and the
+commit gate for writing and no other lock, which is what `Sync` holds at
+step 4; at `a847158` it named the gate alone, which review found, and
+coder's follow-up corrects it.
 
 - Nothing takes `commitMu` while holding any other lock: `Sync` is its only
   taker, and every caller of `Sync`, the committer, `Commit`,
@@ -584,8 +630,39 @@ that commit (Assumption 17).
   that the sequential code is the machine and the gate is a lock. This ADR
   restates E3 with that reason, which still holds, extending its code to
   `seal`, `commitSealed`, `applyLocked` and `FS.commitMu`, and the register's
-  row gains this ADR (ADR 0018 §4; Assumption 22). No new exemption is
-  granted.
+  row gains this ADR (ADR 0018 §4; Assumption 22). The one new exemption is
+  the next bullet's.
+- **`FS.dirty` is exempt from the state rule: E13** (Assumption 35). ADR 0018
+  §3 lists the flag under *Not yet moved*, and this ADR changes how it moves:
+  its clear is conditional on the count, and its eight write sites go
+  through `markDirty` (§3), so the change brings it under the state rule
+  whole, as ADR 0021's *Alternatives considered* foresaw of any counter set
+  beside it. It is exempted rather than converted, under ADR 0018 §1's
+  fourth rule, for three of the reasons that rule names:
+  - every (state, event) pair is legal, so a table would refuse nothing,
+    which is E5's reason: a change leaves the flag set whether it was clean
+    or dirty, and a commit's success leaves it clean or dirty by the count
+    alone, from dirty on every path `Sync` reaches and from clean on
+    `initEmpty`'s, which nothing runs beside;
+  - it is written in every hold of `FS.mu` for writing that changes the
+    namespace, the size update at the end of every `Write` included, which
+    is E4's reason, a hot path where a table costs more than it catches;
+  - what the flag must satisfy is pinned and tested by another mechanism,
+    which is ADR 0018 §1's second example: the module's
+    `DirtyUntilCommitted`, held by the four Unlocked rows and shown
+    load-bearing by `CommitProtocol_NoClearIfUnchanged` (§10), and U3, U4,
+    U7 and U10 (§11).
+
+  The exemption's code is `FS.dirty`, in `internal/blobfs/fs.go`, with its
+  two writers, `markDirty` there and `applyLocked` in
+  `internal/blobfs/commit.go`, and its one reader outside tests, `Sync`. It
+  rests on three facts that review checks and no table would: no non-test
+  code writes `f.dirty = true` but `markDirty` (Assumption 10); nothing
+  writes it false but `applyLocked`, as `f.changes != s.changes`; and every
+  hold of `FS.mu` for writing that changes the namespace calls `markDirty`.
+  ADR 0011 §7's seam, a test writing the field on a read-only FS, stands.
+  The register gains row E13, citing this section; ADR 0018 §3's list is the
+  record of what stood at `2d7ff34` and is not edited.
 - **`FS.changes` is a value, not a state** (ADR 0018 §2), as `rootETag` is:
   it names no legal next step.
 - **No policy.** Nothing here decides what a caller may do. The guard is a
@@ -835,7 +912,13 @@ func NewLocal(root string) (*Local, error)
   `SetAttr` that succeeds, a `Write` that buffers, and a flush that stores
   something, which a `Commit` of a written file makes (§3).
 - A diverged mount's `Sync` returns an error whose text begins
-  `filesystem diverged` and makes no store call at all, reads included (§2).
+  `filesystem diverged`, and from its refusal on makes no store call, reads
+  included: no `GetWithETag` or `Get` of `rootKey`, no `Put` under
+  `snapshotPrefix`, no `PutIfMatch`, `Put` or `Head` of `rootKey` and no
+  `Delete` (§2). Its first pass runs before the refusal, and uploads under
+  `chunkPrefix` any chunk a `Write` buffered before the mount diverged; a
+  test that buffers no such write, as U9 buffers none, sees no call of any
+  kind (Assumption 36).
 - A snapshot's bytes decode with `decodeSnapshot`; the root directory's
   entries are `Inodes[rootInodeID].Entries`, and a file's size is its
   inode's `Size`. A remount is `New` on the inner `*store.Local` with
@@ -859,6 +942,19 @@ over a `*store.Local` under `t.TempDir()`, written without embedding
   doubt;
 - **holds the next `GetWithETag` of `rootKey`** in the same way as the
   `Put`, then passes it through;
+- **answers the next `PutIfMatch` of `rootKey` with `store.ErrUnsupported`**,
+  without calling the inner store, as `sf91Store`'s one-shot arm of that
+  kind does (ADR 0021 §6): one 501 from a store that honours every other
+  conditional write, recorded as answered by the harness;
+- **holds the next `Get` of `rootKey`** in the same way as the `Put`, then
+  passes it through: the reclaim's read (ADR 0021 §2);
+- **holds the next `Delete` under `snapshotPrefix`** in the same way, then
+  passes it through: the reclaim's `Delete`;
+- **holds the next `Put` of `rootKey`** in the same way, then passes it
+  through: the fallback's write, an arm of its own beside the held `Put`
+  under `snapshotPrefix`, the two told apart by key;
+- **holds the next `Head` of `rootKey`** in the same way, then passes it
+  through: the fallback's `Head`;
 - records, in call order, every call of every method but `Name`, with its
   key and how it was answered, so that U9's "no call of any kind" is a
   statement the records can make; among them every `Put` under
@@ -983,6 +1079,53 @@ not finished; nothing sleeps. `Create`, `Sync` and the field reads follow
   `SetAttr` of a size; `Rename`; `Remove`; `Rmdir`. Each pair's second value
   is greater than its first. A `GetAttr`, a `Lookup` and a `Read` advance
   nothing.
+- **U11, the reclaim's read and `Delete` hold no lock**
+  (`TestTheReclaimOfARefusedCommitHoldsNoLock`; §1, §6; ADR 0021 §2). One
+  commit behind it, with `AllowUnconditionalRoot` false. Arm the 501 on the
+  next `PutIfMatch` of `rootKey`, the held `Get` of `rootKey` and the held
+  `Delete` under `snapshotPrefix`; create `c2`; start `Sync`; wait for the
+  `Get`'s `entered`: the swap has been answered `store.ErrUnsupported`, and
+  the reclaim's read is in progress. While it is held, `GetAttr` of the
+  root, `Lookup` of `c2`, `Create` of `c3` and `SetAttr` of `c2`'s size to
+  10 each return. Release the `Get`; wait for the `Delete`'s `entered`;
+  while it is held, `GetAttr` of the root, `Create` of `c4` and `SetAttr` of
+  `c2`'s size to 0 each return. Release. `Sync` returns an error for which
+  `errors.Is(err, store.ErrUnsupported)` holds and whose text contains
+  `unconditional` (ADR 0021 §2). The harness recorded, in order, one `Put`
+  under `snapshotPrefix` whose key carries epoch 2, one `PutIfMatch` of
+  `rootKey` answered by the harness, one `Get` of `rootKey` and one `Delete`
+  whose key is that `Put`'s; and, after the `PutIfMatch`, no `GetWithETag`,
+  `Put` or `Head` of `rootKey`. Under `FS.mu` for reading, `FS.dirty` is
+  true, `FS.epoch` is 1, `FS.rootSnapshot` is what it was before the `Sync`
+  and `f.rootKnowledge.State()` is `rootKnown`; `f.mode.State()` is
+  `mountWritable`. The inner store holds no object under `snapshotPrefix`
+  whose key carries epoch 2, and a remount has an empty root directory.
+  `Sync` again, with no arm: returns nil, with one more `Put` under
+  `snapshotPrefix` whose key carries epoch 2 and is not the reclaimed key,
+  and one `PutIfMatch` of `rootKey` passed through; a remount has `c2`, `c3`
+  and `c4`, with `c2` at size 0.
+- **U12, the opted-in fallback's `Put` and `Head` hold no lock**
+  (`TestTheUnconditionalFallbackHoldsNoLock`; §1, §6; ADR 0021 §2). One
+  commit behind it, with `AllowUnconditionalRoot` true. Arm the 501 on the
+  next `PutIfMatch` of `rootKey`, the held `Put` of `rootKey` and the held
+  `Head` of `rootKey`; create `c2`; start `Sync`; wait for the `Put`'s
+  `entered`: the swap has been answered `store.ErrUnsupported`, and the
+  fallback's write is in progress. While it is held, `GetAttr` of the root,
+  `Lookup` of `c2`, `Create` of `c3` and `SetAttr` of `c2`'s size to 10 each
+  return. Release the `Put`; wait for the `Head`'s `entered`; while it is
+  held, `GetAttr` of the root, `Create` of `c4` and `SetAttr` of `c2`'s size
+  to 0 each return. Release. `Sync` returns nil. The harness recorded, in
+  order, one `Put` under `snapshotPrefix` whose key carries epoch 2, one
+  `PutIfMatch` of `rootKey` answered by the harness, one `Put` of `rootKey`
+  and one `Head` of `rootKey`; and no `GetWithETag` or `Get` of `rootKey` and
+  no `Delete`. Under `FS.mu` for reading, `FS.dirty` is true, `FS.epoch` is
+  2, `FS.rootSnapshot` is the key that `Put` under `snapshotPrefix` wrote,
+  `FS.rootETag` is the MD5 of the root pointer's bytes on the inner store
+  (ADR 0022 §8's fact on a `*store.Local`'s ETags) and
+  `f.rootKnowledge.State()` is `rootKnown`. A remount has `c2` and neither
+  `c3` nor `c4`. `Sync` again, with no arm: returns nil, its `PutIfMatch`
+  passed through with that MD5 as its `etag` argument and its key at epoch 3;
+  a remount has `c2`, `c3` and `c4`, with `c2` at size 0.
 
 **Red runs** (Assumption 34). At `d75d14a` each of U1 to U8 hangs until the
 test's bound at the first call it makes while a store call is held, since
@@ -997,7 +1140,12 @@ store calls off the lock but clears the flag unconditionally,
 repository is: U1 to U5 would catch it, U7 can, and U6 and U8 would not,
 since neither makes a change between the seal and the apply. The session's
 red run at `d75d14a` showed U1 to U8 hanging to the bound, as this paragraph
-says.
+says. U11 and U12, added on review (Assumption 37), hang at `d75d14a` as U1
+to U8 do, at the first call made while the reclaim's read or the fallback's
+write is held, since the gate and `FS.mu` were held across both; a build
+that moved the reclaim or the fallback back under `FS.mu` or the gate hangs
+the same way, which is what they exist to catch. They are written after
+`d0fdcdf`, and no red run of them is asked for.
 
 **Changes to existing tests.** Every test at `d75d14a` stands in its
 assertions (Assumption 21); three may change their words:
@@ -1005,6 +1153,14 @@ assertions (Assumption 21); three may change their words:
 - `internal/blobfs/mount_mode_test.go`, M7: its failure message says
   `commitLocked refuses at its top`; since this ADR the refusal is `Sync`'s,
   before the probe (§2). The message may say so; the assertion stands.
+- `internal/blobfs/mount_mode_test.go`, two doc comments, found on review:
+  its header says `resolveRoot` is a function "which only `commitLocked`
+  calls"; since this ADR `Sync`, at the top of a commit, and `commitSealed`,
+  at the failure site, call it (§2, §5). M7's doc comment says a diverged
+  mount's commit "is refused at `commitLocked`'s top before it stores
+  anything"; since this ADR it is refused at `Sync`'s top, before the probe
+  and before any of the commit's store calls (§2). Both may say so; the
+  assertions stand.
 - `internal/blobfs/commit_window_test.go`: its header's "Not covered, on
   purpose" names "that the gate is held across the whole commit phase on
   every path"; since this ADR the phase ends at the seal (§2). The sentence
@@ -1091,7 +1247,8 @@ Each is mine unless it says otherwise.
    gate keeps ADR 0012 §2's shape: the settle pass runs immediately before
    the seal under one hold of the gate. The diverged refusal precedes the
    probe so that a diverged mount reads nothing, as it stored nothing
-   before; the clean return precedes both as it did.
+   before; the clean return precedes both as it did. The first pass stays
+   ahead of the refusal, as it was at `d75d14a` (Assumption 36).
 7. **Reading `dirty` before the gate is sound** (§2). Only a commit's apply
    clears the flag, and commits are serialised by the lock `Sync` already
    holds, so a flag read true stays true until this `Sync`'s own apply. A
@@ -1217,16 +1374,30 @@ Each is mine unless it says otherwise.
     `ClearIfUnchanged` and the variable `changedSinceSeal[m]` as existing as
     of that commit, with the ghost `uncommitted[m]`, `InFlight` and
     `DirtyUntilCommitted`, which only the spec uses, still reserved, as
-    `Below` is by ADR 0019. One reading note on the rows: those for the
-    store-level symbols, for `classifyRoot`'s callers and for
-    `commitSealed`'s and `resolveRoot`'s outcomes say "commitMu, held by
-    Sync" or "called holding commitMu", which is true from `Sync`; on
-    `initEmpty`'s path nothing is held, which the rows for
-    `InitEmpty`/`FS.initEmpty`, `PutSnapshot`/`FS.seal` and
-    `FS.commitSealed`, `SwapOK`/`FS.commitSealed` and
-    `Diverge`/`FS.resolveRoot` say and the rest leave implicit. No row's
-    claim about `FS.mu` is false on either path, which is what the rows
-    exist to state, so they stand as written. That check was by reading, as
+    `Below` is by ADR 0019. On the rows' locks columns: the first reading
+    of this assumption took the store-level rows' "called holding commitMu
+    and no FS.mu" as true from `Sync` and merely implicit about
+    `initEmpty`'s path. Review found it false there, not implicit: "called
+    holding" states a fact of every call, and on `initEmpty`'s path nothing
+    is held. So on 2026-10-30 the twenty-four such rows that `initEmpty`
+    reaches, for `S3.Put`, `S3.PutIfMatch`, `Local.PutIfMatch`,
+    `S3.GetWithETag`, `Local.GetWithETag` and `errorFor` under
+    `PutSnapshot`, the swap outcomes, the probe verdicts, `SwapUnsupported`
+    and `FallbackPut`, gained "or nothing, from initEmpty", as the rows for
+    `FS.seal` and `FS.commitSealed` under `PutSnapshot`, `FS.commitSealed`
+    under `SwapOK` and `FS.resolveRoot` under `Diverge` already said in
+    their words. The three rows for `ReadOnly.Put` and `ReadOnly.PutIfMatch`
+    stand unqualified: a read-only mount never reaches `initEmpty`
+    (ADR 0011 §2), and reaches them only from `Sync`, through ADR 0011 §7's
+    seam. Review also found `settleAll`'s row naming the gate alone where
+    `Sync` holds `commitMu` too; it reads "commitMu and commitGate (write),
+    held by Sync" now. The remaining `FS.commitSealed`, `FS.resolveRoot`
+    and `FS.Sync` rows say "commitMu, held by Sync", which names the holder
+    and so says nothing of a path on which `Sync` is not the caller; they
+    are read with the `InitEmpty` row and stand. Only locks columns
+    changed, no symbol, file or action, so the tripwire
+    (`internal/blobfs/tla_trace_test.go`) and the model are untouched. That
+    check was by reading, as
     the rest of this ADR's were; the session's runs at `d0fdcdf`, which it
     reported as `gofmt`, `go vet` and `go test -race ./...` clean, with U1
     to U9 passing 30 repeats under `-race` and U1 to U8 hanging to the
@@ -1239,7 +1410,11 @@ Each is mine unless it says otherwise.
     mention of `commitLocked` is left, since it describes what a snapshot
     holds, which is as true of `seal`. `docs/DESIGN.md` §5 gains the
     statement the issue's done-when asks for, and §16's table this ADR's
-    row.
+    row. On the review revision no ADR gains a line: E13's record is the
+    register's row and §8 (ADR 0018 §4), and the corrections to
+    `trace.tsv` and the vocabulary are those files' own. ADR 0021's
+    *Alternatives considered*, which said a counter beside the flag brings
+    it under the state rule, stays right: it does, and §8 exempts it.
 25. **The second hold at the failure site is harmless** (§5). Only changes
     and `PruneEnd` can run between `resolveRoot`'s hold and `applyLocked`'s,
     and a reader there sees a state the top-of-commit adoption already
@@ -1277,21 +1452,27 @@ Each is mine unless it says otherwise.
     changes made during the flight, which the next commit's record shows;
     a field on the pinned struct for that is not worth a re-dispatch.
     Coder's choice, confirmed.
-31. **A closure for the gate; explicit holds in `commitSealed`** (§2).
+31. **A closure for the gate; deferred holds in `commitSealed`** (§2).
     Step 5 asks that the gate be released before any store call whether
     the seal succeeded or not, and a deferred unlock inside a closure does
-    that on a panic too. `commitSealed`'s holds are explicit because it
-    holds `FS.mu` more than once on one path, where one `defer` cannot
-    serve; `seal` and `resolveRoot` hold it once each and defer. This ADR
-    pins nothing about panics. A panic inside one of `commitSealed`'s holds
-    would leave `FS.mu` held, where at `d75d14a` `Sync`'s deferred unlock
-    released it, and `internal/sunrpc` recovers a handler's panic and keeps
-    serving; but the holds call only `Fire`, the logger and `applyLocked`'s
-    field writes and `go` statement, none of which panics short of a bug in
-    the runtime or in a log handler, and a mount whose apply panicked
-    half-way is not one to keep serving either. Confirmed as it is; a
-    closure per hold would be a cheap tightening if a later change puts
-    more into them.
+    that on a panic too. At `d0fdcdf` `commitSealed`'s holds were explicit,
+    because it holds `FS.mu` more than once on one path, where one `defer`
+    at function scope cannot serve, and the first reading of this
+    assumption confirmed them: the holds call only `Fire`, the logger and
+    `applyLocked`'s field writes and `go` statement, none of which panics
+    short of a bug in the runtime or in a log handler. Review weighed the
+    other side, and it is heavier. The logger is the embedder's handler,
+    which this package does not control; a panic in a hold reached from a
+    `COMMIT` or a stable `WRITE` is recovered by `internal/sunrpc`, which
+    keeps serving, so the mount would not crash but wedge, with every
+    reader and every change waiting for a lock nothing will release, which
+    is the failure `bufferWrite`'s doc comment names as the reason for the
+    package's convention; at `d75d14a` `Sync`'s deferred unlock released
+    the lock on the same panic; and the cost of the deferred form is a
+    closure around one hold. So §2 now pins a deferred `Unlock` for every
+    hold, with the shape it gives, and coder's follow-up makes it. Nothing
+    else about panics is pinned: what a half-applied commit leaves is as it
+    was, since the field writes in a hold are the same in either form.
 32. **The two comments** (§2). `FS.mode`'s field comment and `truncate`'s
     doc comment are within what this ADR constrains, `FS`'s fields and the
     waits §4 and §9 describe; a comment that said `FS.mu` is held across a
@@ -1309,6 +1490,59 @@ Each is mine unless it says otherwise.
     repository is. §11's *Red runs* says both, so that a reader does not
     take the `FS.dirty` sentences for `d75d14a`'s behaviour, as
     test-author's doc comments already distinguish them.
+35. **`FS.dirty` is exempted, not converted** (§8). ADR 0018 §3 brings the
+    flag under the state rule because this ADR changes its writers and its
+    clear, and ADR 0018 §1's fourth rule lets an ADR exempt code with a good
+    reason, which this ADR's PR must carry, since "unless an ADR exempts it
+    first" asks for the exemption in the change that reaches the state. A
+    revision of this ADR grants it rather than a new ADR: the PR is this
+    ADR's, the branch is unmerged, and the exemption's reasons are this
+    ADR's own guard and tests. A conversion was weighed. The machine would
+    have two states and three events, a change, a success with nothing
+    changed since the seal and a success with something changed, and every
+    pair would be an edge, so `Fire` could refuse nothing; it would run in
+    every hold that changes the namespace, `bufferWrite`'s tail block on
+    every `Write` included, for a map lookup and a method call per change;
+    it would need a V-section in the vocabulary, a `machine` name in logs,
+    and M-style tests of a table that states nothing; and the choice of
+    event at the apply would be the same comparison the guard is, made
+    outside the machine, so the machine would hold the comparison's result,
+    not decide it. What the rule exists to catch, an illegal move or a
+    write that bypasses the table, is caught here by Assumption 10's grep
+    and by the two Unlocked properties. `FS.pruning`, the other flag of
+    ADR 0018 §3's list that `commit.go` holds, is not reached: its writers
+    and its transitions are as they were (§6).
+36. **The first pass stays ahead of the diverged refusal** (§2, §11). Review
+    found §11's "makes no store call at all" overstated: `flushAll` runs at
+    step 1, and a `Write` that passed `mutable()` just before the commit
+    that diverged the mount leaves a buffered chunk that the next `Sync`'s
+    first pass uploads, as it did at `d75d14a`. Moving the refusal ahead of
+    the first pass was weighed and declined. The mode moves only in
+    `resolveRoot`, under `commitMu`, so a check made before `commitMu` is
+    taken is advisory: a commit in flight can diverge the mount after it,
+    and the refusal that counts is step 3's, under the lock; a check before
+    the first pass would be a second check, saving only the upload of chunks
+    buffered in that window. Those chunks are content-addressed, named by no
+    snapshot of any mount, and the same bytes under the same key as any
+    other writer's copy, so they harm nothing and nothing reads them. And
+    ADR 0012 §2 has the first pass first, holding nothing, so that size
+    changes do not wait for it. So the wording is narrowed to the commit's
+    own calls, which is what M7 and U9 pin, and the shape is left; whether a
+    diverged mount's first pass should run at all is listed under *What this
+    does not decide*.
+37. **U11 and U12** (§11). Review found that no test held the reclaim's
+    `Get` or `Delete` or the fallback's `Put` or `Head`, so that moving
+    either back under `FS.mu` or the gate would pass the suite. Each test
+    holds two calls in sequence, so that all four are held once, with the
+    same three kinds of call made while held as U8 makes, a namespace read,
+    a namespace change and a size change, which between them wait for
+    `FS.mu` and the gate. The 501 is `sf91Store`'s one-shot arm, carried
+    into `uc43Store` so that the file stays one harness. Each ends with a
+    second, unarmed `Sync` that commits what the held one did not, so that
+    the mount is shown usable afterwards, as ADR 0021 §2 says of a refused
+    commit and of the fallback. Their names follow U1 to U10's form. No red
+    run is asked for: they are written after the code, and what they would
+    show at `d75d14a` is U1's hang.
 
 ## Alternatives considered
 
@@ -1338,6 +1572,16 @@ Each is mine unless it says otherwise.
 - **Model the seal as a step of its own.** Honest without a reduction, at the
   cost of a `pc` string and more states for every configuration with the
   member; R15 gives the commutation instead (Assumption 15).
+- **Convert `FS.dirty` to an `fsm.Machine`.** Every pair would be an edge,
+  on a hot path, holding the guard's result rather than deciding it.
+  Exempted instead (§8; Assumption 35).
+- **Keep `commitSealed`'s explicit holds.** Nothing in them panics short of
+  a bug, but the bug would wedge the mount rather than crash it, against
+  the package's convention. Reversed on review (Assumption 31).
+- **Refuse a diverged mount before its first pass.** The check that counts
+  is under `commitMu`, so this would be a second check, saving only the
+  upload of chunks that name nothing. The wording is narrowed instead
+  (Assumption 36).
 
 ## Consequences
 
@@ -1350,6 +1594,10 @@ Each is mine unless it says otherwise.
   commit.
 - `FS` has one more lock and one more counter; `commitLocked` is three
   functions; the lock order has one more level at its top.
+- `FS.dirty` is exempt from the state rule, E13, on the strength of
+  `markDirty` being its one setter, `applyLocked` its one clearer and
+  `DirtyUntilCommitted` its invariant; a change that adds a writer or a
+  reader outside those revisits the exemption (§8).
 - The probe's read, the reclaim and the fallback's calls run off the lock,
   closing what ADRs 0021 and 0022 left to #43.
 - Four MustHold configurations widen the module's envelope to changes made
@@ -1364,6 +1612,8 @@ Each is mine unless it says otherwise.
 ## What this does not decide
 
 - Batching stable writes so that several share one commit (#44).
+- Whether a diverged mount's first pass should run at all, uploading chunks
+  that no snapshot of its own will name (Assumption 36).
 - Releasing `FS.mu` during the encode itself, which still holds the
   uncompressed snapshot under the lock (ADR 0007 *Context*).
 - Whether a `Sync` queued behind a commit in flight should run its first
