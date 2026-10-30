@@ -14,8 +14,9 @@ package blobfs
 // *fsm.Atomic[mountMode, mountEvent] over the table mountModes, named "mode",
 // whose one edge is Writable to Diverged on Diverge. New makes it ReadOnly
 // when Config.ReadOnly is set and Writable otherwise, before loadOrInit.
-// Since ADR 0022 its one Fire is made by resolveRoot, which only commitLocked
-// calls, when one read of the root pointer after a failed write of it shows
+// Since ADR 0022 its one Fire is made by resolveRoot, which Sync at the top of
+// a commit and commitSealed at the failure site call (ADR 0023 sections 2 and
+// 5), when one read of the root pointer after a failed write of it shows
 // another writer's root pointer (ProbeTheirs; ADR 0022 sections 2 and 3); a
 // swap's error alone, store.ErrPrecondition included, no longer fires it.
 // ADR 0021 section 2's refusal of a swap answered store.ErrUnsupported fires
@@ -442,7 +443,8 @@ func TestMountModesTableHasOnlyTheDivergeEdge(t *testing.T) {
 // vfs.ErrStale, since mutable() maps mountDiverged so. Then a second Sync
 // fails too, and from the swap that failed onwards no Put, PutIfMatch or
 // Delete of any key reaches the store: a diverged mount's commit is refused at
-// commitLocked's top before it stores anything (section 7; M7). The read is a
+// Sync's top, before the probe and before any of the commit's store calls
+// (section 7; M7; ADR 0023 section 2). The read is a
 // GetWithETag, which the fake does not record.
 func TestASwapLostToAnotherWriterDivergesTheMountAndItStoresNothingMore(t *testing.T) {
 	ctx := t.Context()

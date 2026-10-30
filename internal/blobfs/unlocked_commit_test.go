@@ -29,7 +29,11 @@ package blobfs
 //   - U7, TestStableWriteDuringACommitIsDurableWhenItReturns;
 //   - U8, TestTheTopOfCommitProbeHoldsNoLock;
 //   - U9, TestADivergedMountsSyncMakesNoStoreCall;
-//   - U10, TestEveryChangeAdvancesTheChangeCount.
+//   - U10, TestEveryChangeAdvancesTheChangeCount;
+//   - U11, TestTheReclaimOfARefusedCommitHoldsNoLock (ADR 0021 section 2's
+//     reclaim; Assumption 37);
+//   - U12, TestTheUnconditionalFallbackHoldsNoLock (ADR 0021 section 2's
+//     opted-in fallback; Assumption 37).
 //
 // Written in two parts. The first used only names that exist at d75d14a, so
 // that the package built there and the session could take a red run. The
@@ -57,6 +61,19 @@ package blobfs
 //     section 8), so that a mount is left in doubt;
 //   - holds the next GetWithETag of rootKey in the same way as the Put, then
 //     passes it through;
+//   - answers the next PutIfMatch of rootKey with store.ErrUnsupported without
+//     calling the inner store, as sf91Store's one-shot arm of that kind does
+//     (ADR 0021 section 6): one 501 from a store that honours every other
+//     conditional write, recorded as answered by the harness;
+//   - holds the next Get of rootKey in the same way, then passes it through:
+//     the reclaim's read (ADR 0021 section 2);
+//   - holds the next Delete under snapshotPrefix in the same way, then passes
+//     it through: the reclaim's Delete;
+//   - holds the next Put of rootKey in the same way, then passes it through:
+//     the opted-in fallback's write, an arm of its own beside the held Put
+//     under snapshotPrefix, the two told apart by key;
+//   - holds the next Head of rootKey in the same way, then passes it through:
+//     the fallback's Head;
 //   - records, in call order (each call is recorded when it is made, and its
 //     outcome filled in when it returns), every call of every method but Name:
 //     so every Put under snapshotPrefix with its key, every PutIfMatch of
@@ -87,8 +104,9 @@ package blobfs
 //     to stand for another writer (U9's foreign root pointer);
 //   - an FS field is read only holding FS.mu for reading, inside uc43Go, and
 //     only the fields section 11 names: FS.dirty, FS.epoch, FS.rootSnapshot,
-//     FS.changes and f.rootKnowledge.State(); f.mode.State() is read without
-//     a lock (ADR 0014 section 11; ADR 0023 section 11); no field is written.
+//     FS.rootETag, FS.changes and f.rootKnowledge.State(); f.mode.State() is
+//     read without a lock (ADR 0014 section 11; ADR 0023 section 11); no
+//     field is written.
 
 import (
 	"bytes"
@@ -128,11 +146,12 @@ const uc43Writer = "other-host/4242"
 
 // How the harness answered a call, as uc43Call.how records it.
 const (
-	uc43InProgress = "made, not yet returned"
-	uc43Passed     = "passed through"
-	uc43HeldPassed = "held, then passed through"
-	uc43HeldLost   = "held, then applied by the inner store, its reply lost"
-	uc43Failed     = "failed by the harness without calling the inner store"
+	uc43InProgress  = "made, not yet returned"
+	uc43Passed      = "passed through"
+	uc43HeldPassed  = "held, then passed through"
+	uc43HeldLost    = "held, then applied by the inner store, its reply lost"
+	uc43Failed      = "failed by the harness without calling the inner store"
+	uc43Answered501 = "answered store.ErrUnsupported by the harness without calling the inner store"
 )
 
 // uc43Hold is one held call. entered is closed when the call is made and
@@ -217,6 +236,20 @@ type uc43Store struct {
 	// through. A failRead is taken before it.
 	readHold *uc43Hold
 
+	// answer501 answers the next PutIfMatch of rootKey with
+	// store.ErrUnsupported without calling the inner store. It is taken
+	// before either swap hold.
+	answer501 bool
+
+	// rootGetHold holds the next Get of rootKey, snapDeleteHold the next
+	// Delete under snapshotPrefix, rootPutHold the next Put of rootKey and
+	// rootHeadHold the next Head of rootKey; each then passes the call
+	// through.
+	rootGetHold    *uc43Hold
+	snapDeleteHold *uc43Hold
+	rootPutHold    *uc43Hold
+	rootHeadHold   *uc43Hold
+
 	holds []*uc43Hold
 	calls []uc43Call
 }
@@ -275,6 +308,51 @@ func (s *uc43Store) armHoldRead() *uc43Hold {
 	return s.readHold
 }
 
+// armAnswer501 answers the next PutIfMatch of rootKey with
+// store.ErrUnsupported without calling the inner store, as sf91Store's
+// one-shot arm does (ADR 0021 section 6).
+func (s *uc43Store) armAnswer501() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.answer501 = true
+}
+
+// armHoldRootGet holds the next Get of rootKey, then passes it through: the
+// reclaim's read (ADR 0021 section 2).
+func (s *uc43Store) armHoldRootGet() *uc43Hold {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rootGetHold = s.newHold("the reclaim's Get of " + rootKey)
+	return s.rootGetHold
+}
+
+// armHoldSnapshotDelete holds the next Delete under snapshotPrefix, then
+// passes it through: the reclaim's Delete (ADR 0021 section 2).
+func (s *uc43Store) armHoldSnapshotDelete() *uc43Hold {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapDeleteHold = s.newHold("the reclaim's Delete under " + snapshotPrefix)
+	return s.snapDeleteHold
+}
+
+// armHoldRootPut holds the next Put of rootKey, then passes it through: the
+// opted-in fallback's write (ADR 0021 section 2).
+func (s *uc43Store) armHoldRootPut() *uc43Hold {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rootPutHold = s.newHold("the fallback's Put of " + rootKey)
+	return s.rootPutHold
+}
+
+// armHoldRootHead holds the next Head of rootKey, then passes it through: the
+// opted-in fallback's Head (ADR 0021 section 2).
+func (s *uc43Store) armHoldRootHead() *uc43Hold {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rootHeadHold = s.newHold("the fallback's Head of " + rootKey)
+	return s.rootHeadHold
+}
+
 // releaseAll releases every hold the harness has made.
 func (s *uc43Store) releaseAll() {
 	s.mu.Lock()
@@ -314,10 +392,37 @@ func (s *uc43Store) end(i int, how string, err error) {
 	s.calls[i].how, s.calls[i].err = how, err
 }
 
+// take returns the hold in *slot and empties the slot when match holds, and
+// returns nil otherwise: a hold is one-shot.
+func (s *uc43Store) take(match bool, slot **uc43Hold) *uc43Hold {
+	if !match {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := *slot
+	*slot = nil
+	return h
+}
+
+// await holds the call when hold is set, and returns how the call is
+// answered if it then passes through.
+func (s *uc43Store) await(hold *uc43Hold) string {
+	if hold == nil {
+		return uc43Passed
+	}
+	hold.hold(s.testCtx)
+	return uc43HeldPassed
+}
+
+// Get passes through, except that when armed the next Get of rootKey is held
+// first.
 func (s *uc43Store) Get(ctx context.Context, key string) ([]byte, error) {
+	hold := s.take(key == rootKey, &s.rootGetHold)
 	i := s.begin(uc43Call{op: "Get", key: key})
+	how := s.await(hold)
 	data, err := s.inner.Get(ctx, key)
-	s.end(i, uc43Passed, err)
+	s.end(i, how, err)
 	return data, err
 }
 
@@ -328,37 +433,43 @@ func (s *uc43Store) GetRange(ctx context.Context, key string, off int64, n int64
 	return data, err
 }
 
+// Head passes through, except that when armed the next Head of rootKey is
+// held first.
 func (s *uc43Store) Head(ctx context.Context, key string) (store.ObjectInfo, error) {
+	hold := s.take(key == rootKey, &s.rootHeadHold)
 	i := s.begin(uc43Call{op: "Head", key: key})
+	how := s.await(hold)
 	info, err := s.inner.Head(ctx, key)
-	s.end(i, uc43Passed, err)
+	s.end(i, how, err)
 	return info, err
 }
 
 // Put passes through, except that when armed the next Put under
-// snapshotPrefix is held first.
+// snapshotPrefix, and the next Put of rootKey, are each held first; the two
+// arms are told apart by key.
 func (s *uc43Store) Put(ctx context.Context, key string, data []byte) error {
 	var hold *uc43Hold
-	if strings.HasPrefix(key, snapshotPrefix) {
-		s.mu.Lock()
-		hold, s.snapPutHold = s.snapPutHold, nil
-		s.mu.Unlock()
+	switch {
+	case strings.HasPrefix(key, snapshotPrefix):
+		hold = s.take(true, &s.snapPutHold)
+	case key == rootKey:
+		hold = s.take(true, &s.rootPutHold)
 	}
 	i := s.begin(uc43Call{op: "Put", key: key})
-	how := uc43Passed
-	if hold != nil {
-		hold.hold(s.testCtx)
-		how = uc43HeldPassed
-	}
+	how := s.await(hold)
 	err := s.inner.Put(ctx, key, data)
 	s.end(i, how, err)
 	return err
 }
 
+// Delete passes through, except that when armed the next Delete under
+// snapshotPrefix is held first.
 func (s *uc43Store) Delete(ctx context.Context, key string) error {
+	hold := s.take(strings.HasPrefix(key, snapshotPrefix), &s.snapDeleteHold)
 	i := s.begin(uc43Call{op: "Delete", key: key})
+	how := s.await(hold)
 	err := s.inner.Delete(ctx, key)
-	s.end(i, uc43Passed, err)
+	s.end(i, how, err)
 	return err
 }
 
@@ -370,16 +481,19 @@ func (s *uc43Store) List(ctx context.Context, prefix, after string, max int) ([]
 }
 
 // PutIfMatch passes through, keeping the bytes of a call for rootKey, except
-// that the next call for rootKey takes at most one of the swap holds, and arms
+// that the next call for rootKey is answered store.ErrUnsupported when that
+// is armed, or else takes at most one of the swap holds; either way it arms
 // the failed read if it was armed to follow the next swap.
 func (s *uc43Store) PutIfMatch(ctx context.Context, key string, data []byte, etag string) (string, error) {
 	c := uc43Call{op: "PutIfMatch", key: key, etag: etag}
 	var hold *uc43Hold
-	lose := false
+	lose, unsupported := false, false
 	if key == rootKey {
 		c.data = append([]byte(nil), data...)
 		s.mu.Lock()
 		switch {
+		case s.answer501:
+			unsupported, s.answer501 = true, false
 		case s.swapLostHold != nil:
 			hold, s.swapLostHold, lose = s.swapLostHold, nil, true
 		case s.swapHold != nil:
@@ -391,6 +505,10 @@ func (s *uc43Store) PutIfMatch(ctx context.Context, key string, data []byte, eta
 		s.mu.Unlock()
 	}
 	i := s.begin(c)
+	if unsupported {
+		s.end(i, uc43Answered501, store.ErrUnsupported)
+		return "", store.ErrUnsupported
+	}
 	how := uc43Passed
 	if hold != nil {
 		hold.hold(s.testCtx)
@@ -445,6 +563,10 @@ func uc43IsSnapPut(c uc43Call) bool {
 }
 func uc43IsRootSwap(c uc43Call) bool { return c.op == "PutIfMatch" && c.key == rootKey }
 func uc43IsRootRead(c uc43Call) bool { return c.op == "GetWithETag" && c.key == rootKey }
+func uc43IsRootGet(c uc43Call) bool  { return c.op == "Get" && c.key == rootKey }
+func uc43IsRootPut(c uc43Call) bool  { return c.op == "Put" && c.key == rootKey }
+func uc43IsRootHead(c uc43Call) bool { return c.op == "Head" && c.key == rootKey }
+func uc43IsDelete(c uc43Call) bool   { return c.op == "Delete" }
 
 // uc43Filter returns the calls keep selects, in order.
 func uc43Filter(calls []uc43Call, keep func(uc43Call) bool) []uc43Call {
@@ -720,9 +842,16 @@ type uc43R[T any] struct {
 // newFS runs New on the harness over its empty bucket, which must succeed.
 func (e *uc43Env) newFS(where string) *FS {
 	e.t.Helper()
-	ctx, h := e.ctx, e.h
+	return e.newFSWith(uc43Config(e.h), where)
+}
+
+// newFSWith is newFS with the Config given whole, for U12's
+// AllowUnconditionalRoot (ADR 0021 section 2).
+func (e *uc43Env) newFSWith(cfg Config, where string) *FS {
+	e.t.Helper()
+	ctx := e.ctx
 	r := uc43Go(e, func() uc43R[*FS] {
-		fs, err := New(ctx, uc43Config(h))
+		fs, err := New(ctx, cfg)
 		return uc43R[*FS]{fs, err}
 	}).wait(e.t, "New over an empty bucket on the harness", where)
 	if r.err != nil {
@@ -841,11 +970,12 @@ type uc43Fields struct {
 	dirty        bool
 	epoch        uint64
 	rootSnapshot string
+	rootETag     string
 	changes      uint64
 	knowledge    rootState
 }
 
-// read reads FS.dirty, FS.epoch, FS.rootSnapshot, FS.changes and
+// read reads FS.dirty, FS.epoch, FS.rootSnapshot, FS.rootETag, FS.changes and
 // f.rootKnowledge.State() in one hold of FS.mu for reading (ADR 0022 section
 // 8; ADR 0023 section 11, the facts).
 func (e *uc43Env) read(fs *FS, what, where string) uc43Fields {
@@ -857,6 +987,7 @@ func (e *uc43Env) read(fs *FS, what, where string) uc43Fields {
 			dirty:        fs.dirty,
 			epoch:        fs.epoch,
 			rootSnapshot: fs.rootSnapshot,
+			rootETag:     fs.rootETag,
 			changes:      fs.changes,
 			knowledge:    fs.rootKnowledge.State(),
 		}
@@ -1908,4 +2039,361 @@ func TestEveryChangeAdvancesTheChangeCount(t *testing.T) {
 	advances(`Rmdir of "dir"`, func() error {
 		return fs.Rmdir(ctx, uc43Caller, root, "dir")
 	})
+}
+
+// twoHolds is U11's and U12's flight (ADR 0023 section 11): it starts fs.Sync,
+// waits for first to be entered, and while first is held makes GetAttr of the
+// root, Lookup of c2, Create of c3 and SetAttr of c2's size to 10; then it
+// releases first, waits for second to be entered, and while second is held
+// makes GetAttr of the root, Create of c4 and SetAttr of c2's size to 0; then
+// it releases second. Each call must return while its hold is held, in the
+// sense uc43Held checks, and succeed. It returns the Sync's call, for the
+// caller to wait for.
+func (e *uc43Env) twoHolds(fs *FS, root, c2H vfs.Handle, first, second *uc43Hold, where string) *uc43Done[error] {
+	e.t.Helper()
+	ctx := e.ctx
+	syncA := e.startSync(fs)
+	e.waitEntered(first, syncA, "the Sync of the commit of c2", where)
+	a := syncA.watch("the Sync of the commit of c2")
+	heldOK := func(hold *uc43Hold, what string, fn func() error) {
+		e.t.Helper()
+		if err := uc43Held(e, hold, what, where, fn, a); err != nil {
+			e.t.Errorf("%s, while %s is held, = %v, want success (ADR 0023 sections 1 and 6; section 11; %s)", what,
+				hold.what, err, where)
+		}
+	}
+	getAttr := func() error {
+		_, err := fs.GetAttr(ctx, root)
+		return err
+	}
+	create := func(name string) func() error {
+		return func() error {
+			_, _, err := fs.Create(ctx, uc43Caller, root, name, vfs.SetAttr{}, true)
+			return err
+		}
+	}
+	setSize := func(n uint64) func() error {
+		return func() error {
+			_, err := fs.SetAttr(ctx, uc43Caller, c2H, vfs.SetAttr{Size: &n})
+			return err
+		}
+	}
+
+	heldOK(first, "GetAttr of the root directory", getAttr)
+	heldOK(first, `Lookup of "c2"`, func() error {
+		_, _, err := fs.Lookup(ctx, uc43Caller, root, "c2")
+		return err
+	})
+	heldOK(first, `Create "c3" in the root directory`, create("c3"))
+	heldOK(first, `SetAttr of "c2"'s size to 10`, setSize(10))
+	first.Release()
+
+	e.waitEntered(second, syncA, "the Sync of the commit of c2", where)
+	heldOK(second, "GetAttr of the root directory", getAttr)
+	heldOK(second, `Create "c4" in the root directory`, create("c4"))
+	heldOK(second, `SetAttr of "c2"'s size to 0`, setSize(0))
+	second.Release()
+	return syncA
+}
+
+// innerGet reads key from the harness's inner *store.Local, under uc43Bound.
+// The caller reads the harness's records first.
+func (e *uc43Env) innerGet(key, where string) ([]byte, error) {
+	e.t.Helper()
+	ctx, local := e.ctx, e.h.inner
+	r := uc43Go(e, func() uc43R[[]byte] {
+		data, err := local.Get(ctx, key)
+		return uc43R[[]byte]{data, err}
+	}).wait(e.t, fmt.Sprintf("Get(%q) on the inner store", key), where)
+	return r.v, r.err
+}
+
+// innerList lists prefix on the harness's inner *store.Local, under
+// uc43Bound. The caller reads the harness's records first.
+func (e *uc43Env) innerList(prefix, where string) ([]store.ObjectInfo, error) {
+	e.t.Helper()
+	ctx, local := e.ctx, e.h.inner
+	r := uc43Go(e, func() uc43R[[]store.ObjectInfo] {
+		out, err := local.List(ctx, prefix, "", 0)
+		return uc43R[[]store.ObjectInfo]{out, err}
+	}).wait(e.t, fmt.Sprintf("List(%q) on the inner store", prefix), where)
+	return r.v, r.err
+}
+
+// checkSize requires name, in fs's root directory, to have the size want.
+func (e *uc43Env) checkSize(fs *FS, name string, want uint64, where string) {
+	e.t.Helper()
+	l := e.lookup(fs, e.root(fs, where), name, where)
+	if l.err != nil {
+		e.t.Errorf("Lookup of %q in the remount's root directory = %v, want success (%s)", name, l.err, where)
+		return
+	}
+	if l.attr.Size != want {
+		e.t.Errorf("in the remount %q has size %d, want %d: the size change made while held is in the next commit "+
+			"(ADR 0023 section 3; %s)", name, l.attr.Size, want, where)
+	}
+}
+
+// TestTheReclaimOfARefusedCommitHoldsNoLock is U11 of ADR 0023 section 11: the
+// reclaim of a commit whose swap the store answered store.ErrUnsupported, on a
+// mount without the opt-in, makes its read of the root pointer and its Delete
+// of the attempt's snapshot holding neither FS.mu nor the commit gate, so a
+// namespace read, a namespace change and a size change made while either is
+// held return (sections 1 and 6; ADR 0021 section 2; Assumption 37).
+//
+// One commit behind it, New's, with AllowUnconditionalRoot false. The 501 on
+// the next PutIfMatch of rootKey, the held Get of rootKey and the held Delete
+// under snapshotPrefix armed; c2 created; Sync started, and the Get's hold
+// entered. While it is held, GetAttr of the root, Lookup of c2, Create of c3
+// and SetAttr of c2's size to 10 each return; the Get released, and the
+// Delete's hold entered; while it is held, GetAttr of the root, Create of c4
+// and SetAttr of c2's size to 0 each return; released. Sync returns an error
+// for which errors.Is(err, store.ErrUnsupported) holds and whose text contains
+// "unconditional". The harness recorded, in order, one Put under
+// snapshotPrefix at epoch 2, one PutIfMatch of rootKey answered by the
+// harness, one Get of rootKey and one Delete of that Put's key; and after the
+// PutIfMatch no GetWithETag, Put or Head of rootKey. FS.dirty is true, FS.epoch
+// 1, FS.rootSnapshot as before the Sync, f.rootKnowledge.State() rootKnown and
+// f.mode.State() mountWritable. The inner store holds no snapshot at epoch 2,
+// and a remount has an empty root directory. Sync again, with no arm: nil,
+// with one more Put under snapshotPrefix at epoch 2 whose key is not the
+// reclaimed one, and one PutIfMatch of rootKey passed through; a remount has
+// c2, c3 and c4, with c2 at size 0.
+//
+// No red run is asked for (section 11, Red runs; Assumption 37): it was
+// written after d0fdcdf. At d75d14a it would hang to the 10 s bound at GetAttr
+// of the root while the reclaim's Get is held, as U1 hangs, since the gate and
+// FS.mu were held across the reclaim; so would a build that moved the reclaim
+// back under either.
+func TestTheReclaimOfARefusedCommitHoldsNoLock(t *testing.T) {
+	const where = "ADR 0023 section 11, U11"
+	e := uc43Setup(t)
+	fs := e.newFS(where)
+	root := e.root(fs, where)
+	before := e.read(fs, "reading the FS's fields before the Sync", where)
+
+	e.h.armAnswer501()
+	getHold := e.h.armHoldRootGet()
+	delHold := e.h.armHoldSnapshotDelete()
+	c2H := e.create(fs, root, "c2", where)
+	mark := len(e.h.records())
+	syncA := e.twoHolds(fs, root, c2H, getHold, delHold, where)
+	err := syncA.wait(t, "the Sync of the commit of c2", where)
+	if !errors.Is(err, store.ErrUnsupported) || !strings.Contains(err.Error(), "unconditional") {
+		t.Errorf("the Sync of the commit of c2, whose swap was answered store.ErrUnsupported on a mount without the "+
+			"opt-in, = %v, want an error for which errors.Is(err, store.ErrUnsupported) holds and whose text "+
+			"contains %q (ADR 0021 section 2; ADR 0023 section 11; %s)", err, "unconditional", where)
+	}
+
+	first := e.h.records()
+	calls := first[mark:]
+	seq := uc43Filter(calls, func(c uc43Call) bool {
+		return uc43IsSnapPut(c) || uc43IsRootSwap(c) || uc43IsRootGet(c) || uc43IsDelete(c)
+	})
+	reclaimed := ""
+	if len(seq) > 0 && uc43IsSnapPut(seq[0]) {
+		reclaimed = seq[0].key
+	}
+	ok := len(seq) == 4 && uc43IsSnapPut(seq[0]) && uc43HasEpoch(seq[0].key, 2) && uc43IsRootSwap(seq[1]) &&
+		seq[1].how == uc43Answered501 && uc43IsRootGet(seq[2]) && uc43IsDelete(seq[3]) && seq[3].key == reclaimed
+	if !ok {
+		t.Errorf("in the Sync of the commit of c2 the harness recorded the Puts under %q, the PutIfMatch calls and "+
+			"Gets of %q and the Deletes %v, want exactly, in order: one Put under %q at epoch 2, one PutIfMatch of "+
+			"%q answered by the harness, one Get of %q and one Delete of that Put's key (ADR 0021 section 2, the "+
+			"reclaim; ADR 0023 section 11; %s)", snapshotPrefix, rootKey, seq, snapshotPrefix, rootKey, rootKey,
+			where)
+	}
+	if swapAt := uc43First(calls, uc43IsRootSwap); swapAt >= 0 {
+		after := calls[swapAt+1:]
+		if bad := uc43Filter(after, func(c uc43Call) bool {
+			return uc43IsRootRead(c) || uc43IsRootPut(c) || uc43IsRootHead(c)
+		}); len(bad) != 0 {
+			t.Errorf("after the PutIfMatch answered store.ErrUnsupported the harness recorded %v, want no "+
+				"GetWithETag, Put or Head of %q: without the opt-in the mount writes the root pointer no further, "+
+				"and a reclaim that deletes raises no doubt (ADR 0021 section 2; ADR 0023 section 11; %s)", bad,
+				rootKey, where)
+		}
+	}
+
+	f := e.read(fs, "reading the FS's fields after the refused commit", where)
+	if !f.dirty {
+		t.Errorf("after the refused commit, FS.dirty is false, want true: a commit that fails leaves the flag as "+
+			"it was (ADR 0023 section 3; %s)", where)
+	}
+	if f.epoch != 1 {
+		t.Errorf("after the refused commit, FS.epoch = %d, want 1 (ADR 0021 section 2; %s)", f.epoch, where)
+	}
+	if f.rootSnapshot != before.rootSnapshot {
+		t.Errorf("after the refused commit, FS.rootSnapshot = %q, want %q, as before the Sync (ADR 0021 section 2; "+
+			"%s)", f.rootSnapshot, before.rootSnapshot, where)
+	}
+	if f.knowledge != rootKnown {
+		t.Errorf("after the refused commit, f.rootKnowledge.State() = %v, want %v (ADR 0022 section 4; ADR 0023 "+
+			"section 11; %s)", f.knowledge, rootKnown, where)
+	}
+	if got := e.mode(fs, where); got != mountWritable {
+		t.Errorf("after the refused commit, f.mode.State() = %v, want %v: a refused commit fires nothing (ADR 0021 "+
+			"section 2; %s)", got, mountWritable, where)
+	}
+
+	objs, lerr := e.innerList(snapshotPrefix, where)
+	if lerr != nil {
+		t.Errorf("List(%q) on the inner store = %v, want success (%s)", snapshotPrefix, lerr, where)
+	}
+	for _, o := range objs {
+		if uc43HasEpoch(o.Key, 2) {
+			t.Errorf("the inner store holds %q, a snapshot at epoch 2, want none: the reclaim deleted the refused "+
+				"commit's snapshot (ADR 0021 section 2; ADR 0023 section 11; %s)", o.Key, where)
+		}
+	}
+	firstWhere := where + ", the remount after the refused commit"
+	if rm := e.remount(firstWhere); rm != nil {
+		names, err := e.dirNames(rm, e.root(rm, firstWhere), "ReadDir of the remount's root directory", firstWhere)
+		if err != nil || len(names) != 0 {
+			t.Errorf("the remount's root directory lists %q (err %v), want no entry: the refused commit reached no "+
+				"root pointer (ADR 0021 section 2; %s)", names, err, firstWhere)
+		}
+	}
+
+	if err := e.sync(fs, "the second Sync, with no arm", where); err != nil {
+		t.Errorf("the second Sync, with no arm, = %v, want nil: a refused commit leaves the mount writable, and its "+
+			"next commit tries the swap again (ADR 0021 section 2; %s)", err, where)
+	}
+	calls = e.h.records()[len(first):]
+	snaps, swaps := uc43Filter(calls, uc43IsSnapPut), uc43Filter(calls, uc43IsRootSwap)
+	if len(snaps) != 1 || !uc43HasEpoch(snaps[0].key, 2) || snaps[0].key == reclaimed || len(swaps) != 1 ||
+		swaps[0].how != uc43Passed || swaps[0].err != nil {
+		t.Errorf("in the second Sync the harness recorded the Puts under %q %v and the PutIfMatch calls of %q %v, "+
+			"want one Put at epoch 2 whose key is not the reclaimed %q, and one PutIfMatch passed through and "+
+			"accepted (ADR 0021 section 2; ADR 0023 section 11; %s)", snapshotPrefix, snaps, rootKey, swaps,
+			reclaimed, where)
+	}
+	secondWhere := where + ", the remount after the second Sync"
+	if rm := e.checkRemount([]string{"c2", "c3", "c4"}, nil, secondWhere); rm != nil {
+		e.checkSize(rm, "c2", 0, secondWhere)
+	}
+}
+
+// TestTheUnconditionalFallbackHoldsNoLock is U12 of ADR 0023 section 11: on a
+// mount with the opt-in, the fallback that follows a swap answered
+// store.ErrUnsupported makes its Put of rootKey and its Head of rootKey holding
+// neither FS.mu nor the commit gate, so a namespace read, a namespace change
+// and a size change made while either is held return (sections 1 and 6; ADR
+// 0021 section 2; Assumption 37).
+//
+// One commit behind it, New's, with AllowUnconditionalRoot true. The 501 on
+// the next PutIfMatch of rootKey, the held Put of rootKey and the held Head of
+// rootKey armed; c2 created; Sync started, and the Put's hold entered. While
+// it is held, GetAttr of the root, Lookup of c2, Create of c3 and SetAttr of
+// c2's size to 10 each return; the Put released, and the Head's hold entered;
+// while it is held, GetAttr of the root, Create of c4 and SetAttr of c2's size
+// to 0 each return; released. Sync returns nil. The harness recorded, in
+// order, one Put under snapshotPrefix at epoch 2, one PutIfMatch of rootKey
+// answered by the harness, one Put of rootKey and one Head of rootKey; and no
+// GetWithETag or Get of rootKey and no Delete. FS.dirty is true, FS.epoch 2,
+// FS.rootSnapshot the key that Put under snapshotPrefix wrote, FS.rootETag the
+// MD5 of the root pointer's bytes on the inner store, and
+// f.rootKnowledge.State() rootKnown. A remount has c2 and neither c3 nor c4.
+// Sync again, with no arm: nil, its PutIfMatch passed through with that MD5 as
+// its etag argument and its snapshot Put at epoch 3; a remount has c2, c3 and
+// c4, with c2 at size 0.
+//
+// No red run is asked for (section 11, Red runs; Assumption 37): it was
+// written after d0fdcdf. At d75d14a it would hang to the 10 s bound at GetAttr
+// of the root while the fallback's Put is held, as U1 hangs, since the gate
+// and FS.mu were held across the fallback; so would a build that moved the
+// fallback back under either.
+func TestTheUnconditionalFallbackHoldsNoLock(t *testing.T) {
+	const where = "ADR 0023 section 11, U12"
+	e := uc43Setup(t)
+	cfg := uc43Config(e.h)
+	cfg.AllowUnconditionalRoot = true
+	fs := e.newFSWith(cfg, where)
+	root := e.root(fs, where)
+
+	e.h.armAnswer501()
+	putHold := e.h.armHoldRootPut()
+	headHold := e.h.armHoldRootHead()
+	c2H := e.create(fs, root, "c2", where)
+	mark := len(e.h.records())
+	syncA := e.twoHolds(fs, root, c2H, putHold, headHold, where)
+	if err := syncA.wait(t, "the Sync of the commit of c2", where); err != nil {
+		t.Errorf("the Sync of the commit of c2, whose swap was answered store.ErrUnsupported on a mount with the "+
+			"opt-in, = %v, want nil: the fallback's Put and Head succeed (ADR 0021 section 2; ADR 0023 section 11; "+
+			"%s)", err, where)
+	}
+
+	first := e.h.records()
+	calls := first[mark:]
+	seq := uc43Filter(calls, func(c uc43Call) bool {
+		return uc43IsSnapPut(c) || uc43IsRootSwap(c) || uc43IsRootPut(c) || uc43IsRootHead(c)
+	})
+	snapKey := ""
+	if len(seq) > 0 && uc43IsSnapPut(seq[0]) {
+		snapKey = seq[0].key
+	}
+	ok := len(seq) == 4 && uc43IsSnapPut(seq[0]) && uc43HasEpoch(seq[0].key, 2) && uc43IsRootSwap(seq[1]) &&
+		seq[1].how == uc43Answered501 && uc43IsRootPut(seq[2]) && uc43IsRootHead(seq[3])
+	if !ok {
+		t.Errorf("in the Sync of the commit of c2 the harness recorded the Puts under %q and the PutIfMatch, Put and "+
+			"Head calls of %q %v, want exactly, in order: one Put under %q at epoch 2, one PutIfMatch of %q "+
+			"answered by the harness, one Put of %q and one Head of %q (ADR 0021 section 2, the fallback; ADR 0023 "+
+			"section 11; %s)", snapshotPrefix, rootKey, seq, snapshotPrefix, rootKey, rootKey, rootKey, where)
+	}
+	if bad := uc43Filter(calls, func(c uc43Call) bool {
+		return uc43IsRootRead(c) || uc43IsRootGet(c) || uc43IsDelete(c)
+	}); len(bad) != 0 {
+		t.Errorf("in the Sync of the commit of c2 the harness recorded %v, want no GetWithETag or Get of %q and no "+
+			"Delete: a fallback whose Head gives the ETag raises no doubt and reclaims nothing (ADR 0021 section 2; "+
+			"ADR 0022 section 4; ADR 0023 section 11; %s)", bad, rootKey, where)
+	}
+
+	f := e.read(fs, "reading the FS's fields after the fallback commit", where)
+	raw, gerr := e.innerGet(rootKey, where)
+	if gerr != nil {
+		t.Errorf("Get(%q) on the inner store = %v, want the root pointer (%s)", rootKey, gerr, where)
+	}
+	if !f.dirty {
+		t.Errorf("after the fallback commit, FS.dirty is false, want true: c3, c4 and the size changes were made "+
+			"after its seal (ADR 0023 section 3; %s)", where)
+	}
+	if f.epoch != 2 {
+		t.Errorf("after the fallback commit, FS.epoch = %d, want 2 (ADR 0021 section 2; %s)", f.epoch, where)
+	}
+	if snapKey != "" && f.rootSnapshot != snapKey {
+		t.Errorf("after the fallback commit, FS.rootSnapshot = %q, want %q, the key its Put under %q wrote (ADR 0022 "+
+			"section 4; ADR 0023 section 11; %s)", f.rootSnapshot, snapKey, snapshotPrefix, where)
+	}
+	if gerr == nil && f.rootETag != uc43ETag(raw) {
+		t.Errorf("after the fallback commit, FS.rootETag = %q, want %q, the MD5 of the root pointer's bytes on the "+
+			"inner store, which the Head gave (ADR 0021 section 2; ADR 0022 section 8; %s)", f.rootETag,
+			uc43ETag(raw), where)
+	}
+	if f.knowledge != rootKnown {
+		t.Errorf("after the fallback commit, f.rootKnowledge.State() = %v, want %v (ADR 0022 section 4; ADR 0023 "+
+			"section 11; %s)", f.knowledge, rootKnown, where)
+	}
+	e.checkRemount([]string{"c2"}, []string{"c3", "c4"}, where+", the remount after the fallback commit")
+
+	if err := e.sync(fs, "the second Sync, with no arm", where); err != nil {
+		t.Errorf("the second Sync, with no arm, = %v, want nil (ADR 0021 section 2; ADR 0023 section 3; %s)", err,
+			where)
+	}
+	calls = e.h.records()[len(first):]
+	snaps, swaps := uc43Filter(calls, uc43IsSnapPut), uc43Filter(calls, uc43IsRootSwap)
+	ok = len(snaps) == 1 && uc43HasEpoch(snaps[0].key, 3) && len(swaps) == 1 && swaps[0].how == uc43Passed &&
+		swaps[0].err == nil
+	if ok && gerr == nil && swaps[0].etag != uc43ETag(raw) {
+		ok = false
+	}
+	if !ok {
+		t.Errorf("in the second Sync the harness recorded the Puts under %q %v and the PutIfMatch calls of %q %v, "+
+			"want one Put at epoch 3 and one PutIfMatch passed through and accepted with the etag argument %q, the "+
+			"MD5 of the root pointer the fallback wrote (ADR 0021 section 2; ADR 0023 section 11; %s)",
+			snapshotPrefix, snaps, rootKey, swaps, uc43ETag(raw), where)
+	}
+	secondWhere := where + ", the remount after the second Sync"
+	if rm := e.checkRemount([]string{"c2", "c3", "c4"}, nil, secondWhere); rm != nil {
+		e.checkSize(rm, "c2", 0, secondWhere)
+	}
 }
