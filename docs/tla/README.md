@@ -11,8 +11,8 @@ This file says what the directory holds, how to read it and how to run it.
 - **`CommitProtocol.tla`**: how a mount reads the root pointer, commits,
   settles a root pointer in doubt, prunes snapshots and diverges, against
   other mounts, failing store calls and crashes (ADR 0013 §1, item 1). It is
-  checked against `71fee34` for every action but those ADR 0023 changes,
-  whose rows await coder's commit for that ADR (ADR 0023 Assumption 23).
+  checked against `d0fdcdf`, coder's commit for ADR 0023, for every action
+  (ADR 0023 Assumption 23).
 - **Its 45 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
   thirty MustHold and fifteen MustFail. Every MustFail one removes a
   fix the code has, one of them,

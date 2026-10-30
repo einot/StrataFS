@@ -144,8 +144,8 @@ name the verdicts those branches take (ADR 0022 §3), and are no events.
 
 ## V3. Commit protocol
 
-`docs/tla/CommitProtocol.tla`, checked against `71fee34` for every action but
-those ADR 0023 changes, which await coder's commit for it. Its Go sites
+`docs/tla/CommitProtocol.tla`, checked against `d0fdcdf`, coder's commit for
+ADR 0023, for every action (ADR 0023 Assumption 23). Its Go sites
 exist: `Sync`, `loadOrInit`, `initEmpty`, `decodeSnapshot`,
 `classifyRoot`, `resolveRoot`, `fallbackAllowed`, `schedulePrune` and
 `pruneSnapshots` in `internal/blobfs/commit.go`; `New`,
@@ -158,11 +158,18 @@ exist: `Sync`, `loadOrInit`, `initEmpty`, `decodeSnapshot`,
 until ADR 0023, is since that ADR the three functions `seal`,
 `commitSealed` and `applyLocked` in `internal/blobfs/commit.go`, and
 `markDirty` in `internal/blobfs/fs.go` is the one site that sets `FS.dirty`;
-the four are reserved, ADR 0023, until coder's commit is on the branch, as
-are the members `UnlockedCommit` and `ClearIfUnchanged`, the variable
-`changedSinceSeal[m]`, which traces to `FS.changes`, the ghost
+the four exist as of `d0fdcdf`, coder's commit for ADR 0023, having been
+reserved, ADR 0023, until it was on the branch (ADR 0023 Assumption 23), as
+do the members `UnlockedCommit` and `ClearIfUnchanged` and the variable
+`changedSinceSeal[m]`, which traces to `FS.changes`. The ghost
 `uncommitted[m]`, the definition `InFlight` and the property
-`DirtyUntilCommitted` (ADR 0023 §10, Assumption 23).
+`DirtyUntilCommitted`, which only the spec uses, stay reserved, ADR 0023, as
+`Below` is by ADR 0019 (ADR 0023 §10). The four Go names were confirmed, by
+reading, in the code at `d0fdcdf`: `internal/blobfs/commit.go` declares
+`sealedCommit`, `(*FS).seal`, `(*FS).commitSealed` and `(*FS).applyLocked`,
+and `internal/blobfs/fs.go` declares `(*FS).markDirty`, `FS.commitMu` and
+`FS.changes`, with `markDirty` the one non-test site that writes `FS.dirty`
+true and the one that advances `FS.changes`.
 `docs/tla/trace.tsv` gives each action's symbols. Of the entries ADR 0019
 added, `PruneBelowCurrent`, `Prunable`, and `prunable` in V7 exist, as of
 `cc38ca6`, `prunable` in `internal/blobfs/commit.go`; `Below`, which only the
@@ -240,7 +247,7 @@ beside it.
 | `rootKnowledge[m]` | `FS.rootKnowledge` (V2) | the machine's state, as `FS.rootKnowledge.State()` gives it | exists, as of `71fee34` |
 | `doubtKey[m]` | `FS.doubtKey` | the snapshot key of the attempt whose write of the root pointer left the root in doubt; `NoKey` while `"Known"` | exists, as of `71fee34` |
 | `rootSnapshot[m]` | `FS.rootSnapshot` | the snapshot key the root pointer named when `rootETag[m]` was last set, by a load, a commit's success or a probe; `NoKey` = no root. The probe's verdict compares against it (ADR 0022 §3) | exists, as of `71fee34` |
-| `changedSinceSeal[m]` | `FS.changes`, compared with the copy `seal` took: `FS.changes != s.changes` | whether a change was made since the seal of the commit in flight; `FALSE` from each seal until a `Mutate` in flight. With `ClearIfUnchanged`, `Committed` sets `nsDirty[m]` to it (ADR 0023 §3; the module's J23) | reserved, ADR 0023 |
+| `changedSinceSeal[m]` | `FS.changes`, compared with the copy `seal` took: `FS.changes != s.changes` | whether a change was made since the seal of the commit in flight; `FALSE` from each seal until a `Mutate` in flight. With `ClearIfUnchanged`, `Committed` sets `nsDirty[m]` to it (ADR 0023 §3; the module's J23) | exists, as of `d0fdcdf` |
 | `uncommitted[m]` | none: a ghost | the mount holds a change that no acknowledged commit includes: set by `Mutate`, set to `changedSinceSeal[m]` by `Committed`, cleared by `Crash`. `DirtyUntilCommitted` compares it with `nsDirty[m]` (ADR 0023 §10; the module's J22) | reserved, ADR 0023 |
 | `rootETag[m]` | `FS.rootETag` | | exists |
 | `epoch[m]` | `FS.epoch` | | exists |
@@ -322,8 +329,8 @@ machine's states (rule 3).
 
 **Definitions.** The module's other definitions. All reserved, ADR 0013, but
 `Mutable`, `Prunable`, `FallbackAllowed`, `Diverge` (V1) and `SwapUnknown`
-(V2), which exist, `Below`, which ADR 0019 reserves, and `Unresolved`, which
-ADR 0022 reserves.
+(V2), which exist, `Below`, which ADR 0019 reserves, `Unresolved`, which
+ADR 0022 reserves, and `InFlight`, which ADR 0023 reserves.
 
 | Definition | Meaning |
 |---|---|
@@ -382,8 +389,8 @@ no acknowledged commit includes has `nsDirty[m]` set (ADR 0023 §10).
 | `AtomicLoad` | `loadOrInit` reads the root pointer's body and its ETag with one call, `store.Store.GetWithETag`, so the ETag its first commit swaps against is the ETag of the body it loaded, and a commit by another mount between a mount's reads is refused, not overwritten (ADR 0020 §1, §2) | exists, as of `c5068a0` |
 | `FallbackOptIn` | `commitLocked`, after `store.ErrUnsupported` from the swap, writes the root pointer unconditionally only on a mount whose operator set `Config.AllowUnconditionalRoot`, and otherwise fails the commit, writing nothing more and reclaiming the snapshot it uploaded, so one 501 never turns a conditional writer into an unconditional one (ADR 0021 §1, §2) | exists, as of `8415f61` |
 | `RootProbe` | a write of the root pointer whose reply did not establish its ETag leaves the mount's knowledge of the root pointer in doubt, and the mount writes the root pointer no further until one read of it, `GetWithETag`, has shown it naming the attempt, which the mount adopts, the key its namespace descends from, whose ETag it takes, or another key, on which it diverges, naming the writer; so no swap's error alone is taken for a second writer (ADR 0022 §1 to §4) | exists, as of `71fee34` |
-| `UnlockedCommit` | a commit seals the namespace under `FS.mu`, in `seal`, and makes every store call, the snapshot `Put`, the swap, the probe's read, the reclaim and the fallback, holding neither `FS.mu` nor the commit gate, in `commitSealed` and `resolveRoot`, applying the outcome in a later hold; `FS.commitMu` serialises commits; so a change can be made while a commit is in flight (ADR 0023 §1, §2, §4) | reserved, ADR 0023 |
-| `ClearIfUnchanged` | a commit's success clears `FS.dirty` only if nothing changed since the seal: `applyLocked` sets it to `FS.changes != s.changes`, so a change made during the flight is in the next commit; `markDirty` is the one site that advances `FS.changes` (ADR 0023 §3) | reserved, ADR 0023 |
+| `UnlockedCommit` | a commit seals the namespace under `FS.mu`, in `seal`, and makes every store call, the snapshot `Put`, the swap, the probe's read, the reclaim and the fallback, holding neither `FS.mu` nor the commit gate, in `commitSealed` and `resolveRoot`, applying the outcome in a later hold; `FS.commitMu` serialises commits; so a change can be made while a commit is in flight (ADR 0023 §1, §2, §4) | exists, as of `d0fdcdf` |
+| `ClearIfUnchanged` | a commit's success clears `FS.dirty` only if nothing changed since the seal: `applyLocked` sets it to `FS.changes != s.changes`, so a change made during the flight is in the next commit; `markDirty` is the one site that advances `FS.changes` (ADR 0023 §3) | exists, as of `d0fdcdf` |
 
 **Checked against rule 1.** Every name the CommitProtocol spec added here was
 checked against rule 1 and against the operators listed at the end of this

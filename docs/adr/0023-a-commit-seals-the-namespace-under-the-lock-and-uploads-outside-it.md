@@ -3,6 +3,20 @@
 **Status:** Accepted
 **Date:** 2026-10-30
 **Issue:** #43
+**Revised:** 2026-10-30 — after coder's commit `d0fdcdf`, against the code
+at that commit, read and not run. §2 records what coder chose where this
+ADR left room: the reclaim record's `our_epoch` read from the sealed commit
+rather than from `FS.epoch`, the `"committed"` record's `inodes` counted at
+the apply, the gate released by a deferred unlock in a closure around the
+settle pass and the seal, explicit holds of `FS.mu` in `commitSealed`, and
+two comments corrected beside §2's list (Assumptions 29 to 32). §11's
+harness records every call of every method but `Name`, which U9 needs, and
+§11 says what `d75d14a` shows for each test, a hang, apart from what a
+build that unlocks the store calls but skips the guard would show
+(Assumptions 33 and 34). §10 and Assumption 23 record the five rows'
+calibration, at `9bc9792`, and the module's `Checked against` bump to
+`d0fdcdf`. The rule, the pipeline, the guard, the model and the
+configurations are unchanged, and no code changes.
 
 ## Context
 
@@ -302,6 +316,39 @@ named, and nothing else moves:
 - The errors returned, their texts and `errors.Is` behaviour, the records
   logged and their attributes are ADR 0022 §3 and §4's, ADR 0021 §2's and
   `d75d14a`'s, unchanged (Assumption 18).
+
+**What coder's commit chose**, recorded against `d0fdcdf` where the pins
+above left room (Assumptions 29 to 32):
+
+- The reclaim's record carries `our_epoch` as `s.epoch - 1` and `attempted`
+  as `s.epoch`, read from the sealed commit, so that the flight reads no
+  field `FS.mu` guards. The values are the ones `commitLocked` logged,
+  `f.epoch` and `f.epoch + 1`: `s.epoch` is `FS.epoch + 1` at the seal, and
+  nothing moves `FS.epoch` before this commit's own apply, since only an
+  apply and a probe's verdict write it and `commitMu` serialises both (§5).
+  ADR 0021 pins no attribute of that record (its Assumption 8), so nothing
+  there needs a cross-reference.
+- The `"committed"` record, which `applyLocked` logs in its hold, counts
+  `len(f.inodes)` at the apply, not at the encode. Its message and keys are
+  as they were; the count can differ from the snapshot's only by changes
+  made during the flight, which leave the namespace dirty (§3) and are in
+  the next commit's record. ADR 0022 §4 names the record and pins no
+  attribute of it, so nothing there needs a cross-reference either.
+- In `Sync`, the gate is taken and released inside a closure around the
+  settle pass and the seal, by a deferred unlock, so that it is released on
+  an error and on a panic, before any store call, as step 5 asks.
+- `commitSealed` takes each of its holds of `FS.mu` with an explicit `Lock`
+  and `Unlock`; `seal` and `resolveRoot`, which each hold `FS.mu` once, use
+  `defer`.
+- Two comments beside the list above were corrected in the same two files:
+  `FS.mode`'s field comment, which names `Sync`'s unlocked read of the mode
+  at the top of a commit and `resolveRoot`'s hold as the one place it is
+  fired (§5); and `truncate`'s doc comment, which said `FS.mu` is held
+  across a commit's store calls and now says a commit holds it only for its
+  seal and its apply (§4). Coder's first draft passed `newETag` where
+  Assumption 27 pins `applyLocked(s, "")` after a failed
+  `Fire(rootSwapUnknown)`; that was corrected before `d0fdcdf`, and nothing
+  about it is open.
 
 ### 3. "Nothing changed"
 
@@ -673,11 +720,20 @@ In `docs/tla/CommitProtocol.tla`, under a `Revised: 2026-10-30` line
   `uncommitted` `TRUE`. No MustFail configuration removes `UnlockedCommit`,
   since no property fails without it; the row that lacks it is the existing
   MustHold row of the same bounds (Assumption 12).
-- In `docs/tla/manifest.tsv` the five new rows have `exit` and `log` `-`
-  until the session has run them (ADR 0013 §7, §10). The module's `Checked
-  against` stays `71fee34` for every action but those this ADR changes,
-  which await coder's commit, as ADR 0022 Assumption 20 had it
-  (Assumption 23).
+- In `docs/tla/manifest.tsv` the five new rows had `exit` and `log` `-`
+  until the session ran them (ADR 0013 §7, §10). The session ran
+  `tla.sh full` before coder's commit: the forty earlier rows passed, and
+  the five came out as predicted, the four MustHold rows clean and
+  `CommitProtocol_NoClearIfUnchanged` violating `DirtyUntilCommitted`, which
+  the rows record as of `9bc9792`. The module's `Checked against` stayed
+  `71fee34` for every action but those this ADR changes until coder's
+  commit, `d0fdcdf`, was on the branch, as ADR 0022 Assumption 20 had it; on
+  2026-10-30 the architect checked every row this ADR added or changed
+  against that commit, its symbol, the locks held around each store call
+  and each hold of `FS.mu`, found each to hold, and set the line to
+  `d0fdcdf` for every action (Assumption 23). `d0fdcdf` changes Go alone,
+  and this revision changes comments alone in the module, so the model
+  needs no further run.
 
 ### 11. The test surface
 
@@ -803,10 +859,12 @@ over a `*store.Local` under `t.TempDir()`, written without embedding
   doubt;
 - **holds the next `GetWithETag` of `rootKey`** in the same way as the
   `Put`, then passes it through;
-- records, in call order, every `Put` under `snapshotPrefix` with its key,
-  every `PutIfMatch` of `rootKey` with its `etag` argument and how it was
-  answered, every `GetWithETag` of `rootKey`, and every `Delete` with its
-  key.
+- records, in call order, every call of every method but `Name`, with its
+  key and how it was answered, so that U9's "no call of any kind" is a
+  statement the records can make; among them every `Put` under
+  `snapshotPrefix` with its key, every `PutIfMatch` of `rootKey` with its
+  `etag` argument, every `GetWithETag` of `rootKey`, and every `Delete` with
+  its key, which the other tests count (Assumption 33).
 
 Every hold selects on the test's context, which a cleanup cancels, and a
 cleanup releases every hold (ADR 0019 §6's rules). Every mount has
@@ -854,9 +912,11 @@ not finished; nothing sleeps. `Create`, `Sync` and the field reads follow
   `FS.epoch` is 2. A remount has `c2` and not `c3`. `Sync` again: returns nil,
   and the harness recorded a second `Put` under `snapshotPrefix` whose key
   carries epoch 3 and a second `PutIfMatch`; `FS.dirty` is false; a remount
-  has `c2` and `c3`. A build that clears the flag unconditionally fails on
-  `FS.dirty` after the first `Sync` and on the second `Sync`'s `Put` count,
-  which is the route TLC reports for the MustFail row.
+  has `c2` and `c3`. A build that makes its store calls off the lock but
+  clears the flag unconditionally, `UnlockedCommit` without
+  `ClearIfUnchanged`, fails on `FS.dirty` after the first `Sync` and on the
+  second `Sync`'s `Put` count, which is the route TLC reports for the
+  MustFail row; at `d75d14a` the test hangs instead (*Red runs*, below).
 - **U4, the guard at the failure-site adoption**
   (`TestAChangeMadeWhileALostSwapIsSettledStaysDirty`). One commit behind
   it; arm the held-then-lost swap; create `c2`; start `Sync`; wait for
@@ -891,9 +951,11 @@ not finished; nothing sleeps. `Create`, `Sync` and the field reads follow
   `vfs.FileSync` in a goroutine, W. W has not returned while A's `Put` is
   held, asserted as U5 asserts B. Release; A returns nil; W returns
   `(100, vfs.FileSync, nil)`. A remount of the inner store, with no further
-  `Sync`, reads those 100 bytes from `a.bin`. A build without the guard can
-  answer W with `FS.dirty` cleared under it and no commit of its bytes, so
-  the remount reads an empty file there.
+  `Sync`, reads those 100 bytes from `a.bin`. A build that makes its store
+  calls off the lock but clears the flag unconditionally can answer W with
+  `FS.dirty` cleared under it and no commit of its bytes, so the remount
+  reads an empty file there; at `d75d14a` the test hangs instead (*Red
+  runs*, below).
 - **U8, the top-of-commit probe holds no lock**
   (`TestTheTopOfCommitProbeHoldsNoLock`). ADR 0022 §8's K7 setup through the
   failed read: one commit behind it, the held-then-lost swap released at
@@ -922,6 +984,21 @@ not finished; nothing sleeps. `Create`, `Sync` and the field reads follow
   is greater than its first. A `GetAttr`, a `Lookup` and a `Read` advance
   nothing.
 
+**Red runs** (Assumption 34). At `d75d14a` each of U1 to U8 hangs until the
+test's bound at the first call it makes while a store call is held, since
+the gate and `FS.mu` are held across that call; the test reports the hang,
+not a wrong value. U9 passes there: `commitLocked` refused a diverged mount
+at its top, before any store call (*Context*), and the test pins that the
+refusal stays ahead of every store call once it is `Sync`'s. U10 does not
+build there, since `FS.changes` does not exist. The sentences above on
+`FS.dirty`, the `Put` count and the remount describe a build that makes its
+store calls off the lock but clears the flag unconditionally,
+`UnlockedCommit` without `ClearIfUnchanged`, which no commit of this
+repository is: U1 to U5 would catch it, U7 can, and U6 and U8 would not,
+since neither makes a change between the seal and the apply. The session's
+red run at `d75d14a` showed U1 to U8 hanging to the bound, as this paragraph
+says.
+
 **Changes to existing tests.** Every test at `d75d14a` stands in its
 assertions (Assumption 21); three may change their words:
 
@@ -942,10 +1019,11 @@ assertions (Assumption 21); three may change their words:
 G-tests, `prune_root_test.go`'s R-tests, which hold a swap and make no call
 on the same mount meanwhile, `read_only_test.go`, `load_race_test.go`,
 `write_sync_test.go`'s concurrent writers and the NFS tests stand unchanged.
-`internal/blobfs/tla_trace_test.go` fails until coder's commit, since
-`trace.tsv` names `FS.seal`, `FS.commitSealed`, `FS.applyLocked` and
-`FS.markDirty` before they exist, as ADR 0022 Assumption 21 accepted
-(Assumption 23).
+`internal/blobfs/tla_trace_test.go` failed until coder's commit, since
+`trace.tsv` named `FS.seal`, `FS.commitSealed`, `FS.applyLocked` and
+`FS.markDirty` before they existed, as ADR 0022 Assumption 21 accepted; at
+`d0fdcdf` the four exist, and the session reports it passing with the rest
+of `go test -race ./...` (Assumption 23).
 
 ### 12. Scope, and `CHANGES`
 
@@ -1130,6 +1208,30 @@ Each is mine unless it says otherwise.
     the code, the tripwire fails on the new symbols until coder's commit is
     on the branch, and the architect bumps the line and marks the vocabulary's
     entries *exists* then. The session's runs are the session's evidence.
+    Done on 2026-10-30, against `d0fdcdf`, coder's commit: every row
+    `trace.tsv` has for this ADR was read against the code, its symbol, the
+    locks around each store call and each hold of `FS.mu`, and holds; the
+    line reads `d0fdcdf` for every action, as do `docs/tla/README.md` and
+    `docs/vocabulary.md` V3, which marks `seal`, `commitSealed`,
+    `applyLocked`, `markDirty`, the members `UnlockedCommit` and
+    `ClearIfUnchanged` and the variable `changedSinceSeal[m]` as existing as
+    of that commit, with the ghost `uncommitted[m]`, `InFlight` and
+    `DirtyUntilCommitted`, which only the spec uses, still reserved, as
+    `Below` is by ADR 0019. One reading note on the rows: those for the
+    store-level symbols, for `classifyRoot`'s callers and for
+    `commitSealed`'s and `resolveRoot`'s outcomes say "commitMu, held by
+    Sync" or "called holding commitMu", which is true from `Sync`; on
+    `initEmpty`'s path nothing is held, which the rows for
+    `InitEmpty`/`FS.initEmpty`, `PutSnapshot`/`FS.seal` and
+    `FS.commitSealed`, `SwapOK`/`FS.commitSealed` and
+    `Diverge`/`FS.resolveRoot` say and the rest leave implicit. No row's
+    claim about `FS.mu` is false on either path, which is what the rows
+    exist to state, so they stand as written. That check was by reading, as
+    the rest of this ADR's were; the session's runs at `d0fdcdf`, which it
+    reported as `gofmt`, `go vet` and `go test -race ./...` clean, with U1
+    to U9 passing 30 repeats under `-race` and U1 to U8 hanging to the
+    bound before the code, are the session's evidence and not the
+    architect's.
 24. **Cross-references** (§9). ADRs 0002, 0003, 0005, 0006, 0007, 0012, 0013,
     0014, 0018, 0019, 0020, 0021 and 0022 each gain a `Revised` line, cross-
     reference only, and ADR 0011 one for §7's list of checks that names
@@ -1161,6 +1263,52 @@ Each is mine unless it says otherwise.
     returned, which bounds the race against the queued call's first pass
     without a sleep; a build that lets the second commit through would still
     be caught by the `Put` count and the remount.
+29. **The reclaim record reads the sealed commit** (§2). `commitLocked`
+    logged `f.epoch` and `f.epoch + 1` under `FS.mu`; the reclaim now runs
+    holding no lock, where a read of `FS.epoch` would be a data race on a
+    field whose value cannot have moved. `s.epoch - 1` says the same thing
+    without the lock, and the equality rests on `commitMu` (§5); supervisor
+    checked it, and the architect confirms it by the same argument. Coder's
+    choice, confirmed.
+30. **The `"committed"` record counts at the apply** (§2). The count could
+    be taken at the seal, as one more field of `sealedCommit`, so that the
+    record described the snapshot exactly. The record is `Debug`, no test
+    pins its count, its keys are unchanged, and the difference is the
+    changes made during the flight, which the next commit's record shows;
+    a field on the pinned struct for that is not worth a re-dispatch.
+    Coder's choice, confirmed.
+31. **A closure for the gate; explicit holds in `commitSealed`** (§2).
+    Step 5 asks that the gate be released before any store call whether
+    the seal succeeded or not, and a deferred unlock inside a closure does
+    that on a panic too. `commitSealed`'s holds are explicit because it
+    holds `FS.mu` more than once on one path, where one `defer` cannot
+    serve; `seal` and `resolveRoot` hold it once each and defer. This ADR
+    pins nothing about panics. A panic inside one of `commitSealed`'s holds
+    would leave `FS.mu` held, where at `d75d14a` `Sync`'s deferred unlock
+    released it, and `internal/sunrpc` recovers a handler's panic and keeps
+    serving; but the holds call only `Fire`, the logger and `applyLocked`'s
+    field writes and `go` statement, none of which panics short of a bug in
+    the runtime or in a log handler, and a mount whose apply panicked
+    half-way is not one to keep serving either. Confirmed as it is; a
+    closure per hold would be a cheap tightening if a later change puts
+    more into them.
+32. **The two comments** (§2). `FS.mode`'s field comment and `truncate`'s
+    doc comment are within what this ADR constrains, `FS`'s fields and the
+    waits §4 and §9 describe; a comment that said `FS.mu` is held across a
+    commit's store calls would have been false at `d0fdcdf`. Confirmed.
+33. **The harness records every call** (§11). §11 listed four kinds of call
+    to record and then asked U9 to show "no call of any kind"; the second
+    needs the first to be every call, as test-author's harness has it, with
+    `Name`, which is no call on the bucket, left out. §11 now says so.
+34. **The red-run sentences** (§11). §11 gave, for U3 and U7, what a build
+    without the guard shows, and said for U1 alone what `d75d14a` shows.
+    `d75d14a` holds `FS.mu` across every store call, so U1 to U8 hang there
+    at the first call made while held, which is what the session's red run
+    showed; a build that fails on `FS.dirty` or a `Put` count is one that
+    unlocks the store calls and skips the guard, which no commit of this
+    repository is. §11's *Red runs* says both, so that a reader does not
+    take the `FS.dirty` sentences for `d75d14a`'s behaviour, as
+    test-author's doc comments already distinguish them.
 
 ## Alternatives considered
 
