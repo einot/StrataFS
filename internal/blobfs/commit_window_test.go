@@ -60,7 +60,10 @@ package blobfs
 // never checked, since §9 leaves them unpinned.
 //
 // Not covered, on purpose, because §9 leaves them to review: that the gate is
-// held across the whole commit phase on every path; §4's fail-safe and its
+// held across the whole commit phase on every path, which since ADR 0023 §2
+// ends at the seal, so that the gate is no longer held across the commit's
+// store calls (every test here holds its Sync in the first pass or the settle
+// pass, where the gate is still held); §4's fail-safe and its
 // record; that Run's committer, cmd/strata's shutdown, Commit, stable writes
 // and budget drains all go through Sync; and §5's lock order.
 

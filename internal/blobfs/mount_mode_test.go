@@ -505,8 +505,9 @@ func TestASwapLostToAnotherWriterDivergesTheMountAndItStoresNothingMore(t *testi
 	// M7: a diverged mount's commit stores nothing.
 	beforeSecond := len(fake.ops())
 	if err := mm14Sync(t, ctx, fs, "a second Sync on the diverged mount"); err == nil {
-		t.Errorf("a second Sync on the diverged mount = nil, want an error: commitLocked refuses at its top " +
-			"when f.mode.State() is mountDiverged (ADR 0014 section 7; section 11, M7)")
+		t.Errorf("a second Sync on the diverged mount = nil, want an error: Sync refuses at the top of its " +
+			"commit, before any probe, when f.mode.State() is mountDiverged (ADR 0014 section 7; section 11, " +
+			"M7; ADR 0023 section 2, step 3)")
 	}
 	ops = fake.ops()
 	if after := ops[failed+1:]; len(after) != 0 {
