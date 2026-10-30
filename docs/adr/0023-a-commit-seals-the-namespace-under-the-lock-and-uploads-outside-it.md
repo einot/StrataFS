@@ -37,6 +37,22 @@ corrected. `docs/vocabulary.md`'s rows that named `commitLocked` as current
 code name `Sync`, `seal`, `commitSealed` or `sealedCommit.key`. The rule,
 the pipeline's steps, the guard, the model and the configurations are
 unchanged, and the model needs no run.
+**Revised:** 2026-10-30 — on `reviewer`'s follow-up findings against
+`a9e85cc`, with the code at `a9e85cc` read and not run; the three are low,
+and no code changes. §8's third fact, that every hold of `FS.mu` for
+writing that changes the namespace calls `markDirty`, holds at every site
+but two: two error paths older than this ADR change the namespace without
+it, `unlink`'s removal of an entry that names no inode and `SetAttr`'s
+partial apply, #143. §8 states the fact as it holds and names both, each
+with its issue, and fixing `unlink` in this PR is declined (Assumption 38).
+E13's register row takes the form of E1 to E12, its code `FS.dirty` alone
+and its reason named as ADR 0018 §1's, since §8 is the authority for the
+rest. `Checked against` is `330c08c`, coder's follow-up that released each
+of `commitSealed`'s holds by defer, which had left the line behind the code
+it vouches for: the fourteen rows that name `commitSealed` were read against
+it and hold, and the module's line, the README and V3 say so (§10;
+Assumption 23). The rule, the pipeline, the guard, the model and the
+configurations are unchanged, and the model needs no run.
 
 ## Context
 
@@ -659,10 +675,28 @@ that commit (Assumption 17).
   rests on three facts that review checks and no table would: no non-test
   code writes `f.dirty = true` but `markDirty` (Assumption 10); nothing
   writes it false but `applyLocked`, as `f.changes != s.changes`; and every
-  hold of `FS.mu` for writing that changes the namespace calls `markDirty`.
-  ADR 0011 §7's seam, a test writing the field on a read-only FS, stands.
-  The register gains row E13, citing this section; ADR 0018 §3's list is the
-  record of what stood at `2d7ff34` and is not edited.
+  hold of `FS.mu` for writing that changes the namespace calls `markDirty`,
+  at every site but two. The third holds at each of §3's eight sites and at
+  every hold that changes the namespace and returns success, read at
+  `a9e85cc`. The two are error paths older than this ADR, each of which
+  changes the namespace and then returns an error without the call, so that
+  at each the namespace in memory holds a change the flag does not record,
+  which is committed only when something else dirties the namespace and is
+  otherwise undone at the next mount (Assumption 38):
+
+  - `unlink`, when the entry names an inode the table lacks, which a
+    snapshot can hold since `decodeSnapshot` does not check entries: it
+    removes the entry and returns `ErrNoEnt` (#144);
+  - `SetAttr`, when it has applied `Mode` and then refuses `UID` or `GID`
+    with `ErrPerm` (#143).
+
+  The PR that fixes each, by `markDirty` in the hold or by making no
+  change, strikes its site from this list under a `Revised` line, since
+  the fact is this ADR's and the register's row restates it; with both
+  struck, the fact holds without qualification. ADR 0011 §7's seam, a test
+  writing the field on a read-only FS, stands. The register gains row E13,
+  citing this section; ADR 0018 §3's list is the record of what stood at
+  `2d7ff34` and is not edited.
 - **`FS.changes` is a value, not a state** (ADR 0018 §2), as `rootETag` is:
   it names no legal next step.
 - **No policy.** Nothing here decides what a caller may do. The guard is a
@@ -808,9 +842,15 @@ In `docs/tla/CommitProtocol.tla`, under a `Revised: 2026-10-30` line
   2026-10-30 the architect checked every row this ADR added or changed
   against that commit, its symbol, the locks held around each store call
   and each hold of `FS.mu`, found each to hold, and set the line to
-  `d0fdcdf` for every action (Assumption 23). `d0fdcdf` changes Go alone,
-  and this revision changes comments alone in the module, so the model
-  needs no further run.
+  `d0fdcdf` for every action (Assumption 23). Coder's follow-up, `330c08c`,
+  then changed `commitSealed`, which fourteen rows name, to release each of
+  its holds of `FS.mu` by defer (§2; Assumption 31), and review found the
+  line behind the code: on 2026-10-30 the architect read those rows against
+  it, each store call still off `FS.mu` and the gate, each hold where it
+  was and the calls around it in the same order, and set the line to
+  `330c08c`, with the README and V3 (Assumption 23). `d0fdcdf` and
+  `330c08c` change Go alone, and each revision of this ADR that touched the
+  module changed comments alone, so the model needs no further run.
 
 ### 11. The test surface
 
@@ -1402,7 +1442,27 @@ Each is mine unless it says otherwise.
     reported as `gofmt`, `go vet` and `go test -race ./...` clean, with U1
     to U9 passing 30 repeats under `-race` and U1 to U8 hanging to the
     bound before the code, are the session's evidence and not the
-    architect's.
+    architect's. Done again on 2026-10-30, after coder's follow-up
+    `330c08c`, which review found had left the line behind the code it
+    vouches for: the fourteen rows that name `FS.commitSealed`, under
+    `PutSnapshot`, `SwapOK`, `SwapReplyLost`, `SwapFailed`, `SwapConflict`,
+    `SwapUnknown`, `SwapNoETag`, `ProbeOurs`, `ProbeUnchanged`,
+    `ProbeTheirs`, `ProbeFailed`, `SwapUnsupported`, `FallbackPut` and
+    `FallbackHead`, were read against it. The snapshot `Put`, the swap,
+    the reclaim's `Get` and `Delete`, the fallback's `Put` and `Head` and
+    `resolveRoot`'s read are each still made holding no `FS.mu` and no
+    gate; the success path's hold, the doubt-raising hold and the
+    failure-site adoption's hold are where they were, each now released
+    by a deferred `Unlock`, the doubt-raising one inside a closure so that
+    `resolveRoot`'s read runs after it; and the calls around each hold are
+    in the same order. So every row holds as written, no locks column
+    changes, and the line, the README and V3 read `330c08c`; every other
+    row's code is as it was at `d0fdcdf`, since the commits between
+    touched docs, `CHANGES`, tests and that one function. That is by
+    reading, as before: the architect cannot run git, so that the tree
+    read is `330c08c`'s code rests on the session's statement that the
+    tree is clean at `a9e85cc`, which adds tests alone, and on its account
+    of the commits between.
 24. **Cross-references** (§9). ADRs 0002, 0003, 0005, 0006, 0007, 0012, 0013,
     0014, 0018, 0019, 0020, 0021 and 0022 each gain a `Revised` line, cross-
     reference only, and ADR 0011 one for §7's list of checks that names
@@ -1543,6 +1603,37 @@ Each is mine unless it says otherwise.
     commit and of the fallback. Their names follow U1 to U10's form. No red
     run is asked for: they are written after the code, and what they would
     show at `d75d14a` is U1's hang.
+38. **Fact (c) is qualified, and the two sites are issues, not this PR's
+    fixes** (§8). Review found two error paths that change the namespace
+    without `markDirty`: `unlink`'s removal of an entry that names no
+    inode, and `SetAttr`'s partial apply, #143. Neither is this ADR's: both
+    are as they were at `d75d14a`, and §3's eight sites are the ones that
+    wrote `f.dirty = true`, which neither did. Fixing `unlink` here was
+    weighed: one line, `f.markDirty()` before that `return vfs.ErrNoEnt`,
+    would leave #143 the one exception. It is declined, for three reasons.
+    The branch is #43's, and the session gave `SetAttr`'s site an issue
+    rather than a fix here; the same rule gives `unlink`'s one. The line
+    would also decide, in passing, whether a mount should repair a
+    dangling entry at all: `Rename` leaves one where it is and returns
+    `ErrNoEnt`, where `unlink` removes it without `touchM`, so that the
+    listing's verifier, which hashes the name `ReadDir` otherwise skips,
+    changes while the directory's mtime does not; the issue can choose to
+    mark the repair or to make none, as `Rename` does, and a test of
+    either needs a snapshot with such an entry, which §11's names cannot
+    build, `encodeSnapshot` not being among them. And the line would touch
+    `unlink`, a traced `Mutate` site, so `Checked against` would wait on
+    one more commit. So §8 states the fact as it holds and names the two
+    paths with their issues; the issue for `unlink` is #144, which the
+    session filed from the draft in the report that carried this
+    revision. What the qualification costs: at
+    each path the namespace in memory holds a change the flag does not
+    record, so a `Sync` with nothing else dirty commits nothing and the
+    next mount undoes it, which for `unlink`'s path restores an entry that
+    names nothing, and for `SetAttr`'s drops a mode the caller was told
+    was not set, which shows until then and is #143's complaint. Neither
+    path is a commit outcome, so `DirtyUntilCommitted`, the Unlocked rows
+    and U1 to U12, which are about commits, say nothing of them, and no
+    configuration changes.
 
 ## Alternatives considered
 
@@ -1582,6 +1673,10 @@ Each is mine unless it says otherwise.
   is under `commitMu`, so this would be a second check, saving only the
   upload of chunks that name nothing. The wording is narrowed instead
   (Assumption 36).
+- **Fix `unlink`'s dangling-entry path in this PR.** One line, but not
+  #43's, and it would decide in passing whether a mount repairs such an
+  entry at all. An issue instead, as #143 is for `SetAttr`'s partial apply
+  (Assumption 38).
 
 ## Consequences
 
@@ -1597,7 +1692,9 @@ Each is mine unless it says otherwise.
 - `FS.dirty` is exempt from the state rule, E13, on the strength of
   `markDirty` being its one setter, `applyLocked` its one clearer and
   `DirtyUntilCommitted` its invariant; a change that adds a writer or a
-  reader outside those revisits the exemption (§8).
+  reader outside those revisits the exemption (§8). Two error paths older
+  than this ADR change the namespace without the setter, each with an
+  issue (§8; Assumption 38).
 - The probe's read, the reclaim and the fallback's calls run off the lock,
   closing what ADRs 0021 and 0022 left to #43.
 - Four MustHold configurations widen the module's envelope to changes made
@@ -1614,6 +1711,9 @@ Each is mine unless it says otherwise.
 - Batching stable writes so that several share one commit (#44).
 - Whether a diverged mount's first pass should run at all, uploading chunks
   that no snapshot of its own will name (Assumption 36).
+- Whether a mount should repair a directory entry that names no inode when
+  a snapshot holds one, as `unlink` does today in memory and `Rename` does
+  not (#144; Assumption 38).
 - Releasing `FS.mu` during the encode itself, which still holds the
   uncompressed snapshot under the lock (ADR 0007 *Context*).
 - Whether a `Sync` queued behind a commit in flight should run its first

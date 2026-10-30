@@ -10,7 +10,7 @@
 \* Go symbols that perform each action, and docs/vocabulary.md, V3, gives
 \* every name.
 \*
-\* Checked against d0fdcdf.
+\* Checked against 330c08c.
 \* Revised: 2026-10-24 -- ADR 0019 (#88): with the Fixes member
 \*   PruneBelowCurrent, a prune pass deletes only the keys that sort below the
 \*   one its commit swapped the root pointer to, and keeps the Retention newest
@@ -81,7 +81,9 @@
 \*   members the module describes commitLocked as it is at d75d14a, as
 \*   before. Nothing else moved. The rows ADR 0023 changes were checked
 \*   against coder's commit for it, d0fdcdf, on 2026-10-30 (ADR 0023
-\*   Assumption 23).
+\*   Assumption 23), and the fourteen that name commitSealed again against
+\*   330c08c, coder's follow-up that releases each of its holds of FS.mu
+\*   by defer, on 2026-10-30, which the line above names.
 \*
 \* Scope
 \*   - One bucket, and the mount processes in Mounts.
