@@ -49,6 +49,12 @@ which §4 pins path by path, is since that ADR the functions `seal`,
 with the holds ADR 0023 §2 names; the diverged refusal at its top is
 `Sync`'s, before the probe. The rule, the machine, the verdict, the model's
 `RootProbe` and the K-tests are unchanged.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0013 §7 now says, by the
+owner's decision, that "existing" means merged to `main`, recording the
+reading Assumption 31 made for `CommitProtocol_SwapNoETag` and its twin.
+Assumption 31 now cites that rule in place of its own argument, and drops
+the alternative it offered should the reading be refused. What was done to
+the two files, and why, is unchanged, and so is everything else.
 **Issue:** #5
 
 ## Context
@@ -1892,13 +1898,12 @@ Each is mine unless it says otherwise.
     completed. No error has been found.`, and
     `CommitProtocol_NoRootProbeNoETag` exit 12 with `Error: Invariant
     NoSelfDivergence is violated.`; the architect records what the runs
-    show. On ADR 0013 §7's rule that the flip is the only change an
-    existing configuration takes: the rule keeps the record of what was
-    checked stable once a configuration is on `main` and calibrated; these
-    two were written on this branch, were found short by the review before
-    merge, and are finished rather than changed. If that reading is
-    refused, the alternative is to leave both files as they were and have
-    §7 record the three members as left out inert. The twin's invariants
+    show. ADR 0013 §7's rule that the flip is the only change an existing
+    configuration takes did not bind them: existing means merged to `main`,
+    as that rule says since its revision of 2026-10-30, which records, by
+    the owner's decision, the reading first made here; these two were
+    written on this branch and found short by the review before merge, and
+    nothing on `main` had recorded their earlier form. The twin's invariants
     are not a drift: a MustFail configuration checks `TypeOK` and its one
     property and nothing else (ADR 0013 §7; `docs/tla/README.md`,
     *Configuration files*), so it cannot carry its parent's six; the other
