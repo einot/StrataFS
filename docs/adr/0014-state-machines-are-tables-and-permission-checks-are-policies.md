@@ -43,6 +43,14 @@ and a swap's failure no longer fires it. The block stays as the record, as
 `docs/adr/README.md` has it for a part a later ADR replaces;
 `mountDiverged`'s comment, `lost a swap to another writer; terminal`,
 stands (ADR 0022 Assumption 27); and no test changes for it.
+**Revised:** 2026-10-30 — cross-reference only, for ADR 0023, which decided
+#43. §7's and §8's `commitLocked` is since that ADR the functions `seal`,
+`commitSealed` and `applyLocked`, and the mode's one `Fire` is still
+`resolveRoot`'s, now made in a hold of `FS.mu` for writing that
+`resolveRoot` takes after its read, holding no lock across the read; §4's
+lock order gains `FS.commitMu` at its top, before the commit gate, and no
+machine gains a lock. The type, the table, the `String` values, `mutable()`'s
+mapping and every test this ADR pins are unchanged.
 **Issue:** #114
 
 ## Context

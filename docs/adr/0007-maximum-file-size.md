@@ -8,6 +8,14 @@ else changed.
 **Revised:** 2026-10-08 — cross-references only. The bullet *#64, #42 and
 #43* under *What this does not decide* now ends by saying that ADR 0012
 decides #64. Nothing else changed.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43.
+*Context*'s sentence that a commit holds the uncompressed snapshot in memory
+holding `FS.mu` stands, since the encode still runs under it; §4's sentence
+that a refused request's handler still waits behind a commit that holds
+`FS.mu`, and the bullet *#64, #42 and #43* under *What this does not
+decide*, describe the code before that ADR, since a commit now makes its
+store calls holding no `FS.mu`, and the wait is for its two bounded holds.
+The limit, its checks and everything else are unchanged.
 **Issue:** #55, #66
 
 ## Context

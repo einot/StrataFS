@@ -440,6 +440,20 @@ took effect, nothing changed, or another mount wrote, before the mount
 writes `fsinfo` again
 ([ADR 0022](adr/0022-a-failed-root-swap-is-settled-by-one-read-of-the-root-pointer.md)).
 
+Steps 3 and 4 hold no lock on the namespace, which is what step 1 exists
+for: the tree a consistency point will write is fixed when it is sealed, and
+the uploads, the swap, and any read that settles a swap in doubt run while
+the server keeps answering. What the swap decides depends only on the
+`fsinfo` ETag the point was sealed against, never on changes made since, so
+divergence detection is unchanged by them. A change made while a point is in
+flight is not in it: the mount stays dirty until a point that holds the
+change succeeds, so a point's success clears the dirty state only if nothing
+changed since its seal; a later point supersedes an earlier one by carrying
+everything the earlier sealed and the changes since; and one point of a
+mount runs at a time, a second request waiting for the first and then
+carrying only what it missed
+([ADR 0023](adr/0023-a-commit-seals-the-namespace-under-the-lock-and-uploads-outside-it.md)).
+
 ---
 
 ## 6. Snapshots
@@ -731,3 +745,4 @@ it is not this one.
 | [0020](adr/0020-a-mount-loads-the-root-pointer-and-its-etag-in-one-read.md) | A mount loads the root pointer and its ETag in one read: `loadOrInit` takes both from one store call, `GetWithETag`, never from a separate `Head`, so the ETag its first commit compare-and-swaps against is the ETag of the namespace it loaded, and a root pointer read that returns no ETag fails the mount | 5 — step 4's `If-Match` ETag, which the `fsinfo` load inherits; otherwise `internal/store`'s `Store` interface and `internal/blobfs`, which section 14 replaces |
 | [0021](adr/0021-the-unconditional-root-write-needs-the-operators-opt-in.md) | The unconditional root write needs the operator's opt-in: a conditional write of the root pointer that the store answers with 501 fails the commit, and nothing more is written, unless the mount was started with `-allow-unconditional-root`, which restores the unconditional write and asserts a single writer; `-check` fails such a store without the flag and passes it with a caveat with it; `fallbackAllowed` in `internal/blobfs` is the one place that decides it | 2 — the note on where this runs; 5 — step 4's swap, whose `fsinfo` form inherits that no store reply grants an unconditional write; otherwise `internal/blobfs` and `cmd/strata` |
 | [0022](adr/0022-a-failed-root-swap-is-settled-by-one-read-of-the-root-pointer.md) | A failed root-pointer swap is settled by one read of the root pointer, never taken for a second writer: a write of the root pointer whose reply did not establish its ETag leaves the mount's knowledge of it in doubt, a machine under `FS.mu`, and the mount writes the root pointer no further until one read shows it naming the attempt (adopted), the snapshot the namespace descends from (its ETag taken), or another writer's (diverged, with that writer named in the log); `classifyRoot` in `internal/blobfs` is the one place that decides it | 5 — step 4's failed CAS, whose `fsinfo` form inherits that divergence needs a positive showing from a read; otherwise `internal/blobfs`, which section 14 replaces |
+| [0023](adr/0023-a-commit-seals-the-namespace-under-the-lock-and-uploads-outside-it.md) | A commit seals the namespace under the lock and runs its store calls outside it: `FS.mu` is held only to encode the namespace and to apply an outcome, the commit gate only until the seal, and `FS.commitMu` serialises commits; a commit's success clears the dirty flag only if nothing changed since the seal, which `FS.changes` counts, so a change made while a commit is in flight is in the next commit; the swap and ADR 0022's verdicts read nothing a change writes | 5 — steps 3 and 4 hold no namespace lock, and a later consistency point supersedes an earlier one; otherwise `internal/blobfs`, which section 14 replaces |

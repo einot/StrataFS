@@ -10,7 +10,7 @@
 \* Go symbols that perform each action, and docs/vocabulary.md, V3, gives
 \* every name.
 \*
-\* Checked against 71fee34.
+\* Checked against 330c08c.
 \* Revised: 2026-10-24 -- ADR 0019 (#88): with the Fixes member
 \*   PruneBelowCurrent, a prune pass deletes only the keys that sort below the
 \*   one its commit swapped the root pointer to, and keeps the Retention newest
@@ -66,6 +66,24 @@
 \*   covers that the model does not reach. Without the member the module
 \*   describes commitLocked as it is at edcfc15, as before. Nothing else
 \*   moved.
+\* Revised: 2026-10-30 -- ADR 0023 (#43): with the Fixes member
+\*   UnlockedCommit, a commit's store calls run holding no FS.mu and no
+\*   commit gate, so Mutate is enabled while a commit is in flight (InFlight;
+\*   R4 rewritten), and commits are serialised by FS.commitMu rather than the
+\*   gate (R5 rewritten); with the member ClearIfUnchanged, Committed clears
+\*   nsDirty only if nothing changed since the seal, which changedSinceSeal
+\*   records and PutSnapshot resets (R15). The ghost uncommitted and the
+\*   property DirtyUntilCommitted say what the guard keeps: a mount that holds
+\*   a change no acknowledged commit includes knows it is dirty. R13 and R14
+\*   are rewritten for the probe's read holding no lock, R16 says why each
+\*   apply folds into the store call before it, J21 to J24 are added, and the
+\*   Scope and Leaves-out lists name FS.commitMu and the count. Without the
+\*   members the module describes commitLocked as it is at d75d14a, as
+\*   before. Nothing else moved. The rows ADR 0023 changes were checked
+\*   against coder's commit for it, d0fdcdf, on 2026-10-30 (ADR 0023
+\*   Assumption 23), and the fourteen that name commitSealed again against
+\*   330c08c, coder's follow-up that releases each of its holds of FS.mu
+\*   by defer, on 2026-10-30, which the line above names.
 \*
 \* Scope
 \*   - One bucket, and the mount processes in Mounts.
@@ -86,10 +104,20 @@
 \*   - Divergence (Diverge).
 \*   - Each mount's prune passes: StartPrune, PruneList, PruneDelete and
 \*     PruneEnd.
+\*   - A change made while a commit is in flight (ADR 0023): with
+\*     UnlockedCommit, Mutate between the seal and the commit's end, and
+\*     whether the commit's success leaves the namespace dirty
+\*     (ClearIfUnchanged, changedSinceSeal, DirtyUntilCommitted).
 \*   - Crashes.
 \*
 \* Leaves out
 \*   - File data, the commit gate and its settle pass: FileData's.
+\*   - FS.commitMu, and the gate's release at the seal (ADR 0023 section 2,
+\*     section 4): the serialisation they give is R5's assumption, one pc per
+\*     mount, and what they cost a size change or a queued Sync is latency,
+\*     which no property here states.
+\*   - FS.changes as a count: here changedSinceSeal is the one bit the guard
+\*     reads, whether the count moved since the seal (J23).
 \*   - The write budget, and NFS acknowledgements: NfsDurability's.
 \*   - A read of the root pointer that returns no ETag at load, which with
 \*     AtomicLoad makes New fail (ADR 0020 section 2). Here every root
@@ -133,10 +161,17 @@
 \*        rootETag[m], which Go does at the end of loadOrInit. Nothing reads
 \*        FS.rootETag before New returns.
 \*   R3.  mutable() is folded into Mutate (ADR 0013 Assumption 9).
-\*   R4.  Mutate is enabled only at "Ready", because FS.mu is held across
-\*        commitLocked (#43).
-\*   R5.  A mount runs one commit at a time, since the commit gate
-\*        serialises commit phases.
+\*   R4.  Without UnlockedCommit, Mutate is enabled only at "Ready", because
+\*        FS.mu was held across commitLocked at d75d14a (#43). With it, Mutate
+\*        is also enabled while a commit is in flight (InFlight: after the
+\*        seal, until the commit ends), since the commit's store calls hold
+\*        no FS.mu (ADR 0023 section 1). Either way it is enabled only where
+\*        it changes something the model tracks: ~nsDirty at "Ready", and
+\*        ~changedSinceSeal in flight, since a further change alters neither.
+\*   R5.  A mount runs one commit at a time: at d75d14a the commit gate
+\*        serialised commit phases, and since ADR 0023 FS.commitMu serialises
+\*        commits, held by Sync from after its first pass until it returns
+\*        (ADR 0023 section 4). Either way one pc per mount describes it.
 \*   R6.  With ChunksFirst, Flush folds into PutSnapshot. No step of this
 \*        model reads or deletes a chunk, and uploads only grow chunks, which
 \*        harms no invariant. Folding also drops early flushes (Commit and
@@ -188,15 +223,50 @@
 \*        between a failed write and the read, and another mount or this
 \*        mount's prune goroutine may act between them, which is exactly what
 \*        the verdict has to survive. classifyRoot and the Fire that follows
-\*        fold into the read: they touch only state FS.mu protects, which
-\*        commitLocked holds throughout (R4), so the read is the one access
-\*        outside that protection.
-\*   R14. At the top of a commit the read runs in the same hold as the
-\*        snapshot Put that follows it, and the model keeps them as two steps
-\*        from "Ready" with nsDirty set, which only keeps Mutate out (R4, and
-\*        Mutate needs ~nsDirty), while other mounts and the prune goroutine
-\*        may act between them, as they may in Go between any two store calls.
-\*        On ProbeFailed at "Ready" nothing moves, which is a stuttering step.
+\*        fold into the read: at d75d14a they touch only state FS.mu protects,
+\*        which commitLocked holds throughout; since ADR 0023 resolveRoot makes
+\*        the read holding no lock and applies the verdict in a hold of FS.mu
+\*        of its own, and the fold stands by R16, since the fields the verdict
+\*        reads and writes are written only by a commit's apply or a probe,
+\*        which FS.commitMu serialises, so nothing moves them between the
+\*        read and the hold (ADR 0023 section 5).
+\*   R14. At the top of a commit the read and the snapshot Put that follows it
+\*        are two steps from "Ready" with nsDirty set, which keeps Mutate out
+\*        (R4: at "Ready" Mutate needs ~nsDirty, and the mount is not yet in
+\*        flight), while other mounts and the prune goroutine may act between
+\*        them, as they may in Go between any two store calls. At d75d14a both
+\*        ran in one hold of FS.mu; since ADR 0023 the read runs before the
+\*        gate is taken, holding nothing, and the seal in its own hold, and a
+\*        change between them in Go is before the seal, so the model's "Ready"
+\*        with nsDirty already set describes it. On ProbeFailed at "Ready"
+\*        nothing moves, which is a stuttering step.
+\*   R15. With UnlockedCommit, the seal, the hold of FS.mu in which seal
+\*        encodes the namespace and copies rootETag and changes, folds into
+\*        PutSnapshot, the store call after it (ADR 0023 section 2). A change
+\*        between the seal and the Put in Go maps to a Mutate after
+\*        PutSnapshot here: the change touches no key, and the Put reads no
+\*        field the change writes, so the state after both is the same either
+\*        way, with changedSinceSeal set and the snapshot holding the
+\*        namespace as sealed. Every branch of PutSnapshot resets
+\*        changedSinceSeal, since the seal precedes the Put whether or not the
+\*        Put is applied or refused.
+\*   R16. With UnlockedCommit, each apply, the hold of FS.mu in which
+\*        commitSealed fires a machine and applyLocked runs the success path,
+\*        or in which resolveRoot applies its verdict, folds into the store
+\*        call before it: the swap, the fallback's Head or the probe's read.
+\*        The fields the apply writes, epoch, rootETag, rootSnapshot, doubtKey,
+\*        rootKnowledge, mode, nsDirty and the prune pass, are written by no
+\*        other goroutine while the commit is in flight, since only a commit's
+\*        apply or a probe writes them and FS.commitMu serialises both. The
+\*        one mount-local step that can fall between the call's return and
+\*        the apply is a change, which writes the inode table, FS.dirty and
+\*        FS.changes: it commutes with the call, which touches a key and reads
+\*        a copy made at the seal, so it moves before the call, and the guard
+\*        then reads the count after it, which is the order the model keeps
+\*        (a Mutate step before SwapOK sets changedSinceSeal, which Committed
+\*        reads). The failure-site adoption is two holds in Go, resolveRoot's
+\*        and applyLocked's (ADR 0023 section 5); a change between them moves
+\*        before the read by the same argument.
 \*
 \* Assumptions (judgement calls, not requirements)
 \*   J1.  Commit ids are lineage ids, [writer, epoch]. They are unique,
@@ -356,6 +426,37 @@
 \*        commit that follows. A clean in-doubt mount is unreachable, since
 \*        every path to "InDoubt" leaves nsDirty set, so NextStep's "Probe"
 \*        needs nsDirty as a commit does.
+\*   J21. UnlockedCommit and ClearIfUnchanged are two members (ADR 0023
+\*        Assumption 12). One could not show the guard load-bearing: removing
+\*        it gives the locked code, in which every property holds. So the
+\*        atomicity and the guard are separate, CommitProtocol_NoClearIfUnchanged
+\*        keeps the first and removes the second, and no MustFail
+\*        configuration removes UnlockedCommit, since it fixes a latency that
+\*        no invariant states; the configuration that lacks it is the existing
+\*        MustHold one of the same bounds, as J18 reads ADR 0013 section 7 for
+\*        a change no property tells apart.
+\*   J22. DirtyUntilCommitted states the guard's purpose through the ghost
+\*        uncommitted (ADR 0023 Assumption 13): a change the mount holds that
+\*        no acknowledged commit includes keeps nsDirty set, so a later Sync
+\*        commits it. The five older properties do not see the harm, since
+\*        NoLostAck is about acknowledged commits and Mutate adds nothing to
+\*        base. With ClearIfUnchanged, nsDirty and uncommitted are equal in
+\*        every reachable state of a writable mount; without it they differ
+\*        after one Committed with changedSinceSeal set. Configurations written
+\*        before ADR 0023 do not list the property, being append-only (ADR
+\*        0013 section 7), and it holds in each of them, since without
+\*        UnlockedCommit changedSinceSeal is never set.
+\*   J23. changedSinceSeal is a boolean standing for FS.changes # s.changes,
+\*        since the guard reads nothing else of the count (ADR 0023
+\*        Assumption 14). InFlight needs ChunksFirst, since the seal is the
+\*        encode before the snapshot Put, which is the commit's first call
+\*        only in that order; every configuration has it.
+\*   J24. Only one MustFail configuration shows the guard, though Committed
+\*        also runs on the failure-site adoption (ProbeOurs at "Probe"): that
+\*        route is five steps where the swap's is four, and TLC reports the
+\*        shortest, so a configuration meant for the adoption would report
+\*        the swap's route. The adoption's two holds in Go are pinned by test
+\*        and by review (ADR 0023 section 11, Assumption 13).
 
 EXTENDS Naturals, FiniteSets
 
@@ -422,9 +523,24 @@ CONSTANTS
 \*     descends from (its ETag taken), or another key (the mount diverges).
 \*     Without it commitLocked keeps its old ETag after such a write and
 \*     diverges on store.ErrPrecondition, as at edcfc15.
+\*   UnlockedCommit: ADR 0023 sections 1, 2 and 4. A commit seals the
+\*     namespace under FS.mu, then makes every store call, the snapshot Put,
+\*     the swap, the probe's read, the reclaim and the fallback, holding
+\*     neither FS.mu nor the commit gate, and applies the outcome in a later
+\*     hold; FS.commitMu serialises commits. So a change can be made while a
+\*     commit is in flight (Mutate, InFlight). Without it FS.mu is held across
+\*     the whole commit, as commitLocked held it at d75d14a, and no change
+\*     falls in the flight.
+\*   ClearIfUnchanged: ADR 0023 section 3. A commit's success clears the
+\*     dirty flag only if nothing changed since the seal: applyLocked sets
+\*     FS.dirty to FS.changes # s.changes, and a change made during the
+\*     flight is in the next commit. Without it success clears the flag
+\*     unconditionally, as commitLocked's success path did; without
+\*     UnlockedCommit it is inert.
 
 AllFixes  == {"IfNoneMatchInit", "Nonce", "ChunksFirst", "ReadOnlyFence",
-              "PruneBelowCurrent", "AtomicLoad", "FallbackOptIn", "RootProbe"}
+              "PruneBelowCurrent", "AtomicLoad", "FallbackOptIn", "RootProbe",
+              "UnlockedCommit", "ClearIfUnchanged"}
 AllFaults == {"SwapReplyLost", "SwapFailed", "SwapConflict409", "SwapNoETag",
               "PutFailed", "SnapshotReplyLost", "FallbackReplyLost",
               "ProbeFailed"}
@@ -462,6 +578,8 @@ VARIABLES
   doubtKey,      \* FS.doubtKey: the attempt in doubt, or NoKey
   rootSnapshot,  \* FS.rootSnapshot: the key the root pointer named when
                  \* rootETag was last set, or NoKey
+  changedSinceSeal, \* whether a change was made since the seal of the commit
+                 \* in flight: FS.changes # s.changes (ADR 0023; J23)
   \* Each mount's prune pass.
   pruning,       \* "Idle", "Listing" or "Deleting"; FS.pruning is the last two
   pruneCurrent,  \* pruneSnapshots' current: the key the pass's commit swapped
@@ -472,6 +590,8 @@ VARIABLES
   used,          \* snapshot keys a write that took effect has named
   overtaken,     \* another mount wrote the root since m last set rootETag[m]
   roWrites,      \* read-only mounts a write call of which reached the bucket
+  uncommitted,   \* the mount holds a change no acknowledged commit includes
+                 \* (ADR 0023; J22)
   crashes        \* Crash steps taken so far
 
 -----------------------------------------------------------------------------
@@ -574,6 +694,14 @@ NextStep(m) ==
            ELSE "None"
     ELSE pc[m]
 
+\* A commit of m is in flight: sealed, and not yet ended. With ChunksFirst the
+\* seal is the encode before the snapshot Put (R15), so the flight runs from
+\* the Put's return to the commit's end, through the swap, the probe at the
+\* failure site and the fallback's Head (ADR 0023 section 2; J23).
+InFlight(m) ==
+  /\ "ChunksFirst" \in Fixes
+  /\ pc[m] \in {"Swap", "Probe", "FallbackHead"}
+
 \* Whether the bucket would apply m's swap to the root pointer naming k. An
 \* empty rootETag is If-None-Match (IfNoneMatchInit, or unconditional
 \* without it: Assumption J8); any other is If-Match.
@@ -585,9 +713,9 @@ SwapCondition(m, k) ==
 
 BucketVars == <<bucketRoot, snapshots, chunks>>
 MountVars  == <<pc, mode, rootETag, epoch, nsDirty, attempt, rpSnapshot, base,
-                rootKnowledge, doubtKey, rootSnapshot>>
+                rootKnowledge, doubtKey, rootSnapshot, changedSinceSeal>>
 PruneVars  == <<pruning, pruneCurrent, pruneDoomed>>
-GhostVars  == <<acked, used, overtaken, roWrites>>
+GhostVars  == <<acked, used, overtaken, roWrites, uncommitted>>
 Vars       == <<BucketVars, MountVars, PruneVars, GhostVars, crashes>>
 
 \* A Put, PutIfMatch or Delete call of m's reaches the bucket, whether or not
@@ -609,7 +737,9 @@ CommitFails(m, k) ==
 \* rootSwapUnknown on FS.rootKnowledge after a write of the root pointer
 \* whose reply did not establish its ETag, with doubtKey recording the
 \* attempt. The read that settles it is due next (ADR 0022 sections 2 to 4).
-\* Go (trace.tsv): FS.commitLocked.
+\* Since ADR 0023 the Fire is made in a hold of FS.mu of commitSealed's own,
+\* after the store call whose reply raised the doubt (R16).
+\* Go (trace.tsv): FS.commitSealed.
 SwapUnknown(m, k) ==
   /\ rootKnowledge' = [rootKnowledge EXCEPT ![m] = "InDoubt"]
   /\ doubtKey' = [doubtKey EXCEPT ![m] = k]
@@ -663,14 +793,21 @@ StartPrune(m, k) ==
          /\ UNCHANGED pruneDoomed
     ELSE UNCHANGED PruneVars
 
-\* commitLocked's success path, with the root pointer's new ETag et. Since
-\* ADR 0022 it also records the key the root pointer now names, which the
-\* probe's verdict compares against (J19).
+\* The success path of a commit, with the root pointer's new ETag et:
+\* commitLocked's at d75d14a, applyLocked's since ADR 0023. Since ADR 0022 it
+\* also records the key the root pointer now names, which the probe's verdict
+\* compares against (J19). With ClearIfUnchanged it clears nsDirty only if
+\* nothing changed since the seal (ADR 0023 section 3); without it,
+\* unconditionally. Either way the ghost records whether the mount still holds
+\* a change no acknowledged commit includes (J22).
 Committed(m, k, et) ==
   /\ epoch' = [epoch EXCEPT ![m] = k.epoch]
   /\ rootETag' = [rootETag EXCEPT ![m] = et]
   /\ rootSnapshot' = [rootSnapshot EXCEPT ![m] = k]
-  /\ nsDirty' = [nsDirty EXCEPT ![m] = FALSE]
+  /\ nsDirty' = [nsDirty EXCEPT ![m] =
+                   IF "ClearIfUnchanged" \in Fixes THEN changedSinceSeal[m]
+                                                   ELSE FALSE]
+  /\ uncommitted' = [uncommitted EXCEPT ![m] = changedSinceSeal[m]]
   /\ base' = [base EXCEPT ![m] = @ \cup {CommitIdOf(m, k)}]
   /\ acked' = acked \cup {CommitIdOf(m, k)}
   /\ StartPrune(m, k)
@@ -682,7 +819,7 @@ Committed(m, k, et) ==
 
 \* FallbackPut: commitLocked's unconditional Put of the root pointer after
 \* store.ErrUnsupported, merged with SwapUnsupported (R7).
-\* Go (trace.tsv): FS.commitLocked; ReadOnly.Put; S3.Put.
+\* Go (trace.tsv): FS.commitSealed; ReadOnly.Put; S3.Put.
 FallbackPut(m, k) ==
   /\ WriteRoot(m, k)
   /\ overtaken' = [x \in Mounts |-> IF x = m THEN overtaken[m] ELSE TRUE]
@@ -709,6 +846,8 @@ TypeOK ==
   /\ DOMAIN rootKnowledge = Mounts
   /\ DOMAIN doubtKey = Mounts
   /\ DOMAIN rootSnapshot = Mounts
+  /\ DOMAIN changedSinceSeal = Mounts
+  /\ DOMAIN uncommitted = Mounts
   /\ DOMAIN pruning = Mounts
   /\ DOMAIN pruneCurrent = Mounts
   /\ DOMAIN pruneDoomed = Mounts
@@ -727,6 +866,8 @@ TypeOK ==
        /\ rootKnowledge[m] \in {"Known", "InDoubt"}
        /\ doubtKey[m] \in Keys \cup {NoKey}
        /\ rootSnapshot[m] \in Keys \cup {NoKey}
+       /\ changedSinceSeal[m] \in BOOLEAN
+       /\ uncommitted[m] \in BOOLEAN
        /\ pruning[m] \in {"Idle", "Listing", "Deleting"}
        /\ pruneCurrent[m] \in Keys \cup {NoKey}
        /\ pruneDoomed[m] \subseteq Keys
@@ -758,6 +899,8 @@ Init ==
   /\ rpSnapshot = [m \in Mounts |-> NoKey]
   /\ rootKnowledge = [m \in Mounts |-> "Known"]
   /\ doubtKey = [m \in Mounts |-> NoKey]
+  /\ changedSinceSeal = [m \in Mounts |-> FALSE]
+  /\ uncommitted = [m \in Mounts |-> FALSE]
   /\ pruning = [m \in Mounts |-> "Idle"]
   /\ pruneCurrent = [m \in Mounts |-> NoKey]
   /\ pruneDoomed = [m \in Mounts |-> {}]
@@ -808,8 +951,8 @@ GetRoot(m) ==
        ELSE /\ pc' = [pc EXCEPT ![m] = "HeadRoot"]
             /\ UNCHANGED <<rootETag, overtaken>>
   /\ UNCHANGED <<BucketVars, mode, epoch, nsDirty, attempt, base,
-                 rootKnowledge, doubtKey, PruneVars, acked, used, roWrites,
-                 crashes>>
+                 rootKnowledge, doubtKey, changedSinceSeal, PruneVars, acked,
+                 used, roWrites, uncommitted, crashes>>
 
 \* RefuseEmpty: loadOrInit's not-found branch on a read-only mount, which
 \* makes New fail, having written nothing (ADR 0011 section 2).
@@ -821,7 +964,7 @@ RefuseEmpty(m) ==
   /\ pc' = [pc EXCEPT ![m] = "Failed"]
   /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty, attempt,
                  rpSnapshot, base, rootKnowledge, doubtKey, rootSnapshot,
-                 PruneVars, GhostVars, crashes>>
+                 changedSinceSeal, PruneVars, GhostVars, crashes>>
 
 \* InitEmpty: loadOrInit's not-found branch on a writable mount, calling
 \* initEmpty, which sets epoch 0, an empty rootETag and no root snapshot, and
@@ -839,7 +982,8 @@ InitEmpty(m) ==
   /\ nsDirty' = [nsDirty EXCEPT ![m] = FALSE]
   /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
   /\ UNCHANGED <<BucketVars, mode, attempt, rpSnapshot, rootKnowledge,
-                 doubtKey, PruneVars, acked, used, roWrites, crashes>>
+                 doubtKey, changedSinceSeal, PruneVars, acked, used, roWrites,
+                 uncommitted, crashes>>
 
 \* HeadRoot: without AtomicLoad, loadOrInit's Head of the root pointer, whose
 \* ETag becomes FS.rootETag (R2). Another writer's swap between GetRoot and
@@ -854,8 +998,8 @@ HeadRoot(m) ==
   /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
   /\ pc' = [pc EXCEPT ![m] = "GetSnapshot"]
   /\ UNCHANGED <<BucketVars, mode, epoch, nsDirty, attempt, rpSnapshot, base,
-                 rootKnowledge, doubtKey, rootSnapshot, PruneVars, acked,
-                 used, roWrites, crashes>>
+                 rootKnowledge, doubtKey, rootSnapshot, changedSinceSeal,
+                 PruneVars, acked, used, roWrites, uncommitted, crashes>>
 
 \* GetSnapshot: loadOrInit's Get of the snapshot the root pointer named, and
 \* decodeSnapshot. A missing snapshot makes New fail with its "read snapshot"
@@ -871,26 +1015,37 @@ GetSnapshot(m) ==
        ELSE /\ pc' = [pc EXCEPT ![m] = "Failed"]
             /\ UNCHANGED <<base, epoch>>
   /\ UNCHANGED <<BucketVars, mode, rootETag, nsDirty, attempt, rootKnowledge,
-                 doubtKey, rootSnapshot, PruneVars, GhostVars, crashes>>
+                 doubtKey, rootSnapshot, changedSinceSeal, PruneVars,
+                 GhostVars, crashes>>
 
 -----------------------------------------------------------------------------
 \* Namespace changes.
 
 \* Mutate: mutable(), folded with the hold of FS.mu in which a change sets
-\* FS.dirty (R3, R4). mutable() reads the mode alone: a mount whose root
-\* pointer is in doubt still accepts changes (ADR 0022 section 6).
-\* Go (trace.tsv): FS.mutable; FS.SetAttr; FS.createEntry; FS.unlink;
-\* FS.Rename; FS.bufferWrite; FS.truncate.
+\* FS.dirty and, since ADR 0023, advances FS.changes through markDirty (R3,
+\* R4). mutable() reads the mode alone: a mount whose root pointer is in doubt
+\* still accepts changes (ADR 0022 section 6). At "Ready" it is enabled while
+\* the namespace is clean; with UnlockedCommit also while a commit is in
+\* flight and nothing has changed since its seal, which it then records, so
+\* that the commit's success leaves the namespace dirty (ADR 0023 section 3).
+\* The ghost records that the mount now holds a change no acknowledged commit
+\* includes (J22).
+\* Go (trace.tsv): FS.mutable; FS.markDirty; FS.SetAttr; FS.createEntry;
+\* FS.unlink; FS.Rename; FS.bufferWrite; FS.truncate.
 Mutate(m) ==
-  /\ pc[m] = "Ready"
   /\ Mutable(m)
-  /\ ~nsDirty[m]
+  /\ \/ (pc[m] = "Ready" /\ ~nsDirty[m])
+     \/ ("UnlockedCommit" \in Fixes /\ InFlight(m) /\ ~changedSinceSeal[m])
   /\ nsDirty' = [nsDirty EXCEPT ![m] = TRUE]
+  /\ changedSinceSeal' = [changedSinceSeal EXCEPT ![m] =
+                            IF InFlight(m) THEN TRUE ELSE @]
+  /\ uncommitted' = [uncommitted EXCEPT ![m] = TRUE]
   /\ UNCHANGED <<BucketVars, pc, mode, rootETag, epoch, attempt, rpSnapshot,
                  base, rootKnowledge, doubtKey, rootSnapshot, PruneVars,
-                 GhostVars, crashes>>
+                 acked, used, overtaken, roWrites, crashes>>
 
-\* StrayDirty: a path that dirties a read-only mount (Assumption J6).
+\* StrayDirty: a path that dirties a read-only mount (Assumption J6). It is
+\* no change of the mount's own, so the ghost is untouched.
 \* Go: none; trace.tsv has no row for it.
 StrayDirty(m) ==
   /\ pc[m] = "Ready"
@@ -898,23 +1053,27 @@ StrayDirty(m) ==
   /\ ~nsDirty[m]
   /\ nsDirty' = [nsDirty EXCEPT ![m] = TRUE]
   /\ UNCHANGED <<BucketVars, pc, mode, rootETag, epoch, attempt, rpSnapshot,
-                 base, rootKnowledge, doubtKey, rootSnapshot, PruneVars,
-                 GhostVars, crashes>>
+                 base, rootKnowledge, doubtKey, rootSnapshot,
+                 changedSinceSeal, PruneVars, GhostVars, crashes>>
 
 -----------------------------------------------------------------------------
 \* Commits.
 
-\* PutSnapshot: commitLocked's refusal once diverged, its encode and nonce,
-\* and its Put of the snapshot. With ChunksFirst it includes Flush (R6).
-\* store.ReadOnly refuses the Put when the mount is fenced, and the call
-\* reaches nothing. Otherwise it reaches the bucket, and is not applied
-\* (PutFailed), is applied, or is applied and answers with an error
-\* (SnapshotReplyLost); each failure is commitLocked returning an error.
-\* commitLocked's refusal while a file is unsettled (ADR 0012 section 4) is
-\* FileData's. It is never due while the root pointer is in doubt (NextStep).
-\* Go (trace.tsv): FS.commitLocked; ReadOnly.Put; S3.Put.
+\* PutSnapshot: the seal, which at d75d14a is commitLocked's refusal once
+\* diverged, its encode and nonce, and since ADR 0023 is seal's encode, nonce
+\* and copies of rootETag and changes, with the diverged refusal Sync's
+\* (ADR 0023 section 2); then the Put of the snapshot (R15). With ChunksFirst
+\* it includes Flush (R6). store.ReadOnly refuses the Put when the mount is
+\* fenced, and the call reaches nothing. Otherwise it reaches the bucket, and
+\* is not applied (PutFailed), is applied, or is applied and answers with an
+\* error (SnapshotReplyLost); each failure is the commit returning an error.
+\* The refusal while a file is unsettled (ADR 0012 section 4) is FileData's.
+\* It is never due while the root pointer is in doubt (NextStep). Every
+\* branch resets changedSinceSeal, since the seal precedes the Put (R15).
+\* Go (trace.tsv): FS.seal; FS.commitSealed; ReadOnly.Put; S3.Put.
 PutSnapshot(m) ==
   /\ NextStep(m) = "PutSnapshot"
+  /\ changedSinceSeal' = [changedSinceSeal EXCEPT ![m] = FALSE]
   /\ \E k \in KeyFor(m) :
        \/ /\ Fenced(m)
           /\ CommitFails(m, k)
@@ -928,7 +1087,7 @@ PutSnapshot(m) ==
           /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty,
                          rpSnapshot, base, rootKnowledge, doubtKey,
                          rootSnapshot, PruneVars, acked, used, overtaken,
-                         crashes>>
+                         uncommitted, crashes>>
        \/ /\ ~Fenced(m)
           /\ WriteCall(m)
           /\ SnapshotEffect(m, k)
@@ -941,7 +1100,8 @@ PutSnapshot(m) ==
                                      IF k.epoch = 1 THEN NoKey ELSE k]
           /\ UNCHANGED <<bucketRoot, mode, rootETag, epoch, nsDirty,
                          rpSnapshot, base, rootKnowledge, doubtKey,
-                         rootSnapshot, PruneVars, acked, overtaken, crashes>>
+                         rootSnapshot, PruneVars, acked, overtaken,
+                         uncommitted, crashes>>
        \/ /\ ~Fenced(m)
           /\ "SnapshotReplyLost" \in Faults
           /\ WriteCall(m)
@@ -949,7 +1109,8 @@ PutSnapshot(m) ==
           /\ CommitFails(m, k)
           /\ UNCHANGED <<bucketRoot, mode, rootETag, epoch, nsDirty,
                          rpSnapshot, base, rootKnowledge, doubtKey,
-                         rootSnapshot, PruneVars, acked, overtaken, crashes>>
+                         rootSnapshot, PruneVars, acked, overtaken,
+                         uncommitted, crashes>>
 
 \* Flush: Sync's first pass and settle pass, flushOpen, and putChunk, as a
 \* step of its own only without ChunksFirst (Assumption J7).
@@ -963,12 +1124,16 @@ Flush(m) ==
   /\ attempt' = [attempt EXCEPT ![m] = NoKey]
   /\ UNCHANGED <<bucketRoot, snapshots, mode, rootETag, epoch, nsDirty,
                  rpSnapshot, base, rootKnowledge, doubtKey, rootSnapshot,
-                 PruneVars, acked, used, overtaken, crashes>>
+                 changedSinceSeal, PruneVars, acked, used, overtaken,
+                 uncommitted, crashes>>
 
-\* SwapOK: commitLocked's PutIfMatch succeeds with an ETag, then its success
-\* path and schedulePrune (R8). It is also V2's SwapOK event, "Known" to
-\* "Known", which changes no variable of the machine (ADR 0022 section 4).
-\* Go (trace.tsv): FS.commitLocked; S3.PutIfMatch; Local.PutIfMatch.
+\* SwapOK: the commit's PutIfMatch succeeds with an ETag, then its success
+\* path and schedulePrune (R8): commitLocked's at d75d14a, and since ADR 0023
+\* commitSealed's swap, made holding no lock, and applyLocked in the hold that
+\* follows (R16). It is also V2's SwapOK event, "Known" to "Known", which
+\* changes no variable of the machine (ADR 0022 section 4).
+\* Go (trace.tsv): FS.commitSealed; FS.applyLocked; S3.PutIfMatch;
+\* Local.PutIfMatch.
 SwapOK(m) ==
   /\ NextStep(m) = "Swap"
   /\ Capability \in {"Conditional", "Flaky"}
@@ -980,13 +1145,13 @@ SwapOK(m) ==
        /\ Committed(m, k, ETagOf(k, m))
   /\ WriteCall(m)
   /\ UNCHANGED <<snapshots, chunks, mode, rpSnapshot, rootKnowledge, doubtKey,
-                 crashes>>
+                 changedSinceSeal, crashes>>
 
 \* SwapReplyLost: the swap is applied, but an error is returned. With
 \* RootProbe the root is in doubt and the probe's read is due (Unresolved);
 \* without it commitLocked takes its "case err != nil" branch and keeps its
 \* rootETag.
-\* Go (trace.tsv): FS.commitLocked; S3.PutIfMatch; errorFor.
+\* Go (trace.tsv): FS.commitSealed; S3.PutIfMatch; errorFor.
 SwapReplyLost(m) ==
   /\ NextStep(m) = "Swap"
   /\ "SwapReplyLost" \in Faults
@@ -999,12 +1164,13 @@ SwapReplyLost(m) ==
        /\ Unresolved(m, k)
   /\ WriteCall(m)
   /\ UNCHANGED <<snapshots, chunks, mode, rootETag, epoch, nsDirty,
-                 rpSnapshot, rootSnapshot, base, PruneVars, acked, crashes>>
+                 rpSnapshot, rootSnapshot, base, changedSinceSeal, PruneVars,
+                 acked, uncommitted, crashes>>
 
 \* SwapFailed: the swap is not applied, and an error that is not typed is
 \* returned. With RootProbe the root is in doubt all the same, since the
 \* mount cannot tell this reply from a lost one (Unresolved).
-\* Go (trace.tsv): FS.commitLocked; S3.PutIfMatch; errorFor;
+\* Go (trace.tsv): FS.commitSealed; S3.PutIfMatch; errorFor;
 \* Local.PutIfMatch.
 SwapFailed(m) ==
   /\ NextStep(m) = "Swap"
@@ -1013,8 +1179,8 @@ SwapFailed(m) ==
   /\ \E k \in KeyFor(m) : Unresolved(m, k)
   /\ WriteCall(m)
   /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty, rpSnapshot,
-                 rootSnapshot, base, PruneVars, acked, used, overtaken,
-                 crashes>>
+                 rootSnapshot, base, changedSinceSeal, PruneVars, acked, used,
+                 overtaken, uncommitted, crashes>>
 
 \* SwapNoETag: the swap is applied and answers 200 with no ETag header, so
 \* S3.PutIfMatch returns "" (#103). With RootProbe the reply did not
@@ -1022,7 +1188,7 @@ SwapFailed(m) ==
 \* read is due (SwapUnknown; ADR 0022 section 4). Without it commitLocked
 \* stores the empty ETag on its success path, as at edcfc15, so its next
 \* swap is If-None-Match against a root pointer that exists and conflicts.
-\* Go (trace.tsv): FS.commitLocked; S3.PutIfMatch.
+\* Go (trace.tsv): FS.commitSealed; S3.PutIfMatch.
 SwapNoETag(m) ==
   /\ NextStep(m) = "Swap"
   /\ "SwapNoETag" \in Faults
@@ -1036,12 +1202,13 @@ SwapNoETag(m) ==
                                     IF x = m THEN overtaken[m] ELSE TRUE]
                  /\ SwapUnknown(m, k)
                  /\ UNCHANGED <<rootETag, epoch, nsDirty, rootSnapshot, base,
-                                acked, PruneVars>>
+                                acked, uncommitted, PruneVars>>
             ELSE /\ overtaken' = [x \in Mounts |-> x # m]
                  /\ Committed(m, k, NoETag)
                  /\ UNCHANGED <<rootKnowledge, doubtKey>>
   /\ WriteCall(m)
-  /\ UNCHANGED <<snapshots, chunks, mode, rpSnapshot, crashes>>
+  /\ UNCHANGED <<snapshots, chunks, mode, rpSnapshot, changedSinceSeal,
+                 crashes>>
 
 \* SwapConflict: store.ErrPrecondition, from errorFor's 412 or 409 or from
 \* Local's ETag check. With SwapConflict409 it may also come while the
@@ -1049,7 +1216,7 @@ SwapNoETag(m) ==
 \* the root is in doubt and the probe's read decides (SwapUnknown; ADR 0022
 \* section 1). Without it commitLocked fires mountDiverge here, which is
 \* Diverge, and a read-only mount's mode is left as it is (R11).
-\* Go (trace.tsv): FS.commitLocked; errorFor; Local.PutIfMatch.
+\* Go (trace.tsv): FS.commitSealed; errorFor; Local.PutIfMatch.
 SwapConflict(m) ==
   /\ NextStep(m) = "Swap"
   /\ Capability \in {"Conditional", "Flaky"}
@@ -1064,8 +1231,8 @@ SwapConflict(m) ==
                  /\ UNCHANGED <<rootKnowledge, doubtKey>>
   /\ WriteCall(m)
   /\ UNCHANGED <<BucketVars, rootETag, epoch, nsDirty, rpSnapshot,
-                 rootSnapshot, base, PruneVars, acked, used, overtaken,
-                 crashes>>
+                 rootSnapshot, base, changedSinceSeal, PruneVars, acked, used,
+                 overtaken, uncommitted, crashes>>
 
 \* SwapUnsupported: store.ErrUnsupported, from errorFor's 501 or from
 \* ReadOnly.PutIfMatch. store.ReadOnly refuses the swap when the mount is
@@ -1080,7 +1247,7 @@ SwapConflict(m) ==
 \* (FallbackReplyLost). With RootProbe either failure of that Put leaves the
 \* root in doubt, since S3.do retries it and it may have taken effect
 \* (Unresolved; ADR 0022 section 4); without it rootETag is left as it was.
-\* Go (trace.tsv): FS.commitLocked; FS.fallbackAllowed; errorFor;
+\* Go (trace.tsv): FS.commitSealed; FS.fallbackAllowed; errorFor;
 \* ReadOnly.PutIfMatch.
 SwapUnsupported(m) ==
   /\ NextStep(m) = "Swap"
@@ -1095,41 +1262,42 @@ SwapUnsupported(m) ==
           /\ snapshots' = [x \in DOMAIN snapshots \ {k} |-> snapshots[x]]
           /\ CommitFails(m, k)
           /\ UNCHANGED <<bucketRoot, chunks, acked, used, overtaken,
-                         rootKnowledge, doubtKey>>
+                         uncommitted, rootKnowledge, doubtKey>>
        \/ /\ ~Fenced(m)
           /\ FallbackAllowed
           /\ "PutFailed" \in Faults
           /\ WriteCall(m)
           /\ Unresolved(m, k)
-          /\ UNCHANGED <<BucketVars, acked, used, overtaken>>
+          /\ UNCHANGED <<BucketVars, acked, used, overtaken, uncommitted>>
        \/ /\ ~Fenced(m)
           /\ FallbackAllowed
           /\ WriteCall(m)
           /\ FallbackPut(m, k)
           /\ pc' = [pc EXCEPT ![m] = "FallbackHead"]
           /\ attempt' = [attempt EXCEPT ![m] = k]
-          /\ UNCHANGED <<snapshots, chunks, acked, rootKnowledge, doubtKey>>
+          /\ UNCHANGED <<snapshots, chunks, acked, uncommitted, rootKnowledge,
+                         doubtKey>>
        \/ /\ ~Fenced(m)
           /\ FallbackAllowed
           /\ "FallbackReplyLost" \in Faults
           /\ WriteCall(m)
           /\ FallbackPut(m, k)
           /\ Unresolved(m, k)
-          /\ UNCHANGED <<snapshots, chunks, acked>>
+          /\ UNCHANGED <<snapshots, chunks, acked, uncommitted>>
   /\ UNCHANGED <<mode, rootETag, epoch, nsDirty, rpSnapshot, rootSnapshot,
-                 base, PruneVars, crashes>>
+                 base, changedSinceSeal, PruneVars, crashes>>
 
 \* FallbackHead: the Head of the root pointer after the fallback's Put, then
 \* the success path. The Head may return another writer's ETag. It is also
 \* V2's SwapOK event, which changes no variable of the machine; a Head that
 \* fails is left out (Leaves out).
-\* Go (trace.tsv): FS.commitLocked.
+\* Go (trace.tsv): FS.commitSealed; FS.applyLocked.
 FallbackHead(m) ==
   /\ pc[m] = "FallbackHead"
   /\ overtaken' = [overtaken EXCEPT ![m] = FALSE]
   /\ Committed(m, attempt[m], bucketRoot.etag)
-  /\ UNCHANGED <<BucketVars, mode, rpSnapshot, rootKnowledge, doubtKey, used,
-                 roWrites, crashes>>
+  /\ UNCHANGED <<BucketVars, mode, rpSnapshot, rootKnowledge, doubtKey,
+                 changedSinceSeal, used, roWrites, crashes>>
 
 -----------------------------------------------------------------------------
 \* The probe (ADR 0022 section 3). Each action is one read of the root
@@ -1137,15 +1305,18 @@ FallbackHead(m) ==
 \* doubt: at pc "Probe", straight after the write that raised the doubt, or
 \* at "Ready" at the top of a later commit, before it writes anything
 \* (NextStep; R13, R14). The verdict is by the key the root pointer names,
-\* and the ETag the read returns is what the mount takes (J19).
+\* and the ETag the read returns is what the mount takes (J19). Since ADR
+\* 0023 the read is made holding no lock and the verdict applied in a hold of
+\* FS.mu of its own (R16); the failure site is commitSealed's call and the top
+\* of a commit Sync's.
 
 \* ProbeOurs: the root pointer names the attempt in doubt, so the write took
 \* effect, and the mount adopts it. At the failure site that is the success
 \* path whole, Committed, with StartPrune (R8); at the top of a later commit
 \* it adopts only, and the commit that follows writes the namespace as it
 \* stands (J20).
-\* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitLocked;
-\* S3.GetWithETag; Local.GetWithETag.
+\* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitSealed; FS.Sync;
+\* FS.applyLocked; S3.GetWithETag; Local.GetWithETag.
 ProbeOurs(m) ==
   /\ NextStep(m) = "Probe"
   /\ bucketRoot.key = doubtKey[m]
@@ -1158,8 +1329,10 @@ ProbeOurs(m) ==
             /\ rootETag' = [rootETag EXCEPT ![m] = bucketRoot.etag]
             /\ rootSnapshot' = [rootSnapshot EXCEPT ![m] = doubtKey[m]]
             /\ base' = [base EXCEPT ![m] = @ \cup {CommitIdOf(m, doubtKey[m])}]
-            /\ UNCHANGED <<pc, attempt, nsDirty, acked, PruneVars>>
-  /\ UNCHANGED <<BucketVars, mode, rpSnapshot, used, roWrites, crashes>>
+            /\ UNCHANGED <<pc, attempt, nsDirty, acked, uncommitted,
+                           PruneVars>>
+  /\ UNCHANGED <<BucketVars, mode, rpSnapshot, changedSinceSeal, used,
+                 roWrites, crashes>>
 
 \* ProbeUnchanged: the root pointer names the key the mount's namespace
 \* descends from, so the write did not take effect; the mount takes the root
@@ -1167,7 +1340,7 @@ ProbeOurs(m) ==
 \* next swap proceeds. At the failure site the commit fails, with no retry in
 \* line (ADR 0022 Assumption 7); at the top of a later commit the commit
 \* continues.
-\* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitLocked;
+\* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitSealed; FS.Sync;
 \* S3.GetWithETag; Local.GetWithETag; errorFor.
 ProbeUnchanged(m) ==
   /\ NextStep(m) = "Probe"
@@ -1181,13 +1354,14 @@ ProbeUnchanged(m) ==
        THEN CommitFails(m, doubtKey[m])
        ELSE UNCHANGED <<pc, attempt>>
   /\ UNCHANGED <<BucketVars, mode, epoch, nsDirty, rpSnapshot, rootSnapshot,
-                 base, PruneVars, acked, used, roWrites, crashes>>
+                 base, changedSinceSeal, PruneVars, acked, used, roWrites,
+                 uncommitted, crashes>>
 
 \* ProbeTheirs: the root pointer names neither, or is gone: another writer
 \* owns the bucket. The mount diverges (Diverge, R11), the machine stays
 \* "InDoubt", and the commit fails. The record that names the writer is
 \* Go's (ADR 0022 section 3).
-\* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitLocked;
+\* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitSealed; FS.Sync;
 \* S3.GetWithETag; Local.GetWithETag; errorFor.
 ProbeTheirs(m) ==
   /\ NextStep(m) = "Probe"
@@ -1198,14 +1372,14 @@ ProbeTheirs(m) ==
        THEN CommitFails(m, doubtKey[m])
        ELSE UNCHANGED <<pc, attempt>>
   /\ UNCHANGED <<BucketVars, rootKnowledge, doubtKey, rootSnapshot, rootETag,
-                 epoch, nsDirty, rpSnapshot, base, PruneVars, GhostVars,
-                 crashes>>
+                 epoch, nsDirty, rpSnapshot, base, changedSinceSeal,
+                 PruneVars, GhostVars, crashes>>
 
 \* ProbeFailed: the read fails, or returns a body the mount does not
 \* understand (J4), so nothing is decided: the root stays in doubt, the
 \* commit fails, and the next commit reads again before it writes anything.
 \* At "Ready" nothing moves (R14).
-\* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitLocked;
+\* Go (trace.tsv): FS.resolveRoot; classifyRoot; FS.commitSealed; FS.Sync;
 \* S3.GetWithETag; Local.GetWithETag; errorFor.
 ProbeFailed(m) ==
   /\ NextStep(m) = "Probe"
@@ -1214,8 +1388,8 @@ ProbeFailed(m) ==
        THEN CommitFails(m, doubtKey[m])
        ELSE UNCHANGED <<pc, attempt>>
   /\ UNCHANGED <<BucketVars, mode, rootETag, epoch, nsDirty, rpSnapshot, base,
-                 rootKnowledge, doubtKey, rootSnapshot, PruneVars, GhostVars,
-                 crashes>>
+                 rootKnowledge, doubtKey, rootSnapshot, changedSinceSeal,
+                 PruneVars, GhostVars, crashes>>
 
 -----------------------------------------------------------------------------
 \* Prune passes.
@@ -1251,7 +1425,7 @@ PruneDelete(m) ==
          /\ pruneDoomed' = [pruneDoomed EXCEPT ![m] = @ \ {k}]
   /\ WriteCall(m)
   /\ UNCHANGED <<bucketRoot, chunks, MountVars, pruning, pruneCurrent,
-                 acked, used, overtaken, crashes>>
+                 acked, used, overtaken, uncommitted, crashes>>
 
 \* PruneEnd: the goroutine's final hold of FS.mu, which clears FS.pruning
 \* (R10).
@@ -1270,7 +1444,9 @@ PruneEnd(m) ==
 \* section 4). The mount's memory and its prune goroutine are lost, every
 \* store call that took effect stays, and the restart is New, at
 \* loadOrInit's first read (Assumption J9). A root in doubt is forgotten
-\* with the rest: the restart loads whatever the bucket holds.
+\* with the rest: the restart loads whatever the bucket holds, and a change
+\* no commit carried is lost with the memory that held it, so the ghost is
+\* cleared with the flag.
 \* Go (trace.tsv): New.
 Crash(m) ==
   /\ crashes < MaxCrashes
@@ -1286,6 +1462,8 @@ Crash(m) ==
   /\ rootKnowledge' = [rootKnowledge EXCEPT ![m] = "Known"]
   /\ doubtKey' = [doubtKey EXCEPT ![m] = NoKey]
   /\ rootSnapshot' = [rootSnapshot EXCEPT ![m] = NoKey]
+  /\ changedSinceSeal' = [changedSinceSeal EXCEPT ![m] = FALSE]
+  /\ uncommitted' = [uncommitted EXCEPT ![m] = FALSE]
   /\ pruning' = [pruning EXCEPT ![m] = "Idle"]
   /\ pruneCurrent' = [pruneCurrent EXCEPT ![m] = NoKey]
   /\ pruneDoomed' = [pruneDoomed EXCEPT ![m] = {}]
@@ -1351,6 +1529,13 @@ ReadOnlyNeverWrites == roWrites = {}
 \* since it last set rootETag.
 NoSelfDivergence ==
   \A m \in Mounts : mode[m] = "Diverged" => overtaken[m]
+
+\* A mount that holds a change no acknowledged commit includes knows its
+\* namespace is dirty, so a later Sync commits it (ADR 0023 section 3; J22).
+\* Without ClearIfUnchanged, a commit's success clears the flag over a change
+\* made while it was in flight, and the change is carried by no commit.
+DirtyUntilCommitted ==
+  \A m \in Mounts : uncommitted[m] => nsDirty[m]
 
 -----------------------------------------------------------------------------
 \* State constraints.

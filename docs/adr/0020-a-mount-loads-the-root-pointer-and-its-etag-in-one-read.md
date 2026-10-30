@@ -27,6 +27,12 @@ it, `GetWithETag`, supplies the ETag before the mount swaps again, so
 Assumption 3's asymmetry, a refusal at mount and nothing at a swap, is
 closed; §2's refusal at mount stands. The rule, the Go change and the
 configurations here are unchanged.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43.
+`commitLocked`, whose success path §3 and §6 name, is since that ADR the
+functions `seal`, `commitSealed` and `applyLocked`, and the success path is
+`applyLocked`'s, setting what it set; the swap conditions on the ETag copied
+at the seal from `FS.rootETag`. The rule, the Go change and the
+configurations here are unchanged.
 **Issue:** #89
 
 ## Context

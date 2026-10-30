@@ -105,3 +105,4 @@ URL, and what was taken from it.
 | [0020](0020-a-mount-loads-the-root-pointer-and-its-etag-in-one-read.md) | A mount loads the root pointer and its ETag in one read | Accepted |
 | [0021](0021-the-unconditional-root-write-needs-the-operators-opt-in.md) | The unconditional root write needs the operator's opt-in | Accepted |
 | [0022](0022-a-failed-root-swap-is-settled-by-one-read-of-the-root-pointer.md) | A failed root-pointer swap is settled by one read of the root pointer, never taken for a second writer | Accepted |
+| [0023](0023-a-commit-seals-the-namespace-under-the-lock-and-uploads-outside-it.md) | A commit seals the namespace under the lock and runs its store calls outside it | Accepted |

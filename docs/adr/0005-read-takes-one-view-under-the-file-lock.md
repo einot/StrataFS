@@ -28,6 +28,14 @@ that a file an earlier build left larger than the limit can still reach an
 offset near 2^64, so the end of the range must still be computed so that it
 cannot wrap; the bullet on #55 under *What this does not decide* ends by
 saying that ADR 0007 decides it. Nothing else changed.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43. §6's
+two sentences that a commit holding `FS.mu` across its store calls can hold
+up a `SetAttr`, and a `Read`'s step 2 with the file's `openFile.mu` held, and
+the *Consequences* bullet that a flush can start its uploads later for the
+same reason, describe the code before that ADR: a commit now makes its store
+calls holding no `FS.mu`, and the wait is for its two bounded holds, the seal
+and the apply. The decision, the three steps and the invariants are
+unchanged.
 **Issue:** #41, #49
 
 ## Context

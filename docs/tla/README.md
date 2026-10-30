@@ -11,9 +11,10 @@ This file says what the directory holds, how to read it and how to run it.
 - **`CommitProtocol.tla`**: how a mount reads the root pointer, commits,
   settles a root pointer in doubt, prunes snapshots and diverges, against
   other mounts, failing store calls and crashes (ADR 0013 §1, item 1). It is
-  checked against `71fee34`.
-- **Its 40 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
-  twenty-six MustHold and fourteen MustFail. Every MustFail one removes a
+  checked against `330c08c`, coder's follow-up for ADR 0023, for every
+  action (ADR 0023 Assumption 23).
+- **Its 45 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
+  thirty MustHold and fifteen MustFail. Every MustFail one removes a
   fix the code has, one of them,
   `CommitProtocol_UnconditionalTwoWriters`, stating besides what ADR 0021's
   opt-in gives up; none shows an open defect. Thirteen of the MustHold ones
@@ -22,7 +23,12 @@ This file says what the directory holds, how to read it and how to run it.
   invariants they had (*MustHold and MustFail*); one more,
   `CommitProtocol_SwapNoETag`, was written MustHold with ADR 0022's fix for
   #103 in it, since one ADR showed and closed that defect, and
-  `CommitProtocol_NoRootProbeNoETag` shows the defect without it. Each
+  `CommitProtocol_NoRootProbeNoETag` shows the defect without it. Four,
+  `CommitProtocol_Unlocked` and its three siblings, were written MustHold
+  with ADR 0023's two members, `UnlockedCommit` and `ClearIfUnchanged`, for
+  #43, which is a latency and not a defect any property shows; and
+  `CommitProtocol_NoClearIfUnchanged` removes the guard and shows the change
+  it would lose (the module's J21). Each
   opens with a comment giving its expectation, its issue or the fix it
   removes, and the source of each `Fixes` member. One,
   `CommitProtocol_PruneTwoWriters`, also sets a state constraint,
@@ -66,11 +72,13 @@ Each module opens with a header comment that states:
   stand for a run of Go steps, and its **assumptions**: the judgement calls
   the model rests on, which no requirement made.
 
-`CommitProtocol.tla` has six `Revised:` lines: for ADR 0019's fix of #88,
+`CommitProtocol.tla` has seven `Revised:` lines: for ADR 0019's fix of #88,
 for ADR 0020's fix of #89, two for ADR 0021's fix of #91, the second from
-its review, one for ADR 0014 §7's conversion of the mount mode, and one for
+its review, one for ADR 0014 §7's conversion of the mount mode, one for
 ADR 0022's fix of #5 and #103, the root-pointer knowledge machine and its
-probe. Each action's comment names the Go symbols that `trace.tsv` gives it.
+probe, and one for ADR 0023's fix of #43, the commit's store calls off the
+lock and the guard on the dirty flag. Each action's comment names the Go
+symbols that `trace.tsv` gives it.
 
 Every module declares the constant `Fixes`, the set of fixes a configuration
 includes, and its actions consult it, so one module describes the code with
@@ -159,7 +167,12 @@ all three:
   invariants when it flips, and the flip may change nothing else (ADR 0013
   §7). A configuration written as MustHold lists every property its module
   defines, as the thirteen here do; review holds it to that, since the runner
-  cannot tell the two kinds apart.
+  cannot tell the two kinds apart. A property added later is listed by the
+  configurations written with or after its ADR, and not by those written
+  before it, which are append-only: `DirtyUntilCommitted`, which ADR 0023
+  added, is listed by `CommitProtocol_Unlocked` and its three siblings, and
+  holds in every older configuration, where the member it guards is absent
+  (the module's J22).
 - **A MustHold configuration with a state constraint has a twin.** A
   constraint stops TLC taking a step from a state that breaks it
   (*Sources*), so it narrows what a configuration checks inside its bounds,

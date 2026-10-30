@@ -39,6 +39,16 @@ text gains two lines for the behaviours the review found it omits
 (Assumption 19). `docs/vocabulary.md`'s `Faults` row names the two values
 that are this ADR's. The rule, the machine, the verdict, the model and the
 code are unchanged.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43, which
+§5, Assumption 22 and *What this does not decide* leave to it. `resolveRoot`
+now makes its read holding no lock and takes `FS.mu` for writing after it,
+for the verdict, the `Fire` and the fields it sets, in one hold; its
+signature, its verdicts and its records are as §3 pins them. `commitLocked`,
+which §4 pins path by path, is since that ADR the functions `seal`,
+`commitSealed` and `applyLocked`, and every path of §4 is `commitSealed`'s
+with the holds ADR 0023 §2 names; the diverged refusal at its top is
+`Sync`'s, before the probe. The rule, the machine, the verdict, the model's
+`RootProbe` and the K-tests are unchanged.
 **Issue:** #5
 
 ## Context

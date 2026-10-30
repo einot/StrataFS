@@ -50,6 +50,14 @@ ADR 0022 the `Sync` of its commit `c2` returns nil, not F3's error, because
 the 501 that took effect is adopted; its other assertions, no `Delete`, the
 root pointer naming the attempt's key, which exists, and the remount with
 `c1` and `c2`, stand (ADR 0022 §8, K12). Nothing else moved.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43, which
+§2 and Assumption 25 leave to it. The reclaim's read of the root pointer and
+its `Delete` of the attempt's key are since that ADR made holding neither
+`FS.mu` nor the commit gate, with the swap, the fallback's `Put` and `Head`
+and the probe, in `commitSealed`, which with `seal` and `applyLocked`
+replaces `commitLocked`; the reclaim's guard, its records and its error are
+as §2 has them. The rule, the flag and the configurations here are
+unchanged.
 **Issue:** #91
 
 ## Context
