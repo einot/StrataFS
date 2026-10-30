@@ -86,6 +86,7 @@ func (f *FS) loadOrInit(ctx context.Context) error {
 	f.epoch = snap.Epoch
 	f.fsid = rp.FSID
 	f.rootETag = etag
+	f.rootSnapshot = rp.Snapshot
 
 	if _, ok := f.inodes[rootInodeID]; !ok {
 		return errors.New("snapshot has no root inode")
@@ -120,6 +121,7 @@ func (f *FS) initEmpty(ctx context.Context) error {
 	f.epoch = 0
 	f.fsid = fsidFor(f.store.Name())
 	f.rootETag = "" // If-None-Match: * on first commit
+	f.rootSnapshot = ""
 
 	f.log.Info("initializing new filesystem", "bucket", f.store.Name())
 	return f.commitLocked(ctx)
@@ -186,11 +188,17 @@ func (f *FS) Sync(ctx context.Context) error {
 // changed a chunk list without the commit gate, and is logged as the bug it is
 // rather than committed as a silent exposure of removed bytes.
 //
-// It also refuses, storing nothing, once the mode is Diverged. It is the mode's
-// one writer: a swap that fails with store.ErrPrecondition fires Diverge, and
-// no other outcome of the swap touches the mode (ADR 0014 §7).
+// It also refuses, storing nothing, once the mode is Diverged. It never fires
+// on the mode itself: no swap's error alone shows another writer, so the mode
+// moves only in resolveRoot, on a read of the root pointer that shows one
+// (ADR 0014 §7; ADR 0022 §1, §2).
 //
-// TLA+: docs/tla/CommitProtocol.tla PutSnapshot, SwapOK, SwapReplyLost, SwapFailed, SwapConflict, SwapUnsupported, FallbackPut, FallbackHead, Diverge
+// Every write of the root pointer whose reply does not give the root
+// pointer's ETag leaves the root in doubt, and resolveRoot reads it once in
+// the same call. A read that decides nothing leaves the doubt for the next
+// commit, which settles it before it writes anything (ADR 0022 §3, §4).
+//
+// TLA+: docs/tla/CommitProtocol.tla PutSnapshot, SwapOK, SwapReplyLost, SwapFailed, SwapConflict, SwapNoETag, SwapUnsupported, FallbackPut, FallbackHead, SwapUnknown, ProbeOurs, ProbeUnchanged, ProbeTheirs, ProbeFailed
 func (f *FS) commitLocked(ctx context.Context) error {
 	if f.mode.State() == mountDiverged {
 		return errors.New("filesystem diverged: another writer committed to this bucket; remount to continue")
@@ -200,6 +208,22 @@ func (f *FS) commitLocked(ctx context.Context) error {
 			f.log.Error("commit refused: a truncated file is unsettled",
 				"inode", id, "epoch", f.epoch)
 			return fmt.Errorf("commit refused: inode %d is unsettled since a truncate, so the snapshot could name bytes it removed", id)
+		}
+	}
+
+	// A root in doubt is settled before anything is written, so that an
+	// in-doubt mount neither uploads a snapshot nor swaps against an ETag it
+	// cannot trust. Adoption here leaves f.dirty and the prune pass alone: the
+	// commit that follows writes the namespace as it stands, at the adopted
+	// epoch plus one (ADR 0022 §3, §4; Assumption 9).
+	if f.rootKnowledge.State() == rootInDoubt {
+		switch f.resolveRoot(ctx) {
+		case probeFailed:
+			// The read's error, if any, is in the record resolveRoot logged: its
+			// pinned signature returns the verdict alone.
+			return errors.New("commit refused: the root pointer is in doubt since an earlier write of it, and the read that would settle it decided nothing")
+		case probeTheirs:
+			return errCommitConflict
 		}
 	}
 
@@ -241,25 +265,42 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		return err
 	}
 
+	// A write of the root pointer whose reply gives its ETag leaves the root
+	// known. Every other outcome leaves it in doubt, and one read then decides
+	// it (ADR 0022 §1, §4). For such an outcome the cases below set what the
+	// commit returns when the read shows the root pointer unchanged and when it
+	// decides nothing; a read that shows ours is success, and one that shows
+	// theirs the conflict. oldErr is what the commit returned for the outcome
+	// before ADR 0022, and is returned again if the doubt cannot be raised, so
+	// that the mount is left as that code left it; nil there is the success
+	// path, as a reply without an ETag was then taken.
+	var (
+		doubt        bool
+		oldErr       error
+		unchangedErr error
+		failedErr    error
+	)
 	newETag, err := f.store.PutIfMatch(ctx, rootKey, rpBody, f.rootETag)
 	switch {
+	case err == nil && newETag != "":
+		// The root is known: the success path follows.
+	case err == nil:
+		// Applied, with no ETag in the reply (#103). Keeping "" would make the
+		// next swap create-only against a root pointer that exists, which fails
+		// and diverges the mount with no other writer (ADR 0022 §5).
+		doubt = true
+		unchangedErr = errNoETagUnchanged
+		failedErr = errNoETagInDoubt
 	case errors.Is(err, store.ErrPrecondition):
-		// Someone else moved the root pointer. Our in-memory tree is built on a
-		// namespace that is no longer current, so continuing would discard
-		// their work. Refuse to write any further rather than corrupt.
-		//
-		// A Fire that fails changes nothing else: the swap failed whatever the
-		// mode was, so the conflict is still logged and returned. No build
-		// reaches it today, since a read-only mount's swap answers
-		// store.ErrUnsupported and a diverged one is refused above (ADR 0014
-		// §3, §7).
-		if from, _, ferr := f.mode.Fire(mountDiverge); ferr != nil {
-			f.log.Error("mount mode: illegal transition",
-				"machine", mountModes.Name(), "from", from.String(), "event", mountDiverge.String(), "err", ferr)
-		}
-		f.log.Error("commit conflict: another writer owns this bucket",
-			"our_epoch", f.epoch, "attempted", epoch)
-		return errors.New("commit conflict: another writer owns this bucket; remount to continue")
+		// A 412 or a 409 does not say who holds the root pointer: a 409 can
+		// answer a request that merely met another, and a store or a proxy can
+		// refuse a condition that held. So no refusal alone diverges the mount;
+		// the read that follows does, if it shows another writer's root pointer
+		// (ADR 0022 §1; Assumption 2).
+		doubt = true
+		oldErr = errCommitConflict
+		unchangedErr = fmt.Errorf("swap root pointer: %w", err)
+		failedErr = fmt.Errorf("swap root pointer: refused, and the root pointer is in doubt until a read of it succeeds: %w", err)
 	case errors.Is(err, store.ErrUnsupported) && !f.fallbackAllowed():
 		// One 501 says nothing about the next request, and only the operator
 		// can assert that no second writer exists, so without the opt-in the
@@ -276,12 +317,20 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		// changes neither the error returned nor any field of the FS. It is the
 		// module's R12 (ADR 0021 §2, the reclaim; Assumptions 21, 22, 26).
 		//
+		// Only a read that positively shows a root pointer other than the
+		// attempt's confirms that the 501 changed nothing. Any other read leaves
+		// the root in doubt, settled by the probe that follows, so that a 501
+		// that took effect is adopted rather than diverging the mount at its
+		// next swap. The reclaim's own read stays a Get (ADR 0022 §4, §5;
+		// Assumption 11).
+		//
 		// The read and the Delete run under the locks commitLocked holds, as
 		// its other store calls do. #43 records those calls as a defect to fix
 		// for all of them, and when it is fixed the reclaim moves off the lock
 		// with them (ADR 0021 Assumption 25).
 		f.log.Error("commit refused: the store does not support conditional writes, and this mount may not write the root pointer unconditionally",
 			"our_epoch", f.epoch, "attempted", epoch)
+		refusal := fmt.Errorf("swap root pointer: the store does not support conditional writes, and this mount may not write the root pointer unconditionally: %w", err)
 		raw, rerr := f.store.Get(ctx, rootKey)
 		var cur rootPointer
 		if rerr == nil {
@@ -301,10 +350,10 @@ func (f *FS) commitLocked(ctx context.Context) error {
 				// The orphan stays for a later prune pass (ADR 0019 §3).
 				f.log.Debug("could not reclaim a refused commit's snapshot", "key", key, "err", derr)
 			}
+			return refusal
 		case understood:
-			// The store applied a write it answered 501. The mount is left as it
-			// is: its next swap, made with the old ETag, fails its condition and
-			// diverges it, which is #5's to resolve.
+			// The store applied a write it answered 501. The probe below reads
+			// the root pointer again and adopts the attempt.
 			f.log.Error("a root-pointer swap the store answered as unsupported took effect: the root pointer names the refused commit's snapshot, which is kept",
 				"snapshot", key, "attempted", epoch)
 		case rerr == nil:
@@ -313,25 +362,78 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		default:
 			f.log.Debug("could not read the root pointer, so a refused commit's snapshot is kept", "key", key, "err", rerr)
 		}
-		return fmt.Errorf("swap root pointer: the store does not support conditional writes, and this mount may not write the root pointer unconditionally: %w", err)
+		doubt = true
+		oldErr, unchangedErr, failedErr = refusal, refusal, refusal
 	case errors.Is(err, store.ErrUnsupported):
 		// A backend without conditional writes cannot give us safe single-writer
 		// detection. Fall back to an unconditional write and say so clearly.
 		f.log.Warn("backend lacks conditional writes; concurrent mounts are unsafe")
-		if err := f.store.Put(ctx, rootKey, rpBody); err != nil {
-			return fmt.Errorf("write root pointer: %w", err)
-		}
-		if info, herr := f.store.Head(ctx, rootKey); herr == nil {
+		if perr := f.store.Put(ctx, rootKey, rpBody); perr != nil {
+			// S3.Put is retried, so a Put that returned an error may have taken
+			// effect (ADR 0022 Assumption 12).
+			werr := fmt.Errorf("write root pointer: %w", perr)
+			doubt = true
+			oldErr, unchangedErr, failedErr = werr, werr, werr
+		} else if info, herr := f.store.Head(ctx, rootKey); herr == nil && info.ETag != "" {
 			newETag = info.ETag
+		} else {
+			// Written, with its ETag unknown, as a swap reply without one is.
+			doubt = true
+			unchangedErr = errNoETagUnchanged
+			failedErr = errNoETagInDoubt
 		}
-	case err != nil:
-		return fmt.Errorf("swap root pointer: %w", err)
+	default:
+		// An untyped error or a transport error: the request may have taken
+		// effect with its reply lost (ADR 0022 §1, route 1).
+		doubt = true
+		oldErr = fmt.Errorf("swap root pointer: %w", err)
+		unchangedErr = oldErr
+		failedErr = fmt.Errorf("swap root pointer: the outcome is in doubt until a read of the root pointer settles it: %w", err)
+	}
+
+	if !doubt {
+		// A self-loop. A Fire that fails is logged and the success path follows
+		// anyway, since the store applied the write (ADR 0022 §4; ADR 0014
+		// Assumption 38).
+		if from, _, ferr := f.rootKnowledge.Fire(rootSwapOK); ferr != nil {
+			f.logRootFire(from, rootSwapOK, ferr)
+		}
+	} else {
+		f.doubtKey = key
+		if from, _, ferr := f.rootKnowledge.Fire(rootSwapUnknown); ferr != nil {
+			// Unreachable: the top of the commit settled any doubt. No read is
+			// made, and the outcome is answered as it was before ADR 0022; the
+			// mode is not moved, since only resolveRoot moves it (ADR 0022 §2,
+			// §4).
+			f.logRootFire(from, rootSwapUnknown, ferr)
+			f.doubtKey = ""
+			if oldErr != nil {
+				return oldErr
+			}
+		} else {
+			switch f.resolveRoot(ctx) {
+			case probeOurs:
+				// The attempt took effect, and resolveRoot took the read's ETag:
+				// the success path is the commit's, whole (ADR 0022 §4;
+				// Assumption 9).
+				newETag = f.rootETag
+			case probeTheirs:
+				return errCommitConflict
+			case probeUnchanged:
+				// No retry in line: the next commit swaps against the ETag the
+				// read gave (ADR 0022 §3; Assumption 7).
+				return unchangedErr
+			default:
+				return failedErr
+			}
+		}
 	}
 
 	// The commit is now durable. Only after the swap succeeds do we advance our
 	// own notion of the current epoch.
 	f.epoch = epoch
 	f.rootETag = newETag
+	f.rootSnapshot = key
 	f.dirty = false
 	f.lastCommit = time.Now()
 	f.log.Debug("committed", "epoch", epoch, "inodes", len(f.inodes), "snapshot", key)
@@ -343,6 +445,162 @@ func (f *FS) commitLocked(ctx context.Context) error {
 	// never stalls a write.
 	f.schedulePrune(key)
 	return nil
+}
+
+// errCommitConflict is what a commit returns once a read of the root pointer
+// has shown another writer's (ADR 0022 §4, the conflict error).
+var errCommitConflict = errors.New("commit conflict: another writer owns this bucket; remount to continue")
+
+// errNoETagUnchanged is what a commit returns when the store said it applied a
+// write of the root pointer without giving its ETag, and the read then showed
+// the root pointer as it was (ADR 0022 §4).
+var errNoETagUnchanged = errors.New("swap root pointer: no ETag for the root pointer after writing it, and a read then showed it unchanged; the next commit tries again")
+
+// errNoETagInDoubt is what a commit returns when a write of the root pointer
+// gave no ETag and the read that would settle it decided nothing. The commit
+// may be durable, but the namespace stays dirty, so the next commit settles the
+// doubt and writes it again (ADR 0022 §4; Assumption 10).
+var errNoETagInDoubt = errors.New("swap root pointer: no ETag for the root pointer after writing it, so it is in doubt until a read of it succeeds")
+
+// probeVerdict is what one read of the root pointer shows a mount whose
+// knowledge of it is in doubt (ADR 0022 §3).
+type probeVerdict uint8
+
+const (
+	probeOurs      probeVerdict = iota + 1 // the root pointer names the attempt in doubt: adopt it
+	probeUnchanged                         // it names the snapshot the namespace descends from: take its ETag and proceed
+	probeTheirs                            // it names another key, or is gone: another writer owns the bucket
+	probeFailed                            // the read failed, gave no ETag, or gave a body this build does not understand: still in doubt
+)
+
+// classifyRoot decides what one read of the root pointer shows, given the
+// snapshot key the mount's namespace descends from and the key of the attempt
+// in doubt. It takes no lock, makes no store call and logs nothing: a step the
+// server takes on a store's answer, not a policy (ADR 0022 §3, §6).
+//
+// TLA+: docs/tla/CommitProtocol.tla ProbeOurs, ProbeUnchanged, ProbeTheirs, ProbeFailed
+func classifyRoot(raw []byte, etag string, err error, rootSnapshot, doubtKey string) (probeVerdict, rootPointer) {
+	switch {
+	case errors.Is(err, store.ErrNotFound) && rootSnapshot == "":
+		// No root pointer, and the mount descends from none: the create did
+		// not happen.
+		return probeUnchanged, rootPointer{}
+	case errors.Is(err, store.ErrNotFound):
+		return probeTheirs, rootPointer{}
+	case err != nil:
+		return probeFailed, rootPointer{}
+	}
+
+	var rp rootPointer
+	if json.Unmarshal(raw, &rp) != nil {
+		return probeFailed, rootPointer{}
+	}
+	// Divergence is terminal, so it waits on a body this build positively
+	// understands: null, {}, an error document served with 200 and a root
+	// pointer of another format version decide nothing (ADR 0022 Assumption 5;
+	// ADR 0021 Assumption 26).
+	if rp.Version != snapshotVersion || rp.Snapshot == "" {
+		return probeFailed, rp
+	}
+
+	// Ours and unchanged are decided by the key the body names, never by the
+	// ETag, which is what the verdict takes for the next swap. Without one the
+	// mount would hold "", which means no root, for a root pointer that exists
+	// (ADR 0022 §3; Assumptions 3 and 4).
+	switch rp.Snapshot {
+	case doubtKey:
+		if etag == "" {
+			return probeFailed, rp
+		}
+		return probeOurs, rp
+	case rootSnapshot:
+		if etag == "" {
+			return probeFailed, rp
+		}
+		return probeUnchanged, rp
+	}
+	return probeTheirs, rp
+}
+
+// resolveRoot settles a root pointer in doubt with one read, GetWithETag of
+// rootKey, and applies the verdict: ProbeOurs adopts the attempt, ProbeUnchanged
+// takes the root pointer's ETag, ProbeTheirs diverges the mount, and a read
+// that decides nothing leaves the root in doubt. Caller must hold mu for
+// writing, or run before the FS is shared, and rootKnowledge must be InDoubt
+// (ADR 0022 §3).
+//
+// TLA+: docs/tla/CommitProtocol.tla ProbeOurs, ProbeUnchanged, ProbeTheirs, ProbeFailed, Diverge
+func (f *FS) resolveRoot(ctx context.Context) probeVerdict {
+	// One response, so that the body and the ETag describe one root pointer
+	// (ADR 0020 §2). It is made under the locks commitLocked holds, as its
+	// other store calls are (ADR 0022 §5; #43).
+	raw, etag, err := f.store.GetWithETag(ctx, rootKey)
+	verdict, rp := classifyRoot(raw, etag, err, f.rootSnapshot, f.doubtKey)
+
+	switch verdict {
+	case probeOurs:
+		if from, _, ferr := f.rootKnowledge.Fire(rootProbeOurs); ferr != nil {
+			f.logRootFire(from, rootProbeOurs, ferr)
+			return probeFailed
+		}
+		// The body names the attempt's key, so its epoch is the attempt's.
+		// f.dirty and the prune pass are the caller's (ADR 0022 §3, §4).
+		f.epoch = rp.Epoch
+		f.rootETag = etag
+		f.rootSnapshot = f.doubtKey
+		f.doubtKey = ""
+		f.log.Info("root pointer adopted: a write of it whose outcome was in doubt took effect",
+			"snapshot", f.rootSnapshot, "epoch", f.epoch)
+		return probeOurs
+	case probeUnchanged:
+		if from, _, ferr := f.rootKnowledge.Fire(rootProbeUnchanged); ferr != nil {
+			f.logRootFire(from, rootProbeUnchanged, ferr)
+			return probeFailed
+		}
+		// Both ETags are logged, so that a store or a proxy that refuses a
+		// condition that holds shows in the log (ADR 0022 Assumption 3).
+		held := f.rootETag
+		f.rootETag = etag
+		f.doubtKey = ""
+		f.log.Warn("root pointer unchanged after a failed write of it: the next commit swaps against the ETag just read",
+			"held_etag", held, "etag", etag, "snapshot", f.rootSnapshot)
+		return probeUnchanged
+	case probeTheirs:
+		// rootKnowledge stays InDoubt and doubtKey as it is: the mount makes no
+		// further swap. A Fire that fails changes nothing else, and no build
+		// reaches it, since commitLocked refuses a diverged mount before it
+		// writes and a read-only one never reaches a swap (ADR 0014 §3, §7).
+		if from, _, ferr := f.mode.Fire(mountDiverge); ferr != nil {
+			f.log.Error("mount mode: illegal transition",
+				"machine", mountModes.Name(), "from", from.String(), "event", mountDiverge.String(), "err", ferr)
+		}
+		msg := "commit conflict: another writer owns this bucket"
+		if errors.Is(err, store.ErrNotFound) {
+			msg = "commit conflict: the root pointer this mount descends from is gone"
+		}
+		// The attempt in doubt is always at the epoch after f.epoch, since a
+		// read that decides nothing changes no field.
+		f.log.Error(msg,
+			"writer", rp.Writer, "their_epoch", rp.Epoch, "their_snapshot", rp.Snapshot,
+			"our_epoch", f.epoch, "attempted", f.epoch+1)
+		return probeTheirs
+	}
+
+	if err != nil {
+		f.log.Error("root pointer still in doubt: the read that would settle it failed",
+			"attempt", f.doubtKey, "err", err)
+	} else {
+		f.log.Error("root pointer still in doubt: the read did not show a root pointer this build understands, with an ETag",
+			"attempt", f.doubtKey, "version", rp.Version, "snapshot", rp.Snapshot, "etag", etag, "bytes", len(raw))
+	}
+	return probeFailed
+}
+
+// logRootFire records a Fire on rootKnowledge that its table refused, with
+// ADR 0014 §9's keys. What follows is pinned per site (ADR 0022 §2, §4).
+func (f *FS) logRootFire(from rootState, on rootEvent, err error) {
+	f.log.Error("root knowledge: illegal transition",
+		"machine", rootStates.Name(), "from", from.String(), "event", on.String(), "err", err)
 }
 
 // fallbackAllowed reports whether a commit whose swap the store answered

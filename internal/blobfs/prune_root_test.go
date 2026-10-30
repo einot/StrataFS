@@ -1206,31 +1206,39 @@ func TestPruneKeepsRootSnapshotAtRetentionTwo(t *testing.T) {
 //     List;
 //   - Mutate, PutSnapshot [2,1] and SwapReplyLost: a commit whose swap the
 //     harness applies and then fails, so that the root pointer names its
-//     epoch-2 snapshot while Sync returns an error;
-//   - PutSnapshot [2,2]: Sync again, writing a second epoch-2 snapshot of the
-//     mount's own;
-//   - PruneList, keeping [2,2], and PruneDelete [2,1]: the List is released,
-//     and the pass runs.
+//     epoch-2 snapshot;
+//   - PruneList and PruneDelete: the List is released, and the pass runs.
+//
+// What ADR 0022 changed (section 5; section 8, the changes to existing
+// tests): the step after the lost reply. The mount reads the root pointer
+// once, finds it naming its attempt, and adopts it, so the Sync whose swap's
+// reply was lost returns nil, and no retry at epoch 2 follows. The test then
+// makes a change and commits once more, at epoch 3, against the ETag the read
+// gave, and that commit succeeds. At 13aebc4 and edcfc15 that Sync returned
+// an error, and the mount's own retry wrote a second epoch-2 snapshot and
+// failed its swap's condition on the ETag the lost reply left stale.
 //
 // Where it deviates (ADR 0019 Assumption 12): in the trace the retry's [2,2]
 // sorts above the root's [2,1] by nonce, and its swap is pending. Nonces come
 // from crypto/rand, so the test seeds, on the inner store, the object an
 // attempt at epoch 2 with the highest nonce leaves, under nonce
 // ffffffffffff, with the bytes of the root pointer's snapshot: it stands for
-// the retry's snapshot sorting above. The mount's own retry fails its swap's
-// condition on the ETag the lost reply left stale, as ADR 0019 section 6's row
-// says.
+// a losing attempt's snapshot sorting above the root's at its epoch.
 //
 // At 13aebc4 the pass keeps the seeded key as the newest and deletes the
 // snapshot the root pointer names: the record holds it, and the remount fails.
+// At edcfc15 the Sync whose swap's reply was lost returns an error, and the
+// test fails there.
 func TestPruneKeepsRootSnapshotAfterLostSwapReply(t *testing.T) {
 	h, ctx := pr88NewHarness(t, false)
 	a, list := pr88Pruner(t, ctx, h, 1, "New over an empty bucket with SnapshotRetention 1")
 
 	h.armSwapLost()
 	mark := h.snapshotCount()
-	if err := pr88Commit(t, ctx, a, "c2", "Sync of the commit whose swap's reply is lost"); err == nil {
-		t.Fatalf("Sync of a commit whose swap of the root pointer returned an error = nil, want an error")
+	if err := pr88Commit(t, ctx, a, "c2", "Sync of the commit whose swap's reply is lost"); err != nil {
+		t.Fatalf("Sync of a commit whose swap of the root pointer took effect and lost its reply = %v, want nil: "+
+			"the mount reads the root pointer once, finds it naming its attempt, and adopts it (ADR 0022 "+
+			"sections 1, 3 and 4)", err)
 	}
 	lost := pr88OneNewKeyAt(t, h, mark, 2, "the commit whose swap's reply was lost")
 	if got := h.rootNow(); got != lost {
@@ -1239,13 +1247,13 @@ func TestPruneKeepsRootSnapshotAfterLostSwapReply(t *testing.T) {
 	pr88Seed(t, ctx, h, lost, 2)
 
 	mark = h.snapshotCount()
-	if err := pr88StartSync(ctx, a).wait(t, "Sync again after the lost swap reply"); err == nil {
-		t.Fatalf("Sync again after the lost swap reply = nil, want an error: its swap fails its condition on " +
-			"the stale ETag")
+	if err := pr88Commit(t, ctx, a, "c3", "Sync of a commit after the adopted one"); err != nil {
+		t.Fatalf("Sync of a commit after the adopted one = %v, want nil: its swap is conditioned on the ETag the "+
+			"read gave (ADR 0022 section 3)", err)
 	}
-	pr88OneNewKeyAt(t, h, mark, 2, "the Sync after the lost swap reply")
-	if got := h.rootNow(); got != lost {
-		t.Fatalf("after the retry's failed swap the root pointer names %q, want %q still", got, lost)
+	key3 := pr88OneNewKeyAt(t, h, mark, 3, "the commit after the adopted one")
+	if got := h.rootNow(); got != key3 {
+		t.Fatalf("after the commit at epoch 3 the root pointer names %q, want %q", got, key3)
 	}
 
 	list.Release()
@@ -1274,27 +1282,38 @@ func TestPruneKeepsRootSnapshotAfterLostSwapReply(t *testing.T) {
 //     the pass's List;
 //   - Mutate, PutSnapshot [2,1] and SwapUnsupported, whose fallback Put takes
 //     effect and fails: a commit whose root Put the harness applies and then
-//     fails, so that the root pointer names its epoch-2 snapshot while Sync
-//     returns an error;
-//   - PutSnapshot [2,2]: Sync again, its fallback Put of the root pointer
-//     held pending by the harness;
-//   - PruneList, keeping [2,2], and PruneDelete [2,1]: the List is released
-//     and returns, and the test waits for the first Delete or the grace
-//     period before it releases the root Put.
+//     fails, so that the root pointer names its epoch-2 snapshot;
+//   - Mutate and PutSnapshot at epoch 3: a further commit, its fallback Put of
+//     the root pointer held pending by the harness;
+//   - PruneList and PruneDelete: the List is released and returns, and the
+//     test waits for the first Delete or the grace period before it releases
+//     the root Put.
+//
+// What ADR 0022 changed (section 5; section 8, the changes to existing
+// tests): the step after the lost fallback reply. The mount reads the root
+// pointer once, finds it naming its attempt, and adopts it, so the Sync whose
+// fallback Put's reply was lost returns nil and the namespace is clean. The
+// commit the test then holds at its root Put therefore needs a change made
+// first, a Create of c3, and is at epoch 3, the adopted epoch plus one. At
+// 13aebc4 and edcfc15 the Sync whose fallback reply was lost returned an
+// error, and the held commit was the mount's own retry at epoch 2.
 //
 // Where it deviates (ADR 0019 Assumption 12): in the trace the retry's [2,2]
 // sorts above the root's [2,1] by nonce. Nonces come from crypto/rand, so the
 // test seeds, on the inner store, the object an attempt at epoch 2 with the
 // highest nonce leaves, under nonce ffffffffffff, with the bytes of the root
-// pointer's snapshot: it stands for the retry's snapshot sorting above. The
-// retry's own key sorts either side of the root's.
+// pointer's snapshot: it stands for a losing attempt's snapshot sorting above
+// the root's at its epoch. The held commit's key, at epoch 3, sorts above
+// both.
 //
 // At 13aebc4 the pass keeps the seeded key as the newest and deletes the key
 // the root pointer named before the retry's Put, and the retry's own. Which
 // it deletes first depends on their random nonces, and the root Put is
 // released after the first: so either the record holds the root's key, or the
 // retry's Put leaves the root pointer naming a snapshot already deleted. In
-// both, the test fails, naming the key, and the remount fails.
+// both, the test fails, naming the key, and the remount fails. At edcfc15 the
+// Sync whose fallback reply was lost returns an error, and the test fails
+// there.
 func TestPruneKeepsRootSnapshotAfterLostFallbackReply(t *testing.T) {
 	h, ctx := pr88NewHarness(t, true)
 	cfg := pr88Config(h, 1)
@@ -1304,8 +1323,10 @@ func TestPruneKeepsRootSnapshotAfterLostFallbackReply(t *testing.T) {
 
 	h.armRootPutLost()
 	mark := h.snapshotCount()
-	if err := pr88Commit(t, ctx, a, "c2", "Sync of the commit whose fallback root Put's reply is lost"); err == nil {
-		t.Fatalf("Sync of a commit whose fallback Put of the root pointer returned an error = nil, want an error")
+	if err := pr88Commit(t, ctx, a, "c2", "Sync of the commit whose fallback root Put's reply is lost"); err != nil {
+		t.Fatalf("Sync of a commit whose fallback Put of the root pointer took effect and lost its reply = %v, "+
+			"want nil: the mount reads the root pointer once, finds it naming its attempt, and adopts it (ADR "+
+			"0022 section 4; Assumption 12)", err)
 	}
 	lost := pr88OneNewKeyAt(t, h, mark, 2, "the commit whose fallback root Put's reply was lost")
 	if got := h.rootNow(); got != lost {
@@ -1313,24 +1334,27 @@ func TestPruneKeepsRootSnapshotAfterLostFallbackReply(t *testing.T) {
 	}
 	pr88Seed(t, ctx, h, lost, 2)
 
+	// The namespace is clean after the adoption, so the next commit needs a
+	// change first (ADR 0022 section 8).
+	pr88Create(t, ctx, a, "c3")
 	put := h.armRootPutHold()
 	mark = h.snapshotCount()
-	retry := pr88StartSync(ctx, a)
-	pr88WaitHeld(t, put, retry, "the fallback Put of the root pointer of the retry")
-	retryKey := pr88OneNewKeyAt(t, h, mark, 2, "the retry, whose root Put is held")
+	next := pr88StartSync(ctx, a)
+	pr88WaitHeld(t, put, next, "the fallback Put of the root pointer of the commit at epoch 3")
+	nextKey := pr88OneNewKeyAt(t, h, mark, 3, "the commit at epoch 3, whose root Put is held")
 	if got := h.rootNow(); got != lost {
-		t.Fatalf("while the retry's root Put is held the root pointer names %q, want %q", got, lost)
+		t.Fatalf("while the root Put at epoch 3 is held the root pointer names %q, want %q", got, lost)
 	}
 
 	list.Release()
 	pr88WaitSignal(t, list.returned, "the held List to return")
 	h.waitDeleteOrGrace()
 	put.Release()
-	if err := retry.wait(t, "Sync of the retry"); err != nil {
-		t.Errorf("Sync of the retry, once its root Put is released = %v, want success", err)
+	if err := next.wait(t, "Sync of the commit at epoch 3"); err != nil {
+		t.Errorf("Sync of the commit at epoch 3, once its root Put is released = %v, want success", err)
 	}
-	if got := h.rootNow(); got != retryKey {
-		t.Errorf("after the retry the root pointer names %q, want the retry's %q", got, retryKey)
+	if got := h.rootNow(); got != nextKey {
+		t.Errorf("after the commit at epoch 3 the root pointer names %q, want its %q", got, nextKey)
 	}
 
 	pr88WaitPass(t, a, "the prune pass")

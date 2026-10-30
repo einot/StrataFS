@@ -21,10 +21,10 @@ Every entry has a status (ADR 0013 §5):
   ADR 0013, which introduces it, unless its entry names another ADR.
 
 A status given to a group, a list or a section holds for every entry in it.
-The lifecycle ADR and the ADR for #5 are not yet written; their entries hold
-the names those ADRs will use. The load-race ADR is ADR 0020. The operators of
-the standard modules, listed at the end, are not entries: they are the names
-rule 1 rules out.
+The lifecycle ADR is not yet written; its entries hold the names it will use.
+The load-race ADR is ADR 0020, and the ADR for #5 is ADR 0022. The operators
+of the standard modules, listed at the end, are not entries: they are the
+names rule 1 rules out.
 
 ## Rules
 
@@ -107,25 +107,47 @@ Assumption 41).
 
 ## V2. Root-pointer knowledge
 
-Go field `FS.rootKnowledge`, under `FS.mu`, of a type its ADR names; TLA+
-`rootKnowledge[m]`. All reserved, by the ADR for #5.
+Go types `rootState` and `rootEvent`, in `internal/blobfs/rootknowledge.go`.
+Table `rootStates`, named `"rootKnowledge"`, which is the `machine` value in
+log lines and the `Machine` of an `fsm.IllegalError`. Field
+`FS.rootKnowledge`, an `*fsm.Machine[rootState, rootEvent]` under `FS.mu`,
+with `FS.rootSnapshot` and `FS.doubtKey` beside it (V3). TLA+
+`rootKnowledge[m]`. All exist as of `71fee34`, coder's commit for ADR 0022
+(the note below); they were reserved, ADR 0022, until it was on the branch
+(ADR 0022 Assumption 20). ADR 0022 §2 widened two meanings this section held
+before it, marked below; the names stand.
 
-| Name | Kind | Go | Meaning |
-|---|---|---|---|
-| `Known` | state | `rootKnown` | `FS.rootETag` is the root's ETag as last read or written (`""` = no root) |
-| `InDoubt` | state | `rootInDoubt` | a swap's outcome is unknown |
-| `SwapOK` | event | `rootSwapOK` | `Known` to `Known` |
-| `SwapUnknown` | event | `rootSwapUnknown` | `Known` to `InDoubt`, after `SwapReplyLost` or `SwapFailed` |
-| `ProbeOurs` | event | `rootProbeOurs` | `InDoubt` to `Known`: the root names this mount's attempt; adopt it |
-| `ProbeUnchanged` | event | `rootProbeUnchanged` | `InDoubt` to `Known`: the root is unchanged, so the swap was not applied |
-| `ProbeTheirs` | action | none | another writer's root: fires `mountDiverge`, and stays `InDoubt` |
+| Name | Kind | Go | TLA+ | Meaning | Status |
+|---|---|---|---|---|---|
+| `Known` | state | `rootKnown` | `"Known"` | `FS.rootETag` is the current ETag of the root pointer that names `FS.rootSnapshot` (`""` = no root) | exists, as of `71fee34` (the note below) |
+| `InDoubt` | state | `rootInDoubt` | `"InDoubt"` | a write of the root pointer left its outcome, or the root pointer's ETag, unknown; `FS.doubtKey` names the attempt. Widened by ADR 0022 §2 from "a swap's outcome is unknown", so that a reply with no ETag (#103) is in doubt too | exists, as of `71fee34` (the note below) |
+| `SwapOK` | event | `rootSwapOK` | `SwapOK(m)`, and `FallbackHead(m)` | `Known` to `Known`: a write's reply gave the root pointer's ETag | exists, as of `71fee34` (the note below) |
+| `SwapUnknown` | event | `rootSwapUnknown` | `SwapUnknown(m, k)` | `Known` to `InDoubt`: a write's reply did not establish the root pointer's ETag, after `SwapReplyLost`, `SwapFailed`, `SwapConflict`, `SwapNoETag`, the fallback's `Put` failing, or ADR 0021's reclaim not positively showing another root. Revised by ADR 0022 §2 from "after `SwapReplyLost` or `SwapFailed`": a 412 leaves the root in doubt too | exists, as of `71fee34` (the note below) |
+| `ProbeOurs` | event | `rootProbeOurs` | `ProbeOurs(m)` | `InDoubt` to `Known`: the read showed the root pointer naming this mount's attempt; adopt it, with the read's ETag | exists, as of `71fee34` (the note below) |
+| `ProbeUnchanged` | event | `rootProbeUnchanged` | `ProbeUnchanged(m)` | `InDoubt` to `Known`: the read showed the root pointer naming the key the namespace descends from; take the read's ETag and proceed | exists, as of `71fee34` (the note below) |
+| `ProbeTheirs` | action | none | `ProbeTheirs(m)` | the read showed another writer's root pointer, or none: fires `mountDiverge` (V1), and stays `InDoubt` | exists, as of `71fee34` (the note below) |
+| `ProbeFailed` | action | none | `ProbeFailed(m)` | the read failed, gave no ETag where one was needed, or gave a body the mount does not understand: nothing fires, and the root stays in doubt | exists, as of `71fee34` (the note below) |
+
+The eight entries marked exists were confirmed, by reading, in the code at
+`71fee34`, coder's commit for ADR 0022 (ADR 0022, Assumption 20):
+`internal/blobfs/rootknowledge.go` declares `rootKnown`, `rootInDoubt`,
+`rootSwapOK`, `rootSwapUnknown`, `rootProbeOurs` and `rootProbeUnchanged`,
+whose `String` values are `"Known"`, `"InDoubt"`, `"SwapOK"`,
+`"SwapUnknown"`, `"ProbeOurs"` and `"ProbeUnchanged"`, and the table
+`rootStates` with its four edges; `internal/blobfs/fs.go` holds
+`FS.rootKnowledge`, `FS.rootSnapshot` and `FS.doubtKey`, and `New` makes the
+machine at `rootKnown`; and `internal/blobfs/commit.go` holds
+`(*FS).resolveRoot`, whose `probeTheirs` branch fires `mountDiverge` (V1) and
+whose `probeFailed` branch fires nothing, which are the two actions with no
+event. The Go constants `probeTheirs` and `probeFailed` of `probeVerdict`
+name the verdicts those branches take (ADR 0022 §3), and are no events.
 
 ## V3. Commit protocol
 
-`docs/tla/CommitProtocol.tla`, checked against `faeba5b`. Its Go sites exist:
+`docs/tla/CommitProtocol.tla`, checked against `71fee34`. Its Go sites exist:
 `Sync`, `loadOrInit`, `initEmpty`, `decodeSnapshot`, `commitLocked`,
-`fallbackAllowed`, `schedulePrune` and `pruneSnapshots` in
-`internal/blobfs/commit.go`; `New`,
+`classifyRoot`, `resolveRoot`, `fallbackAllowed`, `schedulePrune` and
+`pruneSnapshots` in `internal/blobfs/commit.go`; `New`,
 `mutable`, `SetAttr`, `createEntry`, `unlink`, `Rename`, `bufferWrite`,
 `truncate`, `flushAll`, `settleAll`, `flushOpen` and `putChunk` in
 `internal/blobfs/fs.go`; `ReadOnly.Put` and `ReadOnly.PutIfMatch` in
@@ -143,7 +165,21 @@ symbol `trace.tsv` names, not an entry. ADR 0021 added `FallbackOptIn` and
 `FallbackOptIn`, whose refusal branch includes the reclaim ADR 0021's revisions
 added, with its guard, as of `8415f61`; the Go names behind them,
 `Config.AllowUnconditionalRoot`, `FS.allowUnconditionalRoot` and
-`(*FS).fallbackAllowed`, are what `FallbackAllowed` traces to.
+`(*FS).fallbackAllowed`, are what `FallbackAllowed` traces to. ADR 0022 added
+`RootProbe`, the actions `SwapNoETag`, `ProbeOurs`, `ProbeUnchanged`,
+`ProbeTheirs` and `ProbeFailed`, the operators `SwapUnknown` and
+`Unresolved`, the variables `doubtKey[m]` and `rootSnapshot[m]`, the `pc`
+string `"Probe"`, the faults `"ProbeFailed"` and `"SwapNoETag"`, and
+`ClassifyRoot` (V7). Those that trace to Go exist as of `71fee34`, coder's
+commit for that ADR, having been reserved, ADR 0022, until it was on the
+branch (ADR 0022 Assumption 20): `RootProbe`, whose rule `commitLocked` and
+`(*FS).resolveRoot` carry; `SwapUnknown`, `commitLocked`'s `Fire` of
+`rootSwapUnknown`; the two variables, `FS.doubtKey` and `FS.rootSnapshot`;
+and `ClassifyRoot`, `classifyRoot`. The five actions have their Go sites,
+which `trace.tsv` gives, as every action here does, and their names stay the
+spec's, as the table below says. `Unresolved`, the `pc` string `"Probe"` and
+the two faults, which only the spec uses, stay reserved, ADR 0022, as `Below`
+is by ADR 0019.
 
 **Actions.** All reserved, ADR 0013: an action's name is the spec's, whatever
 Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
@@ -161,13 +197,19 @@ Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
 | `StrayDirty` | none | a path that dirties a read-only mount: ADR 0011 §7's seam, through which a test sets `FS.dirty` on a read-only FS. No path does so at `043927f` |
 | `Flush` | `Sync`'s `flushAll` and `settleAll`; `flushOpen`; `putChunk` | a step of its own only without `ChunksFirst`; with it, part of `PutSnapshot` |
 | `PutSnapshot` | `commitLocked`'s snapshot `Put` | refused by `store.ReadOnly` when the mount is fenced; otherwise it reaches the bucket, and is applied, not applied (`"PutFailed"`), or applied with an error returned (`"SnapshotReplyLost"`) |
-| `SwapOK` | `commitLocked`'s `PutIfMatch` | applied, and the reply carries the ETag |
-| `SwapReplyLost` | the same | applied, and an error is returned |
-| `SwapFailed` | the same | not applied, and an error is returned |
-| `SwapConflict` | the same | `store.ErrPrecondition`; fires `Diverge` (V1), which moves only a `"Writable"` mount (the module's R11) |
-| `SwapUnsupported` | the same, and `fallbackAllowed` | `store.ErrUnsupported`. Unless `FallbackAllowed`, `commitLocked` reclaims the attempt's snapshot, which no root pointer names, once a read of the root pointer has confirmed that, and returns an error (ADR 0021 §2; the module's R12). Otherwise `FallbackPut` follows, which `store.ReadOnly` refuses when the mount is fenced, and which otherwise is applied, not applied (`"PutFailed"`), or applied with an error returned (`"FallbackReplyLost"`) |
+| `SwapOK` | `commitLocked`'s `PutIfMatch` | applied, and the reply carries the ETag; also V2's `SwapOK` event, `Known` to `Known` |
+| `SwapReplyLost` | the same | applied, and an error is returned. With `RootProbe` the root is in doubt (`SwapUnknown`, through `Unresolved`); without it `commitLocked` keeps its old `rootETag` |
+| `SwapFailed` | the same | not applied, and an error is returned; the mount cannot tell it from a lost reply, so with `RootProbe` the root is in doubt too (`Unresolved`) |
+| `SwapNoETag` | the same | applied, and the reply carries no ETag (#103). With `RootProbe` the root is in doubt (`SwapUnknown`); without it `commitLocked` stores the empty ETag, and its next swap is `If-None-Match` and conflicts (ADR 0022 §4) |
+| `SwapConflict` | the same | `store.ErrPrecondition`, a 412 or a 409. With `RootProbe` it leaves the root in doubt (`SwapUnknown`), and `Diverge` is `ProbeTheirs`'s; without it it fires `Diverge` (V1), which moves only a `"Writable"` mount (the module's R11) |
+| `SwapUnknown` | `commitLocked`'s `Fire` of `rootSwapUnknown` | V2's event, an operator the swap outcomes above conjoin through `Unresolved`, not a step of its own: the mount's knowledge of the root pointer is in doubt, `doubtKey[m]` records the attempt, and the probe's read is due (`pc` `"Probe"`) (ADR 0022 §2, §4) |
+| `SwapUnsupported` | the same, and `fallbackAllowed` | `store.ErrUnsupported`. Unless `FallbackAllowed`, `commitLocked` reclaims the attempt's snapshot, which no root pointer names, once a read of the root pointer has confirmed that, and returns an error (ADR 0021 §2; the module's R12). Otherwise `FallbackPut` follows, which `store.ReadOnly` refuses when the mount is fenced, and which otherwise is applied, not applied (`"PutFailed"`), or applied with an error returned (`"FallbackReplyLost"`); with `RootProbe` either failure leaves the root in doubt (`Unresolved`) |
 | `FallbackPut` | `commitLocked`'s unconditional root `Put` after it | merged with `SwapUnsupported`: an operator of that action's fallback branches, taken only where `FallbackAllowed` (ADR 0021 §4), not a step of its own |
-| `FallbackHead` | the `Head` after `FallbackPut` | only where `FallbackAllowed` |
+| `FallbackHead` | the `Head` after `FallbackPut` | only where `FallbackAllowed`; also V2's `SwapOK` event |
+| `ProbeOurs` | `resolveRoot` and `classifyRoot`, through `commitLocked`'s call; `S3.GetWithETag`; `Local.GetWithETag` | one read of the root pointer, which names the attempt in doubt: adopt it. At `pc` `"Probe"` it is `Committed`, the success path whole; at `"Ready"` it adopts only (ADR 0022 §3, §4; the module's J20) |
+| `ProbeUnchanged` | the same, and `errorFor`, whose not-found decides it when the mount descends from no root (ADR 0022 §3, rule 1) | the read shows the root pointer naming `rootSnapshot[m]`: take its ETag; at `"Probe"` the commit fails, with no retry in line |
+| `ProbeTheirs` | the same, and `errorFor`, whose not-found decides it when the root pointer the mount descends from is gone (ADR 0022 §3, rule 2) | the read shows neither: `Diverge` (V1), and the machine stays `"InDoubt"` |
+| `ProbeFailed` | the same, and `errorFor` | the read fails, or returns a body the mount does not understand: nothing moves but, at `"Probe"`, the commit failing |
 | `StartPrune` | `schedulePrune`'s guard, and its setting of `FS.pruning` | an operator that `SwapOK` and `FallbackHead` conjoin, since it runs in the same hold of `FS.mu`; not a step of its own. The pass is begun for the key the commit swapped the root pointer to (ADR 0019 §2) |
 | `PruneList` | `pruneSnapshots`' `List` loop, then `prunable` | with `PruneBelowCurrent`, what the pass deletes is `Prunable` (ADR 0019 §2) |
 | `PruneDelete` | `pruneSnapshots`' `Delete` loop | one `Delete` per step, in ascending key order |
@@ -175,8 +217,9 @@ Go performs it. The Go column is indicative, and `trace.tsv` is authoritative
 | `Crash` | none; the restart is `New` | process death, or any exit skipping the final commit. The mount's memory and its prune goroutine are lost, and it restarts at `GetRoot` |
 
 **Variables.** Named as rule 3 says: `mode[m]` and `rootKnowledge[m]` hold
-machine states, and the rest are named here. CommitProtocol leaves
-`rootKnowledge[m]` out until the ADR for #5 adds it.
+machine states, and the rest are named here. CommitProtocol models
+`rootKnowledge[m]` since ADR 0022, with `doubtKey[m]` and `rootSnapshot[m]`
+beside it.
 
 | Variable | Go | Meaning | Status |
 |---|---|---|---|
@@ -185,7 +228,9 @@ machine states, and the rest are named here. CommitProtocol leaves
 | `chunks` | the objects under `chunkPrefix` | a set of commit ids: a commit is in it once its chunk is stored | exists |
 | `pc[m]` | none | where `New`, `loadOrInit` or `commitLocked` has got to, as one of the strings below | reserved, ADR 0013 |
 | `mode[m]` | `FS.mode` (V1) | the mode's state, as `FS.mode.State()` gives it. Before ADR 0014 §7's conversion, at `043927f`, it stood for `FS.readOnly` and `FS.diverged`: `"Diverged"` while `FS.diverged` was set, `"ReadOnly"` while only `FS.readOnly` was, and `"Writable"` otherwise (V1's note) | exists, with ADR 0014 §7's conversion (V1's note) |
-| `rootKnowledge[m]` | `FS.rootKnowledge` (V2) | | reserved, the ADR for #5 |
+| `rootKnowledge[m]` | `FS.rootKnowledge` (V2) | the machine's state, as `FS.rootKnowledge.State()` gives it | exists, as of `71fee34` |
+| `doubtKey[m]` | `FS.doubtKey` | the snapshot key of the attempt whose write of the root pointer left the root in doubt; `NoKey` while `"Known"` | exists, as of `71fee34` |
+| `rootSnapshot[m]` | `FS.rootSnapshot` | the snapshot key the root pointer named when `rootETag[m]` was last set, by a load, a commit's success or a probe; `NoKey` = no root. The probe's verdict compares against it (ADR 0022 §3) | exists, as of `71fee34` |
 | `rootETag[m]` | `FS.rootETag` | | exists |
 | `epoch[m]` | `FS.epoch` | | exists |
 | `nsDirty[m]` | `FS.dirty` | | exists |
@@ -209,7 +254,8 @@ machine's states (rule 3).
 | `"GetRoot"`, `"HeadRoot"`, `"GetSnapshot"` | the read of `loadOrInit` that the action of that name makes is due; `"HeadRoot"` is reached only without `AtomicLoad` (ADR 0020 §4) |
 | `"Ready"` | loaded, with no commit in progress; `NextStep(m)` says whether one is due |
 | `"PutSnapshot"` | a commit's snapshot `Put` is due: `initEmpty`'s first, or without `ChunksFirst` any commit's, after its swap |
-| `"Swap"` | a commit's swap is due, after its snapshot `Put`, or without `ChunksFirst` as `initEmpty`'s first call. `SwapOK`, `SwapReplyLost`, `SwapFailed`, `SwapConflict` or `SwapUnsupported` takes it |
+| `"Swap"` | a commit's swap is due, after its snapshot `Put`, or without `ChunksFirst` as `initEmpty`'s first call. `SwapOK`, `SwapReplyLost`, `SwapFailed`, `SwapNoETag`, `SwapConflict` or `SwapUnsupported` takes it |
+| `"Probe"` | the probe's read of the root pointer is due, straight after a write of it that left the root in doubt (`SwapUnknown`); one of `ProbeOurs`, `ProbeUnchanged`, `ProbeTheirs` or `ProbeFailed` takes it. At `"Ready"` with the root in doubt, `NextStep(m)` gives `"Probe"` too, before any snapshot `Put` (ADR 0022 §3); reserved, ADR 0022 |
 | `"FallbackHead"` | the `Head` after the fallback's `Put` is due; reached only where `FallbackAllowed` (ADR 0021 §4) |
 | `"Flush"` | without `ChunksFirst`, a commit's flush is due, after its swap and its snapshot `Put` |
 | `"Failed"` | `New` returned an error; only `Crash` leaves it |
@@ -222,7 +268,7 @@ machine's states (rule 3).
 | `ReadOnlyMounts` | a subset of `Mounts` | `Config.ReadOnly` | the mounts that have it set | exists |
 | `Fixes` | a subset of the `Fixes` members below | none | the fixes a configuration includes (ADR 0013 §7) | reserved, ADR 0013 |
 | `Capability` | `"Conditional"`, `"Unconditional"` or `"Flaky"` | none | what the backend does with a conditional write (below) | reserved, ADR 0013 |
-| `Faults` | a subset of `"SwapReplyLost"`, `"SwapFailed"`, `"SwapConflict409"`, `"PutFailed"`, `"SnapshotReplyLost"` and `"FallbackReplyLost"` | none | the failure outcomes the bucket may give (below) | reserved, ADR 0013 |
+| `Faults` | a subset of `"SwapReplyLost"`, `"SwapFailed"`, `"SwapConflict409"`, `"SwapNoETag"`, `"PutFailed"`, `"SnapshotReplyLost"`, `"FallbackReplyLost"` and `"ProbeFailed"` | none | the failure outcomes the bucket may give (below) | reserved, ADR 0013; `"SwapNoETag"` and `"ProbeFailed"`, ADR 0022 |
 | `Start` | `"Empty"` or `"Loaded"` | none | the bucket as a behaviour begins (below) | reserved, ADR 0013 |
 | `Retention` | a natural number | `FS.retention` | how many snapshots a prune pass keeps; 0 turns pruning off | exists |
 | `MaxEpoch` | a positive natural number | none | a bound: the highest epoch a commit may reach | reserved, ADR 0013 |
@@ -252,18 +298,25 @@ machine's states (rule 3).
     the context ended. Only `S3.Put` gives it.
   - `"FallbackReplyLost"`: the fallback's root `Put` is applied, and an error
     is returned, in the same ways, so `commitLocked` keeps its old
-    `rootETag`.
+    `rootETag`, or, with `RootProbe`, leaves the root in doubt.
+  - `"SwapNoETag"`: a swap is applied, and a 200 is returned whose `ETag`
+    header is missing, so `S3.PutIfMatch` returns `""` (#103). Reserved,
+    ADR 0022.
+  - `"ProbeFailed"`: the probe's `GetWithETag` of the root pointer fails, or
+    returns a body the mount does not understand, so the root stays in doubt
+    (ADR 0022 §3). Reserved, ADR 0022.
 - **`Start`'s values.** Both reserved, ADR 0013. `"Empty"`: an empty bucket,
   with every mount at `loadOrInit`'s first read. `"Loaded"`: a filesystem at
   epoch 1, written outside the model, which every mount has loaded.
 
 **Definitions.** The module's other definitions. All reserved, ADR 0013, but
-`Mutable`, `Prunable`, `FallbackAllowed` and `Diverge` (V1), which exist,
-and `Below`, which ADR 0019 reserves.
+`Mutable`, `Prunable`, `FallbackAllowed`, `Diverge` (V1) and `SwapUnknown`
+(V2), which exist, `Below`, which ADR 0019 reserves, and `Unresolved`, which
+ADR 0022 reserves.
 
 | Definition | Meaning |
 |---|---|
-| `AllFixes`, `AllFaults` | the seven `Fixes` members, and the six `Faults` values |
+| `AllFixes`, `AllFaults` | the eight `Fixes` members, and the eight `Faults` values |
 | `Writers` | `Mounts` and `""`, a writer outside the model |
 | `Keys` | the snapshot keys, `snapshots/<epoch>-<nonce>.json.gz`, as records `[epoch, nonce]` whose nonce is in `Nonces` or is 0 |
 | `NoKey` | no key: epoch 0, nonce 0 |
@@ -285,15 +338,17 @@ and `Below`, which ADR 0019 reserves.
 | `FreshKeys(m)` | the keys a new attempt by `m` may write: at the next epoch, with a nonce no write has named (`Nonce`), or with nonce 0 |
 | `KeyFor(m)` | the key of `m`'s attempt: `attempt[m]`, or else a fresh one |
 | `FirstStep` | a commit's first call: `"PutSnapshot"`, or without `ChunksFirst` `"Swap"` |
-| `NextStep(m)` | the commit step due at `m`, or `"None"`. At `"Ready"` it is a commit's first call when `nsDirty[m]` is set, as `Sync` requires, and `m` has not diverged, as `commitLocked` requires |
+| `NextStep(m)` | the commit step due at `m`, or `"None"`. At `"Ready"` it is a commit's first call when `nsDirty[m]` is set, as `Sync` requires, and `m` has not diverged, as `commitLocked` requires; or `"Probe"` instead when the root is in doubt, since `commitLocked` reads the root pointer before it writes anything then (ADR 0022 §3) |
 | `SwapCondition(m, k)` | whether the bucket would apply `m`'s swap to the root pointer naming `k`: If-None-Match for an empty `rootETag`, which is unconditional without `IfNoneMatchInit`, and If-Match otherwise |
 | `WriteCall(m)` | a `Put`, `PutIfMatch` or `Delete` call of `m`'s reaches the bucket: a read-only `m` joins `roWrites` |
 | `WriteRoot(m, k)` | `m` writes the root pointer, naming `k` |
 | `CommitFails(m, k)` | `commitLocked` returns an error: back to `"Ready"`, or to `"Failed"` for `initEmpty`'s commit |
+| `SwapUnknown(m, k)` | V2's event: `rootKnowledge[m]` becomes `"InDoubt"`, `doubtKey[m]` becomes `k`, and the probe's read is due (`pc` `"Probe"`). Go `(*FS).commitLocked`'s `Fire` of `rootSwapUnknown`; exists, as of `71fee34` |
+| `Unresolved(m, k)` | what a write of the root pointer whose reply did not establish its ETag does: `SwapUnknown(m, k)` with `RootProbe`, and `CommitFails(m, k)` with `rootETag[m]` kept without it, as `commitLocked` does at `edcfc15`; reserved, ADR 0022 |
 | `FlushEffect(m, k)` | the chunk of `m`'s commit at `k`'s epoch is stored; an epoch-1 commit has none |
 | `SnapshotEffect(m, k)` | `m`'s snapshot `Put` of `k` takes effect, and with `ChunksFirst` the chunk uploads folded before it too |
-| `Diverge(m)` | V1's event, which `SwapConflict` conjoins: `commitLocked`'s `Fire` of `mountDiverge` on `FS.mode`, which makes a `"Writable"` mount's `mode[m]` `"Diverged"` and leaves any other mode as it is (the module's R11). Before the conversion, at `043927f`, it was `commitLocked`'s `diverged.Store(true)`, which made a read-only mount's `"Diverged"` too (V1's note) |
-| `Committed(m, k, et)` | `commitLocked`'s success path, with the root pointer's new ETag `et` |
+| `Diverge(m)` | V1's event: the `Fire` of `mountDiverge` on `FS.mode`, which makes a `"Writable"` mount's `mode[m]` `"Diverged"` and leaves any other mode as it is (the module's R11). With `RootProbe` it is `ProbeTheirs`'s, made by `resolveRoot` (ADR 0022 §2); without it `SwapConflict` conjoins it, as `commitLocked`'s `store.ErrPrecondition` case fired it at `edcfc15`. Before the conversion, at `043927f`, it was `commitLocked`'s `diverged.Store(true)`, which made a read-only mount's `"Diverged"` too (V1's note) |
+| `Committed(m, k, et)` | `commitLocked`'s success path, with the root pointer's new ETag `et`; since ADR 0022 it also records `k` as `rootSnapshot[m]` |
 | `BucketVars`, `MountVars`, `PruneVars`, `GhostVars`, `Vars` | the variables, in groups, for `UNCHANGED` and for `Spec` |
 | `Next`, `Spec` | the next-state relation, and the specification, `Init /\ [][Next]_Vars` |
 | `PassApartFromOwnCommits` | a state constraint, which only `CommitProtocol_PruneTwoWriters` sets: while a mount's prune pass runs, the mount completes no commit, and the pass has not deleted the snapshot of an attempt the mount has still to swap. TLC takes no step from a state that breaks it. `CommitProtocol_PruneOverlapTwoWriters` is the same configuration without it |
@@ -312,6 +367,7 @@ and `Below`, which ADR 0019 reserves.
 | `PruneBelowCurrent` | a prune pass deletes only the snapshot keys that sort below the one its commit swapped the root pointer to, and keeps the `Retention` newest of them, so the snapshot the root pointer names is never deleted (ADR 0019 §1, §2) | exists |
 | `AtomicLoad` | `loadOrInit` reads the root pointer's body and its ETag with one call, `store.Store.GetWithETag`, so the ETag its first commit swaps against is the ETag of the body it loaded, and a commit by another mount between a mount's reads is refused, not overwritten (ADR 0020 §1, §2) | exists, as of `c5068a0` |
 | `FallbackOptIn` | `commitLocked`, after `store.ErrUnsupported` from the swap, writes the root pointer unconditionally only on a mount whose operator set `Config.AllowUnconditionalRoot`, and otherwise fails the commit, writing nothing more and reclaiming the snapshot it uploaded, so one 501 never turns a conditional writer into an unconditional one (ADR 0021 §1, §2) | exists, as of `8415f61` |
+| `RootProbe` | a write of the root pointer whose reply did not establish its ETag leaves the mount's knowledge of the root pointer in doubt, and the mount writes the root pointer no further until one read of it, `GetWithETag`, has shown it naming the attempt, which the mount adopts, the key its namespace descends from, whose ETag it takes, or another key, on which it diverges, naming the writer; so no swap's error alone is taken for a second writer (ADR 0022 §1 to §4) | exists, as of `71fee34` |
 
 **Checked against rule 1.** Every name the CommitProtocol spec added here was
 checked against rule 1 and against the operators listed at the end of this
@@ -338,7 +394,20 @@ predeclared identifier. ADR 0021 added `FallbackOptIn` and
 operator above (`Head` is contained in neither), a Go keyword or
 predeclared identifier, or a TLA+ reserved word; and the Go names
 `AllowUnconditionalRoot`, `allowUnconditionalRoot` and `fallbackAllowed`,
-none a Go keyword or predeclared identifier.
+none a Go keyword or predeclared identifier. ADR 0022 added the bare names
+`RootProbe`, `SwapNoETag`, `SwapUnknown`, `Unresolved`, `ProbeOurs`,
+`ProbeUnchanged`, `ProbeTheirs`, `ProbeFailed` and `ClassifyRoot`, the
+values `"SwapNoETag"`, `"ProbeFailed"` and `pc[m]`'s `"Probe"`, and the
+variables `doubtKey` and `rootSnapshot`: each bare name is UpperCamel ASCII
+letters, none equals an operator above (`Any` is contained in none, and
+`Head` in none), a Go keyword or predeclared identifier, or a TLA+ reserved
+word; the variables are lowerCamel like every variable here. Its Go names,
+`rootState`, `rootEvent`, `rootStates`, `rootKnown`, `rootInDoubt`,
+`rootSwapOK`, `rootSwapUnknown`, `rootProbeOurs`, `rootProbeUnchanged`,
+`rootKnowledge`, `rootSnapshot`, `doubtKey`, `probeVerdict`, `probeOurs`,
+`probeUnchanged`, `probeTheirs`, `probeFailed`, `classifyRoot` and
+`resolveRoot`, are lowerCamel and none is a Go keyword or predeclared
+identifier.
 
 ## V4. Sync and file data
 
@@ -513,6 +582,16 @@ from its first access to the charge or to `of.bytes` until its last, and a
   the branch is a step the server takes on a store's answer, decided by the
   operator's configuration, which ADR 0018 §2 keeps outside the policy rule
   (ADR 0021 §5). Exists, as of `85dbfcf`.
+- `ClassifyRoot` = `classifyRoot(raw, etag, err, rootSnapshot, doubtKey)`, a
+  plain function in `internal/blobfs/commit.go`: the one place that decides
+  what one read of the root pointer shows a mount whose knowledge of it is in
+  doubt, by the key the body names (ADR 0022 §3). The spec states its four
+  outcomes as the actions `ProbeOurs`, `ProbeUnchanged`, `ProbeTheirs` and
+  `ProbeFailed` (V3) rather than as one predicate, so the name here is the
+  function's under rule 4. It is not a `policy.Policy`: no caller asks for an
+  adoption or a divergence, and it reads no caller; it is a step the server
+  takes on a store's answer, which ADR 0018 §2 keeps outside the policy rule
+  (ADR 0022 §6). Exists, as of `71fee34`.
 
 ## Operators of the standard modules
 

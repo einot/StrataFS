@@ -9,16 +9,20 @@ This file says what the directory holds, how to read it and how to run it.
 ## What is here now
 
 - **`CommitProtocol.tla`**: how a mount reads the root pointer, commits,
-  prunes snapshots and diverges, against other mounts, failing store calls
-  and crashes (ADR 0013 §1, item 1). It is checked against `faeba5b`.
-- **Its 32 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
-  nineteen MustHold and thirteen MustFail. Ten of the MustFail ones each
-  remove a fix the code has, one of them,
+  settles a root pointer in doubt, prunes snapshots and diverges, against
+  other mounts, failing store calls and crashes (ADR 0013 §1, item 1). It is
+  checked against `71fee34`.
+- **Its 40 configurations**, `CommitProtocol.cfg` and `CommitProtocol_*.cfg`:
+  twenty-six MustHold and fourteen MustFail. Every MustFail one removes a
+  fix the code has, one of them,
   `CommitProtocol_UnconditionalTwoWriters`, stating besides what ADR 0021's
-  opt-in gives up, and three each show an open defect, #5 by three. Ten of
-  the MustHold ones showed a defect until its fix flipped them, eight #88
-  (ADR 0019), one #89 (ADR 0020) and one #91 (ADR 0021), and keep the two
-  invariants they had (*MustHold and MustFail*). Each
+  opt-in gives up; none shows an open defect. Thirteen of the MustHold ones
+  showed a defect until its fix flipped them, eight #88 (ADR 0019), one #89
+  (ADR 0020), one #91 (ADR 0021) and three #5 (ADR 0022), and keep the two
+  invariants they had (*MustHold and MustFail*); one more,
+  `CommitProtocol_SwapNoETag`, was written MustHold with ADR 0022's fix for
+  #103 in it, since one ADR showed and closed that defect, and
+  `CommitProtocol_NoRootProbeNoETag` shows the defect without it. Each
   opens with a comment giving its expectation, its issue or the fix it
   removes, and the source of each `Fixes` member. One,
   `CommitProtocol_PruneTwoWriters`, also sets a state constraint,
@@ -62,10 +66,11 @@ Each module opens with a header comment that states:
   stand for a run of Go steps, and its **assumptions**: the judgement calls
   the model rests on, which no requirement made.
 
-`CommitProtocol.tla` has five `Revised:` lines: for ADR 0019's fix of #88,
+`CommitProtocol.tla` has six `Revised:` lines: for ADR 0019's fix of #88,
 for ADR 0020's fix of #89, two for ADR 0021's fix of #91, the second from
-its review, and one for ADR 0014 §7's conversion of the mount mode. Each
-action's comment names the Go symbols that `trace.tsv` gives it.
+its review, one for ADR 0014 §7's conversion of the mount mode, and one for
+ADR 0022's fix of #5 and #103, the root-pointer knowledge machine and its
+probe. Each action's comment names the Go symbols that `trace.tsv` gives it.
 
 Every module declares the constant `Fixes`, the set of fixes a configuration
 includes, and its actions consult it, so one module describes the code with
@@ -153,7 +158,7 @@ all three:
   The runner asks no more, because a defect's configuration keeps its two
   invariants when it flips, and the flip may change nothing else (ADR 0013
   §7). A configuration written as MustHold lists every property its module
-  defines, as the nine here do; review holds it to that, since the runner
+  defines, as the thirteen here do; review holds it to that, since the runner
   cannot tell the two kinds apart.
 - **A MustHold configuration with a state constraint has a twin.** A
   constraint stops TLC taking a step from a state that breaks it

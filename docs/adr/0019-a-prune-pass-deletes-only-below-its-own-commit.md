@@ -13,6 +13,20 @@ only on a mount whose operator set `Config.AllowUnconditionalRoot`, so the
 case §1 names, two writers on the fallback, needs two such mounts; without
 the opt-in such a swap fails the commit and writes nothing. The rule, the Go
 change and the configurations here are unchanged.
+**Revised:** 2026-10-27 — cross-reference only: ADR 0022 decided #5. A swap
+or a fallback `Put` that takes effect and returns an error no longer leaves
+the mount holding a stale ETag: the mount reads the root pointer, finds it
+naming the attempt, and adopts it, so `Sync` returns nil there. §6's R7 and
+R8, which observe that `Sync` returning an error, change as ADR 0022 §8
+says; §1's argument stands, since an adopted key is the one the root pointer
+already names (ADR 0022 §5). The rule, the Go change and the configurations
+here are unchanged.
+**Revised:** 2026-10-28 — cross-reference only, to make the line above
+plain: §6's text for R7 and R8 is kept as the record and still describes the
+code before ADR 0022. Since that ADR, the `Sync` after `armSwapLost` or
+`armRootPutLost` returns nil, the root pointer names the applied key as
+before, and the retry each test then makes needs a change made first, since
+the namespace is clean (ADR 0022 §8). Nothing else moved.
 **Issue:** #88
 
 ## Context

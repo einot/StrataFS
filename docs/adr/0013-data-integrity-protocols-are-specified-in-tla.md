@@ -12,6 +12,12 @@ that conversion, the mount mode `FS.mode`, an `fsm.Atomic` whose `Fire` of
 `mutable()`'s `Load`; a sentence at each says so. The arguments stand, since
 each rests on the read and the write being atomic and on the read being made
 holding no lock, which are as they were. Nothing else changed.
+**Revised:** 2026-10-27 — cross-reference only: ADR 0022 decided #5, the
+root-pointer knowledge Assumption 1 names as the second reserved fix, and
+#103 with it. Assumption 1's sentence that `commitLocked` keeps its old
+`rootETag` after a failed swap, and Assumption 5's that `errorFor`'s 409 is
+taken for divergence, describe the code before that ADR; the model now
+carries the fix as the `Fixes` member `RootProbe`. Nothing else changed.
 **Issue:** #109
 
 ## Context

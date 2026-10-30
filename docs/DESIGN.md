@@ -429,10 +429,16 @@ Step 4 after step 3 is WAFL's one ordering constraint from §3.6: all blocks of
 the consistency point reach storage before the root does. Violating it is the
 only way to produce a root that names something absent.
 
-A failed CAS means another mount advanced the filesystem. The PoC's answer —
-refuse further writes and demand a remount — stays, because merging two
-divergent trees is a different problem and pretending otherwise loses data
-silently.
+A CAS the store refuses with another mount's `fsinfo` in place means another
+mount advanced the filesystem. The PoC's answer — refuse further writes and
+demand a remount — stays, because merging two divergent trees is a different
+problem and pretending otherwise loses data silently. A CAS that fails
+without showing that — a lost reply, a 409, a reply without an ETag — is
+not taken for a second writer: the mount's knowledge of `fsinfo` is in
+doubt, and one read of it, body and ETag together, settles whether the swap
+took effect, nothing changed, or another mount wrote, before the mount
+writes `fsinfo` again
+([ADR 0022](adr/0022-a-failed-root-swap-is-settled-by-one-read-of-the-root-pointer.md)).
 
 ---
 
@@ -724,3 +730,4 @@ it is not this one.
 | [0019](adr/0019-a-prune-pass-deletes-only-below-its-own-commit.md) | A prune pass deletes only snapshots whose keys sort below the one its commit swapped the root pointer to, keeping the newest `-snapshot-retention` of them, and never reads the root pointer, so the snapshot the root pointer names is never deleted; `prunable` in `internal/blobfs` is the one place that decides what a pass deletes | none — it constrains `internal/blobfs`, which section 14 replaces; the sweeper of section 8, specified before its code (ADR 0013), inherits the rule that nothing the active root names is deleted |
 | [0020](adr/0020-a-mount-loads-the-root-pointer-and-its-etag-in-one-read.md) | A mount loads the root pointer and its ETag in one read: `loadOrInit` takes both from one store call, `GetWithETag`, never from a separate `Head`, so the ETag its first commit compare-and-swaps against is the ETag of the namespace it loaded, and a root pointer read that returns no ETag fails the mount | 5 — step 4's `If-Match` ETag, which the `fsinfo` load inherits; otherwise `internal/store`'s `Store` interface and `internal/blobfs`, which section 14 replaces |
 | [0021](adr/0021-the-unconditional-root-write-needs-the-operators-opt-in.md) | The unconditional root write needs the operator's opt-in: a conditional write of the root pointer that the store answers with 501 fails the commit, and nothing more is written, unless the mount was started with `-allow-unconditional-root`, which restores the unconditional write and asserts a single writer; `-check` fails such a store without the flag and passes it with a caveat with it; `fallbackAllowed` in `internal/blobfs` is the one place that decides it | 2 — the note on where this runs; 5 — step 4's swap, whose `fsinfo` form inherits that no store reply grants an unconditional write; otherwise `internal/blobfs` and `cmd/strata` |
+| [0022](adr/0022-a-failed-root-swap-is-settled-by-one-read-of-the-root-pointer.md) | A failed root-pointer swap is settled by one read of the root pointer, never taken for a second writer: a write of the root pointer whose reply did not establish its ETag leaves the mount's knowledge of it in doubt, a machine under `FS.mu`, and the mount writes the root pointer no further until one read shows it naming the attempt (adopted), the snapshot the namespace descends from (its ETag taken), or another writer's (diverged, with that writer named in the log); `classifyRoot` in `internal/blobfs` is the one place that decides it | 5 — step 4's failed CAS, whose `fsinfo` form inherits that divergence needs a positive showing from a read; otherwise `internal/blobfs`, which section 14 replaces |

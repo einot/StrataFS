@@ -44,6 +44,11 @@ package blobfs
 //     Assumption 26).
 //
 // Elsewhere:
+//   - What the mount does after a 501 that took effect, which #5 owns, is
+//     decided by ADR 0022 section 4 and tested by K12,
+//     TestA501ThatTookEffectIsAdopted, in
+//     internal/blobfs/root_knowledge_test.go; G3 here asserts the same Sync
+//     result.
 //   - O5, the R8 update, is in internal/blobfs/prune_root_test.go.
 //   - C1 to C3, which call runCheck, are in cmd/strata/check_test.go.
 //
@@ -54,8 +59,7 @@ package blobfs
 //     the reclaim's Delete follows only a Get of rootKey that returned
 //     not-found or a root pointer naming another key, and only of the key
 //     the commit wrote; that the reclaim changes no field and not the error;
-//     what the mount does after a 501 that took effect (#5's); that the
-//     opt-in branch is the code of 247a276; who reads and writes
+//     that the opt-in branch is the code of 247a276; who reads and writes
 //     FS.allowUnconditionalRoot; the flag's wiring and help text; -check's
 //     severity; the TLA+ lines and trace.tsv rows.
 //   - Logs, whose attributes ADR 0021 Assumption 8 does not pin, and the
@@ -1347,13 +1351,21 @@ func TestRefusedInitLeavesTheBucketEmpty(t *testing.T) {
 // and the reclaim's read of it sees so and deletes nothing (ADR 0021 section
 // 2, the reclaim, step 3; Assumption 22). A filesystem is seeded with c1 on
 // the inner store; New on the harness, not in its unconditional mode, without
-// the opt-in; apply-then-501 armed; a commit of c2 returns F3's error; the
-// harness logged no Delete; the root pointer on the inner store names the
-// key of the last Put under snapshotPrefix, and that object exists; and a
-// remount has c1 and c2. What the mount does next is #5's, and is not
-// asserted.
+// the opt-in; apply-then-501 armed; a commit of c2 returns nil; the harness
+// logged no Delete; the root pointer on the inner store names the key of the
+// last Put under snapshotPrefix, and that object exists; and a remount has c1
+// and c2.
 //
-// It is green at 53abeb7, which makes no Delete, and must stay green.
+// What ADR 0022 changed (section 4; section 5, ADR 0021's reclaim; section 8,
+// K12 and the changes to existing tests): the Sync's result. The reclaim's
+// read showing the root pointer naming the attempt raises doubt, and one read
+// of the root pointer then adopts the attempt in the same call, so Sync
+// returns nil where it returned F3's error before. Its other assertions
+// stand. K12, TestA501ThatTookEffectIsAdopted in
+// internal/blobfs/root_knowledge_test.go, asserts the same and what follows.
+//
+// It was green at 53abeb7, which makes no Delete; at edcfc15 it fails on the
+// Sync's result, since the refusal is returned there.
 func TestRefusedCommitKeepsASnapshotTheRootPointerNames(t *testing.T) {
 	h, ctx := sf91NewHarness(t, false)
 	sf91Seed(t, ctx, h.inner, "c1")
@@ -1361,9 +1373,12 @@ func TestRefusedCommitKeepsASnapshotTheRootPointerNames(t *testing.T) {
 	fs := sf91MustNew(t, ctx, "ADR 0021 section 6, G3: New, without the opt-in, on the harness over the "+
 		"seeded bucket", sf91Config(h))
 	h.armApplyThen501()
-	err := sf91Commit(t, ctx, fs, "c2", "ADR 0021 section 6, G3: Sync of the commit of c2")
-	sf91CheckRefused(t, err, "Sync of the commit of c2, whose swap the store applied and answered "+
-		"store.ErrUnsupported", "ADR 0021 section 6, G3")
+	if err := sf91Commit(t, ctx, fs, "c2", "ADR 0021 section 6, G3: Sync of the commit of c2"); err != nil {
+		t.Errorf("Sync of the commit of c2, whose swap the store applied and answered store.ErrUnsupported, = %v, "+
+			"want nil: the reclaim's read shows the root pointer naming the attempt, and one read of the root "+
+			"pointer then adopts it in the same call (ADR 0022 section 4; Assumption 11; ADR 0021 section 6, G3)",
+			err)
+	}
 
 	rec := h.records()
 	if len(rec.deleted) != 0 {

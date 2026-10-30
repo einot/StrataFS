@@ -26,18 +26,44 @@ CommitProtocol	PutSnapshot	internal/store/s3.go	S3.Put	none of its own; called h
 CommitProtocol	SwapOK	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	README.md How a commit works
 CommitProtocol	SwapOK	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitLocked's locks	README.md How a commit works
 CommitProtocol	SwapOK	internal/store/local.go	Local.PutIfMatch	Local.mu, inside commitLocked's locks	README.md How a commit works
-CommitProtocol	SwapReplyLost	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	-
+CommitProtocol	SwapReplyLost	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0022 section 4
 CommitProtocol	SwapReplyLost	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitLocked's locks	-
 CommitProtocol	SwapReplyLost	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	-
-CommitProtocol	SwapFailed	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	-
+CommitProtocol	SwapFailed	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0022 section 4
 CommitProtocol	SwapFailed	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitLocked's locks	-
 CommitProtocol	SwapFailed	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	-
 CommitProtocol	SwapFailed	internal/store/local.go	Local.PutIfMatch	Local.mu, inside commitLocked's locks	-
-CommitProtocol	SwapConflict	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0003 section 5
+CommitProtocol	SwapConflict	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0003 section 5; ADR 0022 section 4
 CommitProtocol	SwapConflict	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	-
 CommitProtocol	SwapConflict	internal/store/local.go	Local.PutIfMatch	Local.mu, inside commitLocked's locks	-
-CommitProtocol	Diverge	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0003 section 5; ADR 0014 section 7
-CommitProtocol	SwapUnsupported	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0021 section 2; docs/DESIGN.md section 2
+CommitProtocol	Diverge	internal/blobfs/commit.go	FS.resolveRoot	commitGate (write) and FS.mu (write), held by commitLocked from Sync; none from initEmpty	ADR 0003 section 5; ADR 0014 section 7; ADR 0022 section 2
+CommitProtocol	SwapUnknown	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0022 section 2; ADR 0022 section 4
+CommitProtocol	SwapNoETag	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0022 section 4
+CommitProtocol	SwapNoETag	internal/store/s3.go	S3.PutIfMatch	none of its own; called holding commitLocked's locks	ADR 0022 section 4
+CommitProtocol	ProbeOurs	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0022 section 3; ADR 0022 section 4
+CommitProtocol	ProbeOurs	internal/blobfs/commit.go	FS.resolveRoot	commitGate (write) and FS.mu (write), held by commitLocked from Sync; none from initEmpty	ADR 0022 section 3
+CommitProtocol	ProbeOurs	internal/blobfs/commit.go	classifyRoot	none: a pure function of its arguments	ADR 0022 section 3
+CommitProtocol	ProbeOurs	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	ProbeOurs	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	ProbeUnchanged	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0022 section 3; ADR 0022 section 4
+CommitProtocol	ProbeUnchanged	internal/blobfs/commit.go	FS.resolveRoot	commitGate (write) and FS.mu (write), held by commitLocked from Sync; none from initEmpty	ADR 0022 section 3
+CommitProtocol	ProbeUnchanged	internal/blobfs/commit.go	classifyRoot	none: a pure function of its arguments	ADR 0022 section 3
+CommitProtocol	ProbeUnchanged	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	ProbeUnchanged	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	ProbeUnchanged	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	ProbeTheirs	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0022 section 3; ADR 0022 section 4
+CommitProtocol	ProbeTheirs	internal/blobfs/commit.go	FS.resolveRoot	commitGate (write) and FS.mu (write), held by commitLocked from Sync; none from initEmpty	ADR 0022 section 3
+CommitProtocol	ProbeTheirs	internal/blobfs/commit.go	classifyRoot	none: a pure function of its arguments	ADR 0022 section 3
+CommitProtocol	ProbeTheirs	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	ProbeTheirs	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	ProbeTheirs	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	ProbeFailed	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0022 section 3; ADR 0022 section 4
+CommitProtocol	ProbeFailed	internal/blobfs/commit.go	FS.resolveRoot	commitGate (write) and FS.mu (write), held by commitLocked from Sync; none from initEmpty	ADR 0022 section 3
+CommitProtocol	ProbeFailed	internal/blobfs/commit.go	classifyRoot	none: a pure function of its arguments	ADR 0022 section 3
+CommitProtocol	ProbeFailed	internal/store/s3.go	S3.GetWithETag	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	ProbeFailed	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	ProbeFailed	internal/store/local.go	Local.GetWithETag	none of its own; called holding commitLocked's locks	ADR 0022 section 3
+CommitProtocol	SwapUnsupported	internal/blobfs/commit.go	FS.commitLocked	commitGate (write) and FS.mu (write) from Sync; none from initEmpty	ADR 0021 section 2; ADR 0022 section 4; docs/DESIGN.md section 2
 CommitProtocol	SwapUnsupported	internal/blobfs/commit.go	FS.fallbackAllowed	none: allowUnconditionalRoot is set once by New	ADR 0021 section 2
 CommitProtocol	SwapUnsupported	internal/store/s3.go	errorFor	none of its own; called holding commitLocked's locks	-
 CommitProtocol	SwapUnsupported	internal/store/store.go	ReadOnly.PutIfMatch	none of its own; called holding commitLocked's locks	ADR 0011 section 3

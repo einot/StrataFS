@@ -6,16 +6,21 @@ package blobfs
 // (docs/adr/0014-state-machines-are-tables-and-permission-checks-are-policies.md)
 // sections 2, 3, 7, 9 and 11 (the blobfs block M1 to M9 and its harness
 // paragraph), docs/vocabulary.md V1, ADR 0011 sections 2, 4 and 7, ADR 0003
-// section 1, ADR 0021 sections 2 and 6, ADR 0009 section 5 and
-// internal/vfs/vfs.go.
+// section 1, ADR 0021 sections 2 and 6, ADR 0009 section 5, ADR 0022
+// (docs/adr/0022-a-failed-root-swap-is-settled-by-one-read-of-the-root-pointer.md)
+// sections 2, 3, 5 and 8, and internal/vfs/vfs.go.
 //
 // The machine (ADR 0014 section 7): the mount mode is FS.mode, an
 // *fsm.Atomic[mountMode, mountEvent] over the table mountModes, named "mode",
 // whose one edge is Writable to Diverged on Diverge. New makes it ReadOnly
 // when Config.ReadOnly is set and Writable otherwise, before loadOrInit.
-// commitLocked's store.ErrPrecondition case is its one writer; ADR 0021
-// section 2's refusal of a swap answered store.ErrUnsupported fires nothing.
-// mutable() is nil exactly when the mode is Writable.
+// Since ADR 0022 its one Fire is made by resolveRoot, which only commitLocked
+// calls, when one read of the root pointer after a failed write of it shows
+// another writer's root pointer (ProbeTheirs; ADR 0022 sections 2 and 3); a
+// swap's error alone, store.ErrPrecondition included, no longer fires it.
+// ADR 0021 section 2's refusal of a swap answered store.ErrUnsupported fires
+// nothing while its read shows another root pointer. mutable() is nil exactly
+// when the mode is Writable.
 //
 // Covered:
 //   - M1: TestNewSetsTheMountModeFromConfigReadOnly.
@@ -29,11 +34,18 @@ package blobfs
 //   - M9: TestMutableAnswersForEveryMountMode.
 //
 // Elsewhere: M4 is TestWriteRacingADivergingCommitIsNotADataRace in
-// internal/blobfs/diverged_race_test.go, unchanged.
+// internal/blobfs/diverged_race_test.go, whose fake now writes a foreign root
+// pointer before it refuses the swap (ADR 0022 section 8).
 //
-// Not covered, on purpose: what ADR 0014 section 11 leaves to review (that
-// FS.readOnly and FS.diverged are gone, that commitLocked's Fire is the only
-// writer, that a failed Fire is logged, where the mode is read, the field's
+// The tests that diverge a mount (M3, M7) do so by a real second writer: a
+// foreign root pointer written on the inner store, as ADR 0022 section 8's
+// facts describe, before the swap the fake refuses, so that the read that
+// follows the refusal finds another writer (ADR 0022 section 5).
+//
+// Not covered, on purpose: what ADR 0014 section 11 and ADR 0022 section 8
+// leave to review (that FS.readOnly and FS.diverged are gone, that
+// resolveRoot's Fire is the only writer, that a failed Fire is logged, where
+// the mode is read, the field's
 // doc comment, the TLA+ and trace.tsv changes); every log record; what the
 // bucket holds after M8's refused New; and the Get and Delete of ADR 0021
 // section 2's reclaim in M6, which the fake passes through and nothing here
@@ -418,14 +430,20 @@ func TestMountModesTableHasOnlyTheDivergeEdge(t *testing.T) {
 
 // TestASwapLostToAnotherWriterDivergesTheMountAndItStoresNothingMore is M3's
 // writable half and M7 of ADR 0014 section 11. On a writable mount with one
-// commit behind it (initEmpty's) and a change since (a Create), a Sync whose
-// swap of rootKey the fake fails with store.ErrPrecondition returns an error
-// and leaves f.mode.State() == mountDiverged, since commitLocked fires
-// mountDiverge (section 7); a Write and a Create after it answer
+// commit behind it (initEmpty's) and a change since (a Create), another
+// writer moves the root pointer: a foreign root pointer, with Writer
+// "other-host/4242", is written on the inner store (ADR 0022 section 8, the
+// facts). A Sync whose swap of rootKey the fake then fails with
+// store.ErrPrecondition returns an error and leaves f.mode.State() ==
+// mountDiverged: the read of the root pointer that follows the refusal shows
+// another writer's root pointer, and resolveRoot fires mountDiverge (ADR 0022
+// sections 2, 3 and 5; at edcfc15 commitLocked fired it on the refusal
+// alone, ADR 0014 section 7). A Write and a Create after it answer
 // vfs.ErrStale, since mutable() maps mountDiverged so. Then a second Sync
 // fails too, and from the swap that failed onwards no Put, PutIfMatch or
 // Delete of any key reaches the store: a diverged mount's commit is refused at
-// commitLocked's top before it stores anything (section 7; M7).
+// commitLocked's top before it stores anything (section 7; M7). The read is a
+// GetWithETag, which the fake does not record.
 func TestASwapLostToAnotherWriterDivergesTheMountAndItStoresNothingMore(t *testing.T) {
 	ctx := t.Context()
 	fake := &mm14Store{inner: mm14Local(t)}
@@ -440,6 +458,15 @@ func TestASwapLostToAnotherWriterDivergesTheMountAndItStoresNothingMore(t *testi
 	if err != nil {
 		t.Fatalf("Create %q in the root directory as its owner (%d, %d) = %v, want success (ADR 0010)", "a",
 			owner.UID, owner.GID, err)
+	}
+
+	// Another writer moves the root pointer (ADR 0022 section 8, the foreign
+	// root pointer), at the mount's epoch plus one: 2, since New over an empty
+	// bucket initialises epoch 1 (ADR 0021 section 6, F1 step 1) and no commit
+	// has followed. The epoch is not read from FS.epoch, since ADR 0014
+	// section 11 lets this file read no unexported field but f.mode.
+	if _, err := rk5WriteForeignRoot(ctx, fake.inner, 2, rk5Writer); err != nil {
+		t.Fatalf("setup: writing a foreign root pointer on the inner store: %v", err)
 	}
 
 	// The swap is lost to another writer.
@@ -458,7 +485,8 @@ func TestASwapLostToAnotherWriterDivergesTheMountAndItStoresNothingMore(t *testi
 	}
 	if got := mm14Mode(t, fs, "f.mode.State() after the lost swap"); got != mountDiverged {
 		t.Errorf("after a Sync whose swap failed with store.ErrPrecondition, f.mode.State() = %v (%d), want %v "+
-			"(%d): commitLocked fires mountDiverge, Writable to Diverged (ADR 0014 section 7; section 11, M3)",
+			"(%d): resolveRoot fires mountDiverge, Writable to Diverged, on the read that shows another writer's "+
+			"root pointer (ADR 0022 sections 2 and 3; ADR 0014 section 11, M3)",
 			got, uint32(got), mountDiverged, uint32(mountDiverged))
 	}
 
@@ -594,8 +622,9 @@ func TestRefusedUnconditionalSwapLeavesTheMountWritable(t *testing.T) {
 	}
 	if got := mm14Mode(t, fs, "f.mode.State() after the refused swap"); got != mountWritable {
 		t.Errorf("after a Sync whose swap was answered store.ErrUnsupported, without AllowUnconditionalRoot, "+
-			"f.mode.State() = %v (%d), want %v (%d): ADR 0021's refusal fires nothing, and only "+
-			"store.ErrPrecondition fires mountDiverge (ADR 0014 section 7; section 11, M6; ADR 0021 section 2)",
+			"f.mode.State() = %v (%d), want %v (%d): ADR 0021's refusal fires nothing while its read shows "+
+			"another root pointer, and only a read of the root pointer that shows another writer's fires "+
+			"mountDiverge (ADR 0014 section 7; section 11, M6; ADR 0021 section 2; ADR 0022 sections 2 to 4)",
 			got, uint32(got), mountWritable, uint32(mountWritable))
 	}
 	if _, err := mm14Create(t, ctx, fs, owner, "b"); err != nil {
@@ -608,10 +637,12 @@ func TestRefusedUnconditionalSwapLeavesTheMountWritable(t *testing.T) {
 // TestNewWhoseFirstSwapLosesFailsWithoutPanicking is M8 of ADR 0014 section
 // 11: a writable New over an empty bucket behind a fake whose first
 // PutIfMatch of rootKey fails with store.ErrPrecondition returns a nil *FS
-// and a non-nil error, and does not panic, since New makes f.mode before
-// loadOrInit and initEmpty's commit can fire mountDiverge (section 7). What
-// the bucket then holds is not pinned, and the *FS, if any, is never used
-// (ADR 0011 section 7).
+// and a non-nil error, and does not panic. Since ADR 0022 the refusal is
+// followed by one read of the root pointer, which finds none while the mount
+// descends from none, so the root is settled as unchanged and the commit, and
+// New, fail without the mode moving (ADR 0022 section 3, classifyRoot's rule
+// 1; section 5). What the bucket then holds is not pinned, and the *FS, if
+// any, is never used (ADR 0011 section 7).
 func TestNewWhoseFirstSwapLosesFailsWithoutPanicking(t *testing.T) {
 	ctx := t.Context()
 	fake := &mm14Store{inner: mm14Local(t)}
@@ -631,9 +662,9 @@ func TestNewWhoseFirstSwapLosesFailsWithoutPanicking(t *testing.T) {
 			mm14Bound)
 	}
 	if c.panicked {
-		t.Fatalf("%s panicked with %v, want it to return a nil *FS and an error: New makes f.mode before "+
-			"loadOrInit, since initEmpty's commit can fire mountDiverge (ADR 0014 section 7; section 11, M8)",
-			what, c.pval)
+		t.Fatalf("%s panicked with %v, want it to return a nil *FS and an error: New makes f.mode and "+
+			"f.rootKnowledge before loadOrInit, since initEmpty's commit fires on them (ADR 0014 section 7; "+
+			"section 11, M8; ADR 0022 section 2)", what, c.pval)
 	}
 	if !c.returned {
 		t.Fatalf("%s ended without returning (runtime.Goexit), want it to return (ADR 0011 section 7)", what)

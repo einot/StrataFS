@@ -33,6 +33,23 @@ of the mount mode: the `FS.diverged` that §2 and §5 name, and the
 nothing", which ADR 0014 §7 now states and its M6 tests; §2's words stay,
 since a test cites them, and a parenthesis at §2 and at §5 says this. The
 rule, the flag, the Go change and the model are unchanged.
+**Revised:** 2026-10-27 — cross-reference only: ADR 0022 decided #5, which
+§2's step 3, §4, Assumption 22 and *What this does not decide* leave to it.
+The reclaim's step 3, a guard read showing the root pointer naming the
+attempt's key, and its step 4's read-failed and not-understood cases now
+leave the root pointer in doubt and read it again, so a 501 that took effect
+is adopted in the same call and `Sync` returns nil there, which changes G3's
+assertion on that error as ADR 0022 §8 says; its positive cases, the
+`Delete` and the error are unchanged, and the guard read stays a `Get`. An
+opted-in fallback `Put` or `Head` that fails leaves the root in doubt too.
+The rule, the flag, the model and the rest of the Go change are unchanged.
+**Revised:** 2026-10-28 — cross-reference only, to make the line above
+plain: §6's G3 says it "must stay green: it guards the reclaim". It stays
+green, and it still guards the reclaim, with one assertion changed: since
+ADR 0022 the `Sync` of its commit `c2` returns nil, not F3's error, because
+the 501 that took effect is adopted; its other assertions, no `Delete`, the
+root pointer naming the attempt's key, which exists, and the remount with
+`c1` and `c2`, stand (ADR 0022 §8, K12). Nothing else moved.
 **Issue:** #91
 
 ## Context
