@@ -2015,9 +2015,9 @@ func (f *FS) flushAll(ctx context.Context) error {
 // settleAll is Sync's settle pass: it flushes every file whose unsettled mark
 // is set, and returns the first error (ADR 0012 §2). It lists them holding mu
 // for reading, which excludes the mark's writers, and flushes holding no mu.
-// Its caller must hold the commit gate for writing and no other lock, so that
-// no truncate can mark a file once the list is taken, and a pass that succeeds
-// leaves none marked (§3, §5).
+// Its caller must hold commitMu and the commit gate for writing and no other
+// lock, so that no truncate can mark a file once the list is taken, and a pass
+// that succeeds leaves none marked (§3, §5; ADR 0023 §2, §4).
 //
 // TLA+: docs/tla/CommitProtocol.tla Flush
 func (f *FS) settleAll(ctx context.Context) error {

@@ -470,9 +470,13 @@ func (f *FS) commitSealed(ctx context.Context, s *sealedCommit) error {
 
 	// Every store call of the case above has returned, so what follows holds
 	// mu for writing only to fire the machine and apply the outcome, and
-	// releases it before resolveRoot's read (ADR 0023 §2).
+	// releases it before resolveRoot's read. Each hold is released by defer,
+	// so that a panic underneath (a log handler) cannot leave mu held: the
+	// RPC layer recovers a handler's panic and keeps serving, and a mount
+	// whose mu is never released answers nothing (ADR 0023 §2, Assumption 31).
 	if !doubt {
 		f.mu.Lock()
+		defer f.mu.Unlock()
 		// A self-loop. A Fire that fails is logged and the success path follows
 		// anyway, since the store applied the write (ADR 0022 §4; ADR 0014
 		// Assumption 38).
@@ -480,13 +484,19 @@ func (f *FS) commitSealed(ctx context.Context, s *sealedCommit) error {
 			f.logRootFire(from, rootSwapOK, ferr)
 		}
 		f.applyLocked(s, newETag)
-		f.mu.Unlock()
 		return nil
 	}
 
-	f.mu.Lock()
-	f.doubtKey = s.key
-	if from, _, ferr := f.rootKnowledge.Fire(rootSwapUnknown); ferr != nil {
+	// The doubt is raised in a hold of its own, a closure, since the function
+	// goes on to resolveRoot's read, which must not run under mu.
+	settled, serr := func() (bool, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.doubtKey = s.key
+		from, _, ferr := f.rootKnowledge.Fire(rootSwapUnknown)
+		if ferr == nil {
+			return false, nil
+		}
 		// Unreachable: the top of the commit settled any doubt. No read is
 		// made, and the outcome is answered as it was before ADR 0022, in this
 		// same hold; the mode is not moved, since only resolveRoot moves it
@@ -494,16 +504,16 @@ func (f *FS) commitSealed(ctx context.Context, s *sealedCommit) error {
 		f.logRootFire(from, rootSwapUnknown, ferr)
 		f.doubtKey = ""
 		if oldErr != nil {
-			f.mu.Unlock()
-			return oldErr
+			return true, oldErr
 		}
 		// The success path with "" as FS.rootETag, as ADR 0023 Assumption 27
 		// pins it.
 		f.applyLocked(s, "")
-		f.mu.Unlock()
-		return nil
+		return true, nil
+	}()
+	if settled {
+		return serr
 	}
-	f.mu.Unlock()
 
 	switch f.resolveRoot(ctx) {
 	case probeOurs:
@@ -512,8 +522,8 @@ func (f *FS) commitSealed(ctx context.Context, s *sealedCommit) error {
 		// in a second hold; a change made between the two advances the count,
 		// and the guard sees it (ADR 0022 §4; ADR 0023 §5, Assumption 25).
 		f.mu.Lock()
+		defer f.mu.Unlock()
 		f.applyLocked(s, f.rootETag)
-		f.mu.Unlock()
 		return nil
 	case probeTheirs:
 		return errCommitConflict
