@@ -27,6 +27,17 @@ added for it, and the `Fixes` members `UnlockedCommit` and
 `ClearIfUnchanged` carry the change. §4's FileData fold of `SyncCommit`,
 "all of `commitLocked`", is left to that spec's PR (ADR 0023, *What this
 does not decide*). The rules of §4 to §11 are unchanged.
+**Revised:** 2026-10-30 — in place, by the owner's decision: §7's append-only
+rule now says what "existing" means, a configuration merged to `main`; one
+written on a branch and not yet merged may still be changed there before
+merge, recalibrated and re-recorded, since nothing on `main` ever recorded
+its earlier form. Assumption 16 gains the matching clause. This records the
+reading ADR 0022 Assumption 31 made for `CommitProtocol_SwapNoETag` and its
+twin, which review judged sound and asked the rule to say outright, so that
+no later ADR argues it for itself. The rule's purpose, that what `main`
+recorded each fix as needed for is never lost, the flip, and the rest of §7
+are unchanged; nor does this let a landed fix join a configuration on
+`main`, the question ADR 0020 Assumption 10 leaves open.
 **Issue:** #109
 
 ## Context
@@ -438,7 +449,10 @@ Go names in one PR.
 - A fix that lands flips its defect's configuration to MustHold, with the fix
   added to its `Fixes`, and adds a MustFail configuration that removes it.
 - Configurations are append-only: none is deleted or renamed, and the flip is
-  the only change an existing one takes.
+  the only change an existing one takes. Existing means merged to `main`: a
+  configuration written on a branch and not yet merged may still be changed
+  on that branch before merge, recalibrated and re-recorded, since nothing
+  on `main` ever recorded its earlier form.
 - The exit statuses and log texts by which the runner tells these outcomes
   apart go in `docs/tla/manifest.tsv`, after the session has confirmed them
   against the installed TLC, and not in this ADR.
@@ -737,10 +751,11 @@ when TLC runs in §10, and the issue in *Context*.
     is caught; every open defect gets one, so that the gate is green while
     the defect is open, and the manifest lists it (*Consequences*).
     Configurations are append-only, and a flip edits one: the flip is the
-    only change an existing configuration takes, its expectation and the fix
-    added to its `Fixes`, so what each fix was shown to be needed for is never
-    lost. The exit statuses and log texts wait for the session, the only
-    layer that can run TLC and see what this version prints.
+    only change an existing configuration takes, one merged to `main` (§7),
+    its expectation and the fix added to its `Fixes`, so what each fix was
+    shown to be needed for, once `main` records it, is never lost. The exit
+    statuses and log texts wait for the session, the only layer that can run
+    TLC and see what this version prints.
 17. **Pins in `docs/tla/tools.tsv`** (§9). Versions, sources, sizes and
     checksums live there, not here, so a new pin changes a data file and does
     not revise an ADR. The values in *Context* are a record of 2026-10-10.

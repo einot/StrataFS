@@ -110,7 +110,9 @@ comment, apart from its `Spec:` line, for example:
 When a fix lands, its defect's configuration flips to MustHold, with the fix
 added to its `Fixes`, and a MustFail configuration that removes the fix is
 added. Configurations are never deleted or renamed, and the flip is the only
-change an existing one takes (ADR 0013 §7). A defect that several
+change an existing one takes, where existing means merged to `main`: one on
+a branch not yet merged may still be changed there before merge,
+recalibrated and re-recorded (ADR 0013 §7). A defect that several
 configurations show flips them all, and *Configuration files* sets the one
 case the runner enforces.
 
@@ -168,11 +170,11 @@ all three:
   §7). A configuration written as MustHold lists every property its module
   defines, as the thirteen here do; review holds it to that, since the runner
   cannot tell the two kinds apart. A property added later is listed by the
-  configurations written with or after its ADR, and not by those written
-  before it, which are append-only: `DirtyUntilCommitted`, which ADR 0023
-  added, is listed by `CommitProtocol_Unlocked` and its three siblings, and
-  holds in every older configuration, where the member it guards is absent
-  (the module's J22).
+  configurations written with or after its ADR, and not by those already on
+  `main`, which are append-only (ADR 0013 §7): `DirtyUntilCommitted`, which
+  ADR 0023 added, is listed by `CommitProtocol_Unlocked` and its three
+  siblings, and holds in every older configuration, where the member it
+  guards is absent (the module's J22).
 - **A MustHold configuration with a state constraint has a twin.** A
   constraint stops TLC taking a step from a state that breaks it
   (*Sources*), so it narrows what a configuration checks inside its bounds,
