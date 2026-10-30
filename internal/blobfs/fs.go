@@ -102,24 +102,36 @@ type FS struct {
 	// stand for a build with another limit (ADR 0007 §7).
 	maxFileSize uint64
 
+	// commitMu serialises commits: Sync holds it from after its first pass until
+	// it returns, so one commit of this mount is in flight at a time, and a Sync
+	// queued behind it finds the namespace dirty exactly when a change was made
+	// since that commit's seal. Taken holding no other lock; initEmpty's commit
+	// does not take it, since nothing runs beside it (ADR 0023 §2, §4).
+	commitMu sync.Mutex
+
 	// commitGate orders size changes against commits, so that a commit holds a
 	// truncate whole or not at all (ADR 0012 §1, Rule D; §2). truncate holds it
 	// for reading, from after the checks it makes before getOpen until it
 	// returns. Sync holds it for writing from the end of its first pass until
-	// it returns, across its settle pass and its commit: its commit phase.
-	// Nothing else takes it. Both take it holding no other lock, and neither
-	// reaches the other while holding it: truncate never flushes or syncs, and
-	// Sync never truncates (§5).
+	// the seal, across its settle pass and the encode: its commit phase, which
+	// ends before any of the commit's own store calls (ADR 0023 §2). Nothing
+	// else takes it. truncate takes it holding no other lock, and Sync holding
+	// commitMu alone, and neither reaches the other while holding it: truncate
+	// never flushes or syncs, and Sync never truncates (§5).
 	commitGate sync.RWMutex
 
-	// mu guards the namespace: the inode table, the allocator, the epoch and
-	// the dirty flags.
+	// mu guards the namespace: the inode table, the allocator, the epoch, the
+	// dirty flags and the change count.
 	//
-	// Lock ordering is the commit gate, then openFile.mu, then mu. Nothing may
-	// acquire the commit gate while holding an openFile.mu or mu, and nothing
-	// may acquire an openFile.mu while holding mu, which is why committing
-	// flushes file data before taking mu rather than underneath it (ADR 0003
-	// §3, ADR 0012 §5).
+	// Lock ordering is commitMu, then the commit gate, then openFile.mu, then
+	// mu. Nothing may acquire commitMu while holding any of the others, nothing
+	// may acquire the commit gate while holding an openFile.mu or mu, and
+	// nothing may acquire an openFile.mu while holding mu, which is why
+	// committing flushes file data before taking mu rather than underneath it
+	// (ADR 0003 §3, ADR 0012 §5, ADR 0023 §4). A commit holds mu only for its
+	// seal and its apply, and makes its own store calls, the snapshot Put, the
+	// swap, the probe and the reclaim or fallback, holding neither mu nor the
+	// gate (ADR 0023 §1).
 	//
 	// The budget's mutex is a leaf: it may be taken while holding any of the
 	// others, but no other lock may be acquired while it is held, and nothing
@@ -135,22 +147,30 @@ type FS struct {
 	dirty      bool
 	lastCommit time.Time
 
+	// changes counts the changes made to the namespace: every write of dirty =
+	// true advances it, through markDirty, in the same hold of mu. A commit
+	// copies it at its seal and, on success, clears dirty only if it is
+	// unchanged since (ADR 0023 §3). Under mu, like dirty.
+	changes uint64
+
 	// mode is the mount mode. It is read without a lock, by mutable() ahead of
-	// every change, so it is an fsm.Atomic rather than guarded by mu. Every
-	// Fire on it is made in resolveRoot, which only commitLocked calls, holding
-	// mu for writing from Sync or from initEmpty before the FS is shared. Its
-	// one edge, Diverge, only narrows and is caused by the store's answer, so
-	// it needs no policy (ADR 0018 §5). New makes it and nothing reassigns it
-	// (ADR 0014 §7; ADR 0022 §2).
+	// every change and by Sync at the top of a commit, so it is an fsm.Atomic
+	// rather than guarded by mu. Every Fire on it is made in resolveRoot, in
+	// its hold of mu for writing, called from Sync or commitSealed holding
+	// commitMu, or from initEmpty before the FS is shared. Its one edge,
+	// Diverge, only narrows and is caused by the store's answer, so it needs no
+	// policy (ADR 0018 §5). New makes it and nothing reassigns it (ADR 0014 §7;
+	// ADR 0022 §2; ADR 0023 §5).
 	mode *fsm.Atomic[mountMode, mountEvent]
 
 	// rootKnowledge is whether rootETag is known to be the current ETag of the
-	// root pointer that names rootSnapshot. Every read and every Fire is made
-	// in commitLocked or resolveRoot, holding mu for writing from Sync, or
-	// before the FS is shared, from initEmpty. No policy's request and no gate
+	// root pointer that names rootSnapshot. Every Fire is made in commitSealed
+	// or resolveRoot holding mu for writing, from Sync, which holds commitMu,
+	// or before the FS is shared, from initEmpty; Sync reads its state holding
+	// mu for reading at the top of a commit. No policy's request and no gate
 	// reads it, and every transition is caused by a store's answer, so no
-	// transition asks a policy (ADR 0018 §5; ADR 0022 §6). New makes it and
-	// nothing reassigns it.
+	// transition asks a policy (ADR 0018 §5; ADR 0022 §6; ADR 0023 §5). New
+	// makes it and nothing reassigns it.
 	rootKnowledge *fsm.Machine[rootState, rootEvent]
 	// rootSnapshot is the snapshot key the root pointer named when rootETag was
 	// last set: by loadOrInit, by a commit's success path, or by resolveRoot.
@@ -572,7 +592,7 @@ func (f *FS) SetAttr(ctx context.Context, c vfs.Caller, h vfs.Handle, sa vfs.Set
 		n.MTimeNS = sa.MTime.UnixNano()
 		n.touchC(now)
 	}
-	f.dirty = true
+	f.markDirty()
 	return n.attr(f.fsid), nil
 }
 
@@ -682,6 +702,16 @@ func (f *FS) FSStat(ctx context.Context, h vfs.Handle) (vfs.Stat, error) {
 
 // ---- namespace mutation ----
 
+// markDirty records a change to the namespace: it sets dirty and advances
+// changes in one hold, so that a commit's success can tell whether anything
+// changed since its seal (ADR 0023 §3). Caller must hold mu for writing.
+//
+// TLA+: docs/tla/CommitProtocol.tla Mutate
+func (f *FS) markDirty() {
+	f.dirty = true
+	f.changes++
+}
+
 // allocInode creates a new inode. Caller must hold mu for writing.
 func (f *FS) allocInode(t vfs.FileType, mode uint32, c vfs.Caller, parent uint64) *inode {
 	now := time.Now()
@@ -704,7 +734,7 @@ func (f *FS) allocInode(t vfs.FileType, mode uint32, c vfs.Caller, parent uint64
 	}
 	f.nextIno++
 	f.inodes[n.ID] = n
-	f.dirty = true
+	f.markDirty()
 	return n
 }
 
@@ -785,7 +815,7 @@ func (f *FS) createEntry(ctx context.Context, c vfs.Caller, dir vfs.Handle, name
 		d.NLink++
 	}
 	d.touchM(time.Now())
-	f.dirty = true
+	f.markDirty()
 	return encodeHandle(n.ID, n.Gen), n.attr(f.fsid), nil
 }
 
@@ -858,7 +888,7 @@ func (f *FS) unlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name stri
 		delete(f.inodes, id)
 		f.dropOpen(id)
 	}
-	f.dirty = true
+	f.markDirty()
 	return nil
 }
 
@@ -982,7 +1012,7 @@ func (f *FS) Rename(ctx context.Context, c vfs.Caller, fromDir vfs.Handle, fromN
 	moving.touchC(time.Now())
 	src.touchM(time.Now())
 	dst.touchM(time.Now())
-	f.dirty = true
+	f.markDirty()
 	return nil
 }
 
@@ -1646,7 +1676,7 @@ func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off ui
 		of.dirty = make(map[uint64][]byte)
 		f.budget.release(released)
 	}
-	f.dirty = true
+	f.markDirty()
 	f.mu.Unlock()
 	return written, nil
 }
@@ -1670,11 +1700,12 @@ func (f *FS) syncFileAndNamespace(ctx context.Context, id uint64) error {
 // it holding no lock until it returns, so a Sync's commit phase begins either
 // after the change, and settles it, or before it, and leaves it out whole
 // (ADR 0012 §1, Rule D; §2). The gate is the wait ADR 0012 adds: while a
-// commit phase runs, or while a Sync waits to begin one. As before, it also
-// waits for its own file's of.mu, which a flush of that file or a write
-// fetching one of its chunks can hold across store calls, and for mu, which a
-// commit holds across its store calls (#43; ADR 0012 §7). A cut into a stored
-// chunk marks the file unsettled for a Sync's settle pass to find (§3).
+// commit phase runs, which ends at the seal, or while a Sync waits to begin
+// one. As before, it also waits for its own file's of.mu, which a flush of
+// that file or a write fetching one of its chunks can hold across store
+// calls, and for mu, which a commit holds only for its seal and its apply,
+// with no store call in either (ADR 0012 §7; ADR 0023 §1, §4). A cut into a
+// stored chunk marks the file unsettled for a Sync's settle pass to find (§3).
 //
 // TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint64) error {
@@ -1801,7 +1832,7 @@ func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint
 	}
 	n.Size = size
 	n.touchM(time.Now())
-	f.dirty = true
+	f.markDirty()
 	return nil
 }
 
@@ -1903,7 +1934,7 @@ func (f *FS) flushOpen(ctx context.Context, id uint64, of *openFile) error {
 			}
 			n.Chunks[idx] = uploaded[idx]
 		}
-		f.dirty = true
+		f.markDirty()
 	}
 	// Cleared in the same hold as the repointing, whether or not the inode is
 	// still there, so no commit can find the mark clear before the chunk list

@@ -124,7 +124,13 @@ func (f *FS) initEmpty(ctx context.Context) error {
 	f.rootSnapshot = ""
 
 	f.log.Info("initializing new filesystem", "bucket", f.store.Name())
-	return f.commitLocked(ctx)
+	// Nothing runs beside New, so this commit takes neither commitMu nor the
+	// commit gate; seal and commitSealed take mu themselves (ADR 0023 §2).
+	s, err := f.seal()
+	if err != nil {
+		return err
+	}
+	return f.commitSealed(ctx, s)
 }
 
 // fsidFor derives a stable filesystem ID from the bucket name, so the
@@ -144,79 +150,63 @@ func fsidFor(name string) uint64 {
 // leaves unreferenced objects behind, never a root pointer that names data
 // which does not exist. Readers only ever see the old tree or the new one.
 //
-// It runs in three steps (ADR 0012 §2): a first pass, flushAll, holding no
-// gate; then, holding the commit gate for writing, a settle pass that flushes
-// every file a truncate left unsettled, and the commit itself. The gate is
-// held from the end of the first pass until Sync returns, its commit phase,
-// so a truncate is in the commit whole if it returned before the phase began
-// and not at all otherwise (§1, Rule D). An error from either pass commits
-// nothing.
+// It runs in steps (ADR 0012 §2; ADR 0023 §2). A first pass, flushAll,
+// holding no lock. Then, holding commitMu until it returns, the top of the
+// commit, holding neither mu nor the gate across any store call: a clean
+// namespace returns nil, a diverged mount is refused, and a root in doubt is
+// settled. Then, holding the commit gate for writing, a settle pass that
+// flushes every file a truncate left unsettled, and the seal. Then, the gate
+// released, the flight, which makes the commit's store calls holding neither
+// mu nor the gate. The gate is held from the end of the first pass until the
+// seal, its commit phase, so a truncate is in the commit whole if it returned
+// before the phase began and not at all otherwise (§1, Rule D). An error from
+// either pass commits nothing.
 //
-// TLA+: docs/tla/CommitProtocol.tla Flush
+// commitMu keeps one commit of the mount in flight at a time. A change made
+// during the flight is not in that commit and leaves the namespace dirty, so
+// a Sync queued behind it commits exactly what it missed (ADR 0023 §3, §4).
+//
+// TLA+: docs/tla/CommitProtocol.tla Flush, ProbeOurs, ProbeUnchanged, ProbeTheirs, ProbeFailed
 func (f *FS) Sync(ctx context.Context) error {
 	// Buffered file data must be stored before the namespace that
 	// references it. This happens before mu is taken because flushing acquires
 	// per-file locks, which must never be taken while holding mu. It happens
-	// before the gate is taken so that size changes do not wait for it
-	// (ADR 0012 Assumption 7).
+	// before the gate and commitMu are taken so that size changes do not wait
+	// for it (ADR 0012 Assumption 7), and so that a Sync queued behind a commit
+	// in flight overlaps it with its own first pass (ADR 0023 §3).
 	if err := f.flushAll(ctx); err != nil {
 		return fmt.Errorf("flush pending writes: %w", err)
 	}
 
-	// Taken holding no lock, as the lock order requires (ADR 0012 §5), and
-	// released after mu, since its defer runs last.
-	f.commitGate.Lock()
-	defer f.commitGate.Unlock()
-	if err := f.settleAll(ctx); err != nil {
-		return fmt.Errorf("settle truncated files: %w", err)
-	}
+	// Taken holding no lock, as the lock order requires (ADR 0023 §4).
+	f.commitMu.Lock()
+	defer f.commitMu.Unlock()
 
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if !f.dirty {
+	// A flag read true stays true until this Sync's own apply, since only an
+	// apply clears it and commitMu serialises applies; one read false leaves
+	// no file unsettled, so returning before the settle pass skips nothing
+	// (ADR 0023 Assumption 7).
+	f.mu.RLock()
+	dirty, knowledge := f.dirty, f.rootKnowledge.State()
+	f.mu.RUnlock()
+	if !dirty {
 		return nil
 	}
-	return f.commitLocked(ctx)
-}
-
-// commitLocked writes the namespace as it stands and swaps the root pointer to
-// it. Caller must hold mu for writing, except initEmpty, which runs before the
-// FS is shared.
-//
-// It refuses, storing nothing, while any file is unsettled (ADR 0012 §1, Rule
-// C; §4). Sync's settle pass makes that impossible, so a refusal means a path
-// changed a chunk list without the commit gate, and is logged as the bug it is
-// rather than committed as a silent exposure of removed bytes.
-//
-// It also refuses, storing nothing, once the mode is Diverged. It never fires
-// on the mode itself: no swap's error alone shows another writer, so the mode
-// moves only in resolveRoot, on a read of the root pointer that shows one
-// (ADR 0014 §7; ADR 0022 §1, §2).
-//
-// Every write of the root pointer whose reply does not give the root
-// pointer's ETag leaves the root in doubt, and resolveRoot reads it once in
-// the same call. A read that decides nothing leaves the doubt for the next
-// commit, which settles it before it writes anything (ADR 0022 §3, §4).
-//
-// TLA+: docs/tla/CommitProtocol.tla PutSnapshot, SwapOK, SwapReplyLost, SwapFailed, SwapConflict, SwapNoETag, SwapUnsupported, FallbackPut, FallbackHead, SwapUnknown, ProbeOurs, ProbeUnchanged, ProbeTheirs, ProbeFailed
-func (f *FS) commitLocked(ctx context.Context) error {
+	// Refused before the probe, so that a diverged mount reads nothing, as it
+	// stores nothing (ADR 0023 §2; ADR 0014 §11, M7). The mode moves only in
+	// resolveRoot, on a read of the root pointer that shows another writer
+	// (ADR 0014 §7; ADR 0022 §1, §2).
 	if f.mode.State() == mountDiverged {
 		return errors.New("filesystem diverged: another writer committed to this bucket; remount to continue")
-	}
-	for id, of := range f.open {
-		if of.unsettled {
-			f.log.Error("commit refused: a truncated file is unsettled",
-				"inode", id, "epoch", f.epoch)
-			return fmt.Errorf("commit refused: inode %d is unsettled since a truncate, so the snapshot could name bytes it removed", id)
-		}
 	}
 
 	// A root in doubt is settled before anything is written, so that an
 	// in-doubt mount neither uploads a snapshot nor swaps against an ETag it
-	// cannot trust. Adoption here leaves f.dirty and the prune pass alone: the
-	// commit that follows writes the namespace as it stands, at the adopted
-	// epoch plus one (ADR 0022 §3, §4; Assumption 9).
-	if f.rootKnowledge.State() == rootInDoubt {
+	// cannot trust. It is settled before the gate, since the probe is a store
+	// call. Adoption here leaves f.dirty and the prune pass alone: the commit
+	// that follows writes the namespace as it stands, at the adopted epoch plus
+	// one (ADR 0022 §3, §4; Assumption 9; ADR 0023 Assumption 6).
+	if knowledge == rootInDoubt {
 		switch f.resolveRoot(ctx) {
 		case probeFailed:
 			// The read's error, if any, is in the record resolveRoot logged: its
@@ -224,6 +214,61 @@ func (f *FS) commitLocked(ctx context.Context) error {
 			return errors.New("commit refused: the root pointer is in doubt since an earlier write of it, and the read that would settle it decided nothing")
 		case probeTheirs:
 			return errCommitConflict
+		}
+	}
+
+	// The gate is released by defer, on every return and on a panic, before
+	// any of the commit's own store calls: its commit phase ends at the seal
+	// (ADR 0023 §2, Assumption 4).
+	s, err := func() (*sealedCommit, error) {
+		f.commitGate.Lock()
+		defer f.commitGate.Unlock()
+		if err := f.settleAll(ctx); err != nil {
+			return nil, fmt.Errorf("settle truncated files: %w", err)
+		}
+		return f.seal()
+	}()
+	if err != nil {
+		return err
+	}
+	return f.commitSealed(ctx, s)
+}
+
+// sealedCommit is one commit attempt as the seal fixed it: the snapshot of
+// the namespace as it stood under FS.mu, the key and the root pointer that
+// name it, and the two values the flight needs from that hold: the ETag the
+// swap conditions on, and the change count the guard compares against
+// (ADR 0023 §2, §3).
+type sealedCommit struct {
+	epoch    uint64 // FS.epoch + 1 at the seal
+	key      string // the snapshot key, with its nonce
+	body     []byte // the encoded snapshot
+	rpBody   []byte // the encoded root pointer naming key
+	rootETag string // FS.rootETag at the seal: the swap's condition
+	changes  uint64 // FS.changes at the seal: the guard's reference (§3)
+}
+
+// seal takes mu for writing and fixes one commit attempt: it refuses while
+// any file is unsettled (ADR 0012 §4), encodes the namespace as it stands,
+// picks the attempt's key, and copies rootETag and changes out of the hold.
+// It makes no store call. Caller must hold commitMu and the commit gate for
+// writing, or run before the FS is shared, and must not hold mu.
+//
+// The unsettled-file refusal stores nothing. Sync's settle pass makes it
+// impossible, so a refusal means a path changed a chunk list without the
+// commit gate, and is logged as the bug it is rather than committed as a
+// silent exposure of removed bytes (ADR 0012 §1, Rule C; §4).
+//
+// TLA+: docs/tla/CommitProtocol.tla PutSnapshot
+func (f *FS) seal() (*sealedCommit, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for id, of := range f.open {
+		if of.unsettled {
+			f.log.Error("commit refused: a truncated file is unsettled",
+				"inode", id, "epoch", f.epoch)
+			return nil, fmt.Errorf("commit refused: inode %d is unsettled since a truncate, so the snapshot could name bytes it removed", id)
 		}
 	}
 
@@ -238,7 +283,7 @@ func (f *FS) commitLocked(ctx context.Context) error {
 	}
 	body, err := encodeSnapshot(snap)
 	if err != nil {
-		return fmt.Errorf("encode snapshot: %w", err)
+		return nil, fmt.Errorf("encode snapshot: %w", err)
 	}
 
 	// The snapshot key includes random bytes so that two writers racing to
@@ -247,10 +292,6 @@ func (f *FS) commitLocked(ctx context.Context) error {
 	var nonce [6]byte
 	rand.Read(nonce[:])
 	key := fmt.Sprintf("%s%020d-%s.json.gz", snapshotPrefix, epoch, hex.EncodeToString(nonce[:]))
-
-	if err := f.store.Put(ctx, key, body); err != nil {
-		return fmt.Errorf("write snapshot: %w", err)
-	}
 
 	rp := rootPointer{
 		Version:   snapshotVersion,
@@ -262,7 +303,41 @@ func (f *FS) commitLocked(ctx context.Context) error {
 	}
 	rpBody, err := json.Marshal(rp)
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	return &sealedCommit{
+		epoch:    epoch,
+		key:      key,
+		body:     body,
+		rpBody:   rpBody,
+		rootETag: f.rootETag,
+		changes:  f.changes,
+	}, nil
+}
+
+// commitSealed is a commit's flight: its snapshot Put, its swap of the root
+// pointer, and on the swap's outcome the probe, the reclaim or the fallback,
+// every one made holding no mu and no commit gate (ADR 0023 §1, §2); then,
+// holding mu for writing, the Fire the outcome calls for and applyLocked on
+// success. Caller must hold commitMu, or run before the FS is shared, and
+// must hold neither mu nor the gate.
+//
+// Nothing it decides reads the namespace: the snapshot and the root pointer
+// are bytes the seal fixed, and the swap conditions on s.rootETag, the seal's
+// copy. Between the seal and the swap nothing writes FS.rootETag, since only
+// an apply and a probe's verdict write it and commitMu serialises both
+// (ADR 0023 §2, §5).
+//
+// Every write of the root pointer whose reply does not give the root
+// pointer's ETag leaves the root in doubt, and resolveRoot reads it once in
+// the same call. A read that decides nothing leaves the doubt for the next
+// commit, which settles it before it writes anything (ADR 0022 §3, §4).
+//
+// TLA+: docs/tla/CommitProtocol.tla PutSnapshot, SwapOK, SwapReplyLost, SwapFailed, SwapConflict, SwapNoETag, SwapUnsupported, FallbackPut, FallbackHead, SwapUnknown, ProbeOurs, ProbeUnchanged, ProbeTheirs, ProbeFailed
+func (f *FS) commitSealed(ctx context.Context, s *sealedCommit) error {
+	if err := f.store.Put(ctx, s.key, s.body); err != nil {
+		return fmt.Errorf("write snapshot: %w", err)
 	}
 
 	// A write of the root pointer whose reply gives its ETag leaves the root
@@ -280,7 +355,7 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		unchangedErr error
 		failedErr    error
 	)
-	newETag, err := f.store.PutIfMatch(ctx, rootKey, rpBody, f.rootETag)
+	newETag, err := f.store.PutIfMatch(ctx, rootKey, s.rpBody, s.rootETag)
 	switch {
 	case err == nil && newETag != "":
 		// The root is known: the success path follows.
@@ -324,12 +399,14 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		// next swap. The reclaim's own read stays a Get (ADR 0022 §4, §5;
 		// Assumption 11).
 		//
-		// The read and the Delete run under the locks commitLocked holds, as
-		// its other store calls do. #43 records those calls as a defect to fix
-		// for all of them, and when it is fixed the reclaim moves off the lock
-		// with them (ADR 0021 Assumption 25).
+		// The read and the Delete run holding no lock, as the commit's other
+		// store calls do, and read no field of the FS: s.key is the attempt's,
+		// and the guard is a function of the body read (ADR 0023 §6). The
+		// record's our_epoch is taken from the seal for the same reason: s.epoch
+		// is FS.epoch + 1 there, and nothing moves FS.epoch before this
+		// commit's own apply, since commitMu serialises every writer of it.
 		f.log.Error("commit refused: the store does not support conditional writes, and this mount may not write the root pointer unconditionally",
-			"our_epoch", f.epoch, "attempted", epoch)
+			"our_epoch", s.epoch-1, "attempted", s.epoch)
 		refusal := fmt.Errorf("swap root pointer: the store does not support conditional writes, and this mount may not write the root pointer unconditionally: %w", err)
 		raw, rerr := f.store.Get(ctx, rootKey)
 		var cur rootPointer
@@ -345,22 +422,22 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		// may lead to a Delete (ADR 0021 Assumption 26).
 		understood := rerr == nil && cur.Version == snapshotVersion && cur.Snapshot != ""
 		switch {
-		case errors.Is(rerr, store.ErrNotFound) || (understood && cur.Snapshot != key):
-			if derr := f.store.Delete(ctx, key); derr != nil {
+		case errors.Is(rerr, store.ErrNotFound) || (understood && cur.Snapshot != s.key):
+			if derr := f.store.Delete(ctx, s.key); derr != nil {
 				// The orphan stays for a later prune pass (ADR 0019 §3).
-				f.log.Debug("could not reclaim a refused commit's snapshot", "key", key, "err", derr)
+				f.log.Debug("could not reclaim a refused commit's snapshot", "key", s.key, "err", derr)
 			}
 			return refusal
 		case understood:
 			// The store applied a write it answered 501. The probe below reads
 			// the root pointer again and adopts the attempt.
 			f.log.Error("a root-pointer swap the store answered as unsupported took effect: the root pointer names the refused commit's snapshot, which is kept",
-				"snapshot", key, "attempted", epoch)
+				"snapshot", s.key, "attempted", s.epoch)
 		case rerr == nil:
 			f.log.Debug("the root pointer read is not a root pointer this build understands, so a refused commit's snapshot is kept",
-				"key", key, "version", cur.Version, "snapshot", cur.Snapshot)
+				"key", s.key, "version", cur.Version, "snapshot", cur.Snapshot)
 		default:
-			f.log.Debug("could not read the root pointer, so a refused commit's snapshot is kept", "key", key, "err", rerr)
+			f.log.Debug("could not read the root pointer, so a refused commit's snapshot is kept", "key", s.key, "err", rerr)
 		}
 		doubt = true
 		oldErr, unchangedErr, failedErr = refusal, refusal, refusal
@@ -368,7 +445,7 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		// A backend without conditional writes cannot give us safe single-writer
 		// detection. Fall back to an unconditional write and say so clearly.
 		f.log.Warn("backend lacks conditional writes; concurrent mounts are unsafe")
-		if perr := f.store.Put(ctx, rootKey, rpBody); perr != nil {
+		if perr := f.store.Put(ctx, rootKey, s.rpBody); perr != nil {
 			// S3.Put is retried, so a Put that returned an error may have taken
 			// effect (ADR 0022 Assumption 12).
 			werr := fmt.Errorf("write root pointer: %w", perr)
@@ -391,60 +468,89 @@ func (f *FS) commitLocked(ctx context.Context) error {
 		failedErr = fmt.Errorf("swap root pointer: the outcome is in doubt until a read of the root pointer settles it: %w", err)
 	}
 
+	// Every store call of the case above has returned, so what follows holds
+	// mu for writing only to fire the machine and apply the outcome, and
+	// releases it before resolveRoot's read (ADR 0023 §2).
 	if !doubt {
+		f.mu.Lock()
 		// A self-loop. A Fire that fails is logged and the success path follows
 		// anyway, since the store applied the write (ADR 0022 §4; ADR 0014
 		// Assumption 38).
 		if from, _, ferr := f.rootKnowledge.Fire(rootSwapOK); ferr != nil {
 			f.logRootFire(from, rootSwapOK, ferr)
 		}
-	} else {
-		f.doubtKey = key
-		if from, _, ferr := f.rootKnowledge.Fire(rootSwapUnknown); ferr != nil {
-			// Unreachable: the top of the commit settled any doubt. No read is
-			// made, and the outcome is answered as it was before ADR 0022; the
-			// mode is not moved, since only resolveRoot moves it (ADR 0022 §2,
-			// §4).
-			f.logRootFire(from, rootSwapUnknown, ferr)
-			f.doubtKey = ""
-			if oldErr != nil {
-				return oldErr
-			}
-		} else {
-			switch f.resolveRoot(ctx) {
-			case probeOurs:
-				// The attempt took effect, and resolveRoot took the read's ETag:
-				// the success path is the commit's, whole (ADR 0022 §4;
-				// Assumption 9).
-				newETag = f.rootETag
-			case probeTheirs:
-				return errCommitConflict
-			case probeUnchanged:
-				// No retry in line: the next commit swaps against the ETag the
-				// read gave (ADR 0022 §3; Assumption 7).
-				return unchangedErr
-			default:
-				return failedErr
-			}
-		}
+		f.applyLocked(s, newETag)
+		f.mu.Unlock()
+		return nil
 	}
 
+	f.mu.Lock()
+	f.doubtKey = s.key
+	if from, _, ferr := f.rootKnowledge.Fire(rootSwapUnknown); ferr != nil {
+		// Unreachable: the top of the commit settled any doubt. No read is
+		// made, and the outcome is answered as it was before ADR 0022, in this
+		// same hold; the mode is not moved, since only resolveRoot moves it
+		// (ADR 0022 §2, §4; ADR 0023 Assumption 27).
+		f.logRootFire(from, rootSwapUnknown, ferr)
+		f.doubtKey = ""
+		if oldErr != nil {
+			f.mu.Unlock()
+			return oldErr
+		}
+		// The success path with "" as FS.rootETag, as ADR 0023 Assumption 27
+		// pins it.
+		f.applyLocked(s, "")
+		f.mu.Unlock()
+		return nil
+	}
+	f.mu.Unlock()
+
+	switch f.resolveRoot(ctx) {
+	case probeOurs:
+		// The attempt took effect, and resolveRoot adopted it and took the
+		// read's ETag in its own hold. The success path is the commit's, whole,
+		// in a second hold; a change made between the two advances the count,
+		// and the guard sees it (ADR 0022 §4; ADR 0023 §5, Assumption 25).
+		f.mu.Lock()
+		f.applyLocked(s, f.rootETag)
+		f.mu.Unlock()
+		return nil
+	case probeTheirs:
+		return errCommitConflict
+	case probeUnchanged:
+		// No retry in line: the next commit swaps against the ETag the read
+		// gave (ADR 0022 §3; Assumption 7).
+		return unchangedErr
+	default:
+		return failedErr
+	}
+}
+
+// applyLocked is the success path of a commit whose root pointer now names
+// s.key with the ETag etag: it advances the epoch, records the ETag and the
+// key, clears dirty only if nothing changed since the seal (ADR 0023 §3),
+// sets lastCommit, logs "committed" and schedules a prune pass. Caller must
+// hold mu for writing.
+//
+// TLA+: docs/tla/CommitProtocol.tla SwapOK, FallbackHead, ProbeOurs
+func (f *FS) applyLocked(s *sealedCommit, etag string) {
 	// The commit is now durable. Only after the swap succeeds do we advance our
 	// own notion of the current epoch.
-	f.epoch = epoch
-	f.rootETag = newETag
-	f.rootSnapshot = key
-	f.dirty = false
+	f.epoch = s.epoch
+	f.rootETag = etag
+	f.rootSnapshot = s.key
+	// A change made since the seal is not in the snapshot the root pointer now
+	// names, so the namespace stays dirty and the next commit carries it.
+	f.dirty = f.changes != s.changes
 	f.lastCommit = time.Now()
-	f.log.Debug("committed", "epoch", epoch, "inodes", len(f.inodes), "snapshot", key)
+	f.log.Debug("committed", "epoch", s.epoch, "inodes", len(f.inodes), "snapshot", s.key)
 
 	// Each commit writes a complete namespace snapshot, so without pruning the
 	// bucket grows without bound -- a busy mount can produce hundreds
 	// of snapshots in a minute. Older ones are kept only as a short rollback
 	// window, and reclaiming them happens off the commit path so a slow bucket
 	// never stalls a write.
-	f.schedulePrune(key)
-	return nil
+	f.schedulePrune(s.key)
 }
 
 // errCommitConflict is what a commit returns once a read of the root pointer
@@ -525,16 +631,25 @@ func classifyRoot(raw []byte, etag string, err error, rootSnapshot, doubtKey str
 // resolveRoot settles a root pointer in doubt with one read, GetWithETag of
 // rootKey, and applies the verdict: ProbeOurs adopts the attempt, ProbeUnchanged
 // takes the root pointer's ETag, ProbeTheirs diverges the mount, and a read
-// that decides nothing leaves the root in doubt. Caller must hold mu for
-// writing, or run before the FS is shared, and rootKnowledge must be InDoubt
-// (ADR 0022 §3).
+// that decides nothing leaves the root in doubt (ADR 0022 §3). It makes the
+// read holding no lock, then takes mu for writing and, in that one hold,
+// classifies the read against rootSnapshot and doubtKey and applies the
+// verdict (ADR 0023 §5). Caller must hold commitMu, or run before the FS is
+// shared, and must hold neither mu nor the commit gate. rootKnowledge must be
+// InDoubt, and is still InDoubt in the hold, since only a commit's flight or
+// a probe moves it and commitMu serialises both.
 //
 // TLA+: docs/tla/CommitProtocol.tla ProbeOurs, ProbeUnchanged, ProbeTheirs, ProbeFailed, Diverge
 func (f *FS) resolveRoot(ctx context.Context) probeVerdict {
 	// One response, so that the body and the ETag describe one root pointer
-	// (ADR 0020 §2). It is made under the locks commitLocked holds, as its
-	// other store calls are (ADR 0022 §5; #43).
+	// (ADR 0020 §2). The store's answer is data read outside the hold, as a
+	// swap's reply is: the fields the verdict reads and writes are written only
+	// by an apply and a probe, which commitMu serialises, so none has moved
+	// when the hold below reads them (ADR 0023 §5).
 	raw, etag, err := f.store.GetWithETag(ctx, rootKey)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	verdict, rp := classifyRoot(raw, etag, err, f.rootSnapshot, f.doubtKey)
 
 	switch verdict {
@@ -568,7 +683,7 @@ func (f *FS) resolveRoot(ctx context.Context) probeVerdict {
 	case probeTheirs:
 		// rootKnowledge stays InDoubt and doubtKey as it is: the mount makes no
 		// further swap. A Fire that fails changes nothing else, and no build
-		// reaches it, since commitLocked refuses a diverged mount before it
+		// reaches it, since Sync refuses a diverged mount before it reads or
 		// writes and a read-only one never reaches a swap (ADR 0014 §3, §7).
 		if from, _, ferr := f.mode.Fire(mountDiverge); ferr != nil {
 			f.log.Error("mount mode: illegal transition",
