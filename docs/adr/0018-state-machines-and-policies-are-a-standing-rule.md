@@ -10,6 +10,15 @@ transitions asks a policy and no exemption is granted; and the mode's
 by `resolveRoot` on the read's verdict, from `commitLocked` under the same
 hold of `FS.mu` for writing. §5's paragraph on the machines gains a
 sentence; the rules, the register and the link are unchanged.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43, and
+restates E3 with the reason it has: the commit's flight through `seal`,
+`commitSealed` and `applyLocked`, and `FS.commitMu`, which serialises
+commits, join `Sync`'s phases and the commit gate under it, and the
+register's row gains that ADR (§4). §5's sentence that the mode's `Fire` is
+made "from `commitLocked` under the same hold" describes the code before it:
+`resolveRoot` now takes `FS.mu` for writing after its read, holding no lock
+across the read, and fires in that hold. The rules, the register and the
+link are unchanged.
 **Issue:** #114
 
 ## Context

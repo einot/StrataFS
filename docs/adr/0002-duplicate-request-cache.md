@@ -158,6 +158,16 @@
   an in-flight duplicate is acceptable on TCP, the decision and every
   behaviour of this ADR are unchanged. Assumption 7 and this entry are the
   whole of this revision. Status stays `Accepted`.
+- **Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43. A
+  commit now holds `FS.mu` only to encode the namespace and to apply an
+  outcome, and makes its snapshot `PUT`, its root-pointer swap and every
+  other store call holding neither `FS.mu` nor the commit gate, so the wait
+  on `FS.mu` that *Context* and Assumption 7 name, "while a commit holds it
+  across its snapshot PUT and root-pointer swap", is since that ADR a wait
+  for two bounded holds with no store call in them, and a size-setting
+  `SETATTR` waits for the commit gate only until the snapshot is encoded.
+  Those sentences stay as the record of the code before it. The decision,
+  §2's key, §6's states and §7's bounds are unchanged.
 - **Issue:** #2 — *Retransmitted requests are re-executed: no duplicate request cache*
 - **Affects:** `internal/sunrpc`, `internal/nfs`
 

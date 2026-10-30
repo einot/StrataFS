@@ -244,6 +244,16 @@
   `FS.mode`, which the failed drain enters by firing `Diverge`. §5's words
   stay as written, since tests quote them; a parenthesis after them says
   this. Nothing else changed.
+- **Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43. §4's
+  sentence that `FS.Sync` does not notice cancellation while it waits for
+  `FS.mu` or an `openFile.mu` "that another commit or flush holds", and
+  Assumption 18's that a failed flush's acquisition of `FS.mu` can wait
+  behind a commit, describe the code before that ADR: a commit now makes its
+  store calls holding neither `FS.mu` nor the commit gate, and a `Sync`
+  queued behind a commit in flight waits for `FS.commitMu`, a lock ADR 0023
+  §4 adds above the commit gate in the order §3 gives, where it does not
+  notice cancellation either. The budget, §3's order below that lock, §4's
+  waiting rules and its failure contract are unchanged.
 - **Issue:** #4 — *Buffered writes are unbounded: add backpressure*
 - **Affects:** `internal/blobfs`, `cmd/strata`, doc comment on `vfs.FS.Write`
 

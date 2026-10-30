@@ -18,6 +18,15 @@ root-pointer knowledge Assumption 1 names as the second reserved fix, and
 `rootETag` after a failed swap, and Assumption 5's that `errorFor`'s 409 is
 taken for divergence, describe the code before that ADR; the model now
 carries the fix as the `Fixes` member `RootProbe`. Nothing else changed.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43. §4's
+sentence under *Store calls made holding a lock*, that `commitLocked` holds
+`FS.mu` across its snapshot `Put`, its swap and the fallback's calls,
+describes the code before that ADR: a commit now makes those calls holding
+no `FS.mu`, the module's R4, R5, R13 and R14 are rewritten and R15 and R16
+added for it, and the `Fixes` members `UnlockedCommit` and
+`ClearIfUnchanged` carry the change. §4's FileData fold of `SyncCommit`,
+"all of `commitLocked`", is left to that spec's PR (ADR 0023, *What this
+does not decide*). The rules of §4 to §11 are unchanged.
 **Issue:** #109
 
 ## Context

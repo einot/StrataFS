@@ -10,6 +10,12 @@ reads the root pointer with `GetWithETag`, one call for the body and its
 ETag, and makes no `Head` of it; §1's lead-in and table now say so, and the
 table gains a row for a root pointer read with no ETag, which mounted in both
 modes until ADR 0020 §2 refused it. The decision is unchanged.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43, and
+`commitLocked`, which *Context* and §7's list of checks name, is since that
+ADR the functions `seal`, `commitSealed` and `applyLocked`; the diverged
+refusal it made is `Sync`'s, and the checks §7 lists under its name are made
+by those three. The rule, the fence and §7's seam, which still sets
+`FS.dirty` directly, are unchanged.
 **Issue:** #68
 
 ## Context

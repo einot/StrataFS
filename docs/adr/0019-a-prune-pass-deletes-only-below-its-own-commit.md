@@ -27,6 +27,15 @@ code before ADR 0022. Since that ADR, the `Sync` after `armSwapLost` or
 `armRootPutLost` returns nil, the root pointer names the applied key as
 before, and the retry each test then makes needs a change made first, since
 the namespace is clean (ADR 0022 §8). Nothing else moved.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43.
+`commitLocked`, which §2 and §6 name, is since that ADR the functions `seal`,
+`commitSealed` and `applyLocked`, and `schedulePrune` is called by
+`applyLocked`, with the key the commit swapped the root pointer to, on both
+success paths, in a hold of `FS.mu` for writing as before; the swap
+conditions on the ETag copied at the seal, which §1's step 2 rests on as it
+rested on `FS.rootETag`. The rule, the Go change and the configurations here
+are unchanged, and `CommitProtocol_UnlockedPruneProbe` checks the rule with
+the store calls off the lock.
 **Issue:** #88
 
 ## Context

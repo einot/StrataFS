@@ -2,6 +2,17 @@
 
 **Status:** Accepted
 **Date:** 2026-10-08
+**Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43, which
+*What this does not decide* anticipated: a `Sync` now releases the commit
+gate as soon as the snapshot is encoded, so §2's commit phase runs from the
+end of the first pass to the end of the encode, which ADR 0023 calls the
+seal; §5's sentence that the commit's own store calls hold `FS.mu` as
+before, and §7's that a truncate waits through the gate for the commit's
+store calls, describe the code before that ADR, and a truncate now waits for
+the settle pass and the seal. `commitLocked`, which §4 names for its check,
+is since that ADR `seal`, which makes the check under the gate as before.
+Rules C and D, the gate, the mark, the settle pass and §9's tests are
+unchanged.
 **Issue:** #64
 
 ## Context

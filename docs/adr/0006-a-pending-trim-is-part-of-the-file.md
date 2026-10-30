@@ -28,6 +28,12 @@ file's unsettled mark. The bullet *`truncate` waits on the budget* under
 ADR 0012, and the bullet *The commit window* (#64) under *What this does not
 decide* ends by saying that ADR 0012 decides it. The revisions above are left
 as the history they are, and the decision and everything else are unchanged.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0023 decided #43. The
+bullet on #42, #43 and #55 under *What this does not decide* says a commit
+holding `FS.mu` across its store calls still holds up a truncate; since that
+ADR a truncate waits for the commit gate only through the settle pass and
+the encode, and for `FS.mu` with no store call under it. The bullet stays as
+the record, and the decision and everything else are unchanged.
 **Issue:** #40, #56
 
 ## Context

@@ -23,7 +23,7 @@ The rules are ADR 0018 §1's: the state rule, the policy rule and the link.
 |---|---|---|---|---|---|
 | E1 | The write budget | `budget`, in `internal/blobfs/budget.go` | the state rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
 | E2 | The duplicate request cache | `replyCache` and `cacheState`, in `internal/sunrpc/cache.go` | the state rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
-| E3 | `Sync`'s phases and the commit gate | `(*FS).Sync`, in `internal/blobfs/commit.go`; `FS.commitGate`, in `internal/blobfs/fs.go` | the state rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
+| E3 | `Sync`'s phases, the commit's flight and the locks that order them | `(*FS).Sync`, `(*FS).seal`, `(*FS).commitSealed` and `(*FS).applyLocked`, in `internal/blobfs/commit.go`; `FS.commitGate` and `FS.commitMu`, in `internal/blobfs/fs.go` | the state rule | ADR 0018 §4, with ADR 0014 §1's reason; restated by ADR 0023 §8, which adds the flight and `FS.commitMu` | in force |
 | E4 | The per-index buffered state | `openFile.dirty` and `openFile.pendingTrim`, in `internal/blobfs/fs.go` | the state rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
 | E5 | The unsettled mark | `openFile.unsettled`, in `internal/blobfs/fs.go` | the state rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
 | E6 | The XDR reader's sticky error | `xdr.Reader`'s `err`, read through `Err`, in `internal/xdr/xdr.go` | the state rule | ADR 0018 §4, with ADR 0014 §1's reason | in force |
