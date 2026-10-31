@@ -21,7 +21,9 @@ package blobfs
 // Covered, with the names section 7 pins:
 //   - S4, TestSetAttrAsksThePolicyForEveryAttributeBeforeApplyingAny (ADR 0014
 //     section 11, W2, for SetAttr);
-//   - S5, TestEverySetAttrCheckIsBehindThePolicy (W3, for SetAttr).
+//   - S5, TestEverySetAttrCheckIsBehindThePolicy (W3, for SetAttr);
+//   - S7, TestARefusalInTheExclusiveHoldLeavesTheFilesBuffersAndTrim (section
+//     2, steps 4 and 5, and "What a refused call leaves"; Assumption 28).
 //
 // S1, S2, S3 and S6 are in setattr_atomic_test.go, whose helpers (sa24...)
 // this file reuses.
@@ -31,8 +33,14 @@ package blobfs
 // any other call on the FS, Root() included, inside uc43Go. Every policy
 // installed here allows what Unix() refuses, so, by ADR 0014 section 11's
 // safety rule, every SetAttr here is made on a regular file; the only other
-// calls are testCaller's Create and Write of a regular file in the root
-// directory, which it owns, and Sync.
+// calls are testCaller's Create, Write and Read of a regular file in the root
+// directory, which it owns, GetAttr, Sync, and S7's remount of the inner
+// store, which keeps Unix().
+//
+// S7 also reads the file's openFile through bpMustOpen and bpSnapshot
+// (backpressure_test.go), which read FS.open holding FS.mu for reading and the
+// openFile holding its mu, under btHangBound, 10 s, as ADR 0024 section 7
+// lets a test (ADR 0003 section 4's test surface).
 //
 // The other safety rules are part 1's (ADR 0023 section 11; ADR 0011 section
 // 7): buckets under the test's t.TempDir(), behind an unarmed uc43Store; every
@@ -45,8 +53,10 @@ package blobfs
 // row reads and ADR 0024 does not pin.
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -231,11 +241,17 @@ func sp24File(e *uc43Env, fs *FS, root vfs.Handle, name string, data []byte, whe
 //     that same Object, which shows that nothing was applied before the last
 //     request was made; GetAttr reports 0o600, 7, 8, t1 and t2.
 //
-// Then testCaller creates f.bin and writes 100 bytes; Sync. Root's SetAttr of
-// f.bin with {Size 10, Mode 0o600}:
-//   - (iii) refusing index 2 returns vfs.ErrNXIO, having asked exactly
-//     OpTruncate, OpChmod, OpTruncate; size 100 and mode 0o644, and every
-//     other attribute as before; FS.dirty is false;
+// Then testCaller creates f.bin and writes 100 bytes; Sync; FS.changes is
+// read, c1, and the harness's record marked. Root's SetAttr of f.bin with
+// {Size 10, Mode 0o600}:
+//   - (iii) refusing index 2, the exclusive hold's first request, returns
+//     vfs.ErrNXIO, having asked exactly OpTruncate, OpChmod, OpTruncate; size
+//     100 and mode 0o644, and every other attribute as before; FS.dirty is
+//     false and FS.changes is c1; one Read of 100 bytes at 0 returns the 100
+//     bytes; Sync returns nil and the harness recorded no call since the mark.
+//     That is S2's assertion set for a refusal in the exclusive hold, which
+//     under Unix() only a change between the two checks reaches and which this
+//     policy reaches directly;
 //   - (iv) refusing nothing returns nil, having asked exactly OpTruncate,
 //     OpChmod, OpTruncate, OpChmod, each with Object {TypeReg, 0o644, 501,
 //     20}; size 10 and mode 0o600.
@@ -300,6 +316,8 @@ func TestSetAttrAsksThePolicyForEveryAttributeBeforeApplyingAny(t *testing.T) {
 		payload[i] = byte(i*5 + 1)
 	}
 	bin, beforeBin := sp24File(e, fs, root, "f.bin", payload, where)
+	c1 := sa24Read(e, fs, `reading FS.changes after "f.bin"'s commit`, where).changes
+	mark := len(e.h.records())
 	sz := vfs.SetAttr{Size: sa24U64(10), Mode: sa24U32(0o600)}
 
 	what = fmt.Sprintf(`(iii) root's SetAttr %s of "f.bin", the policy refusing its request at index 2`,
@@ -319,8 +337,30 @@ func TestSetAttrAsksThePolicyForEveryAttributeBeforeApplyingAny(t *testing.T) {
 			"was: a call refused in the hold that applies the change applies nothing (ADR 0024 section 2, step 4; "+
 			"%s)", what, "f.bin", sa24Diff(beforeBin, got), where)
 	}
-	if f := sa24Read(e, fs, "reading FS.dirty after "+what, where); f.dirty {
+	f := sa24Read(e, fs, "reading FS.dirty and FS.changes after "+what, where)
+	if f.dirty {
 		t.Errorf("after %s, FS.dirty is true, want false (ADR 0024 section 2; %s)", what, where)
+	}
+	if f.changes != c1 {
+		t.Errorf("after %s, FS.changes is %d, want %d, its value after \"f.bin\"'s commit: a refused SetAttr leaves "+
+			"FS.changes as it was (ADR 0024 section 2, \"What a refused call leaves\"; %s)", what, f.changes, c1,
+			where)
+	}
+	rd := sa24ReadOnce(e, fs, bin, 0, 100, `one Read of 100 bytes at 0 of "f.bin" after `+what, where)
+	if rd.err != nil || !bytes.Equal(rd.data, payload) {
+		t.Errorf("after %s, one Read of 100 bytes at 0 of \"f.bin\" = (%x, %v), want the 100 bytes written, %x: a "+
+			"refused SetAttr changes no size, no chunk list and no buffer (ADR 0024 section 2; %s)", what, rd.data,
+			rd.err, payload, where)
+	}
+	if err := e.sync(fs, "the Sync after "+what, where); err != nil {
+		t.Errorf("the Sync after %s = %v, want nil: with nothing changed since the last seal a Sync returns nil "+
+			"(ADR 0023 section 3; %s)", what, err, where)
+	}
+	if calls := e.h.records()[mark:]; len(calls) != 0 {
+		t.Errorf("the harness recorded %v between \"f.bin\"'s commit and the return of the Sync after %s, want no "+
+			"call: a call refused in the exclusive hold changes nothing, so the next Sync with nothing else dirty "+
+			"makes no store call (ADR 0024 section 2, \"What a refused call leaves\"; section 7, S4 (iii); %s)",
+			calls, what, where)
 	}
 
 	what = fmt.Sprintf(`(iv) root's SetAttr %s of "f.bin", the policy refusing nothing`, sa24Describe(sz))
@@ -381,5 +421,195 @@ func TestEverySetAttrCheckIsBehindThePolicy(t *testing.T) {
 	if got := sa24GetAttr(e, fs, h, `GetAttr of "f.bin" after `+what, where); sa24Unapplied(got, sa) != "" {
 		t.Errorf("after %s, GetAttr reports %s; want every value sa sets (ADR 0024 section 2; %s)", what,
 			sa24Unapplied(got, sa), where)
+	}
+}
+
+// TestARefusalInTheExclusiveHoldLeavesTheFilesBuffersAndTrim is S7 of ADR 0024
+// section 7, and pins section 2's steps 4 and 5 and "What a refused call
+// leaves" for a file whose buffers and trim are unflushed: a call refused in
+// the exclusive hold, after the pre-check allowed it whole, runs none of the
+// size-change body, so it leaves every dirty buffer, the charge and every
+// pending trim as they were (Assumption 28).
+//
+// S4's recorder, refusing nothing, is installed after New, behind an unarmed
+// uc43Store. testCaller creates f.bin, writes 6000 bytes p at 0, vfs.Unstable,
+// and Syncs, so the file is two stored chunks, of 4096 and 1904 bytes, and
+// FS.dirty is false. Then the unflushed state: testCaller writes 100 bytes q at
+// 0, vfs.Unstable, which buffers them over the first chunk, and sets Size
+// 5000, which returns nil with size 5000 and records a pending trim on the
+// second chunk. A Read of the whole file returns 5000 bytes, q followed by
+// p[100:5000], b1; GetAttr after it, a1, reports size 5000 and mode 0o644;
+// bpSnapshot of bpMustOpen(fs, a1.FileID), s1, has indices [0] and pending 1;
+// FS.dirty is true; FS.changes is read, c1.
+//
+// Then two refused calls by root, the recorder reset to refuse index 2, the
+// exclusive hold's first request, before each: {Size 10, Mode 0o600}, whose
+// size-change body would shorten the buffered chunk, drop the second chunk's
+// trim and cut the chunk list; and {Size 4500, Mode 0o600}, whose body would
+// record a shorter trim on the second chunk. Before each, GetAttr is read
+// again, after any Read, as a. After each: the call returned vfs.ErrNXIO with
+// exactly OpTruncate, OpChmod, OpTruncate recorded, each with Caller root and
+// Object {TypeReg, 0o644, 501, 20}; the harness recorded no call during it;
+// GetAttr equals a, with size 5000 and mode 0o644; FS.dirty is true and
+// FS.changes is c1; bpSnapshot equals s1 in bytes, caps and pending; and,
+// last, a Read of the whole file returns b1.
+//
+// Then Sync returns nil, and a remount of the inner store reads b1, 5000
+// bytes, with size 5000 and mode 0o644: the buffers and the trim were applied
+// as they stood. The remount commits nothing, so the first mount is used
+// again for the control, the recorder reset to refuse nothing: root's SetAttr
+// with {Size 10, Mode 0o600} returns nil with size 10 and mode 0o600, and one
+// Read of 100 bytes at 0 returns q[:10] with eof.
+//
+// The unsettled mark, which the Size 5000 call has already set, is not
+// observable here and is review's (Assumption 28). The calls are on a regular
+// file (ADR 0014 section 11's safety rule); a is read after each Read and
+// before each refused call, so no assertion depends on the atime a Read may
+// or may not set.
+func TestARefusalInTheExclusiveHoldLeavesTheFilesBuffersAndTrim(t *testing.T) {
+	const where = "S7, ADR 0024 section 2, steps 4 and 5, and section 7; Assumption 28"
+	e := uc43Setup(t)
+	rec := &sp24Recorder{refuseAt: -1}
+	fs, root := sp24Mount(e, policy.Func(rec.check), where)
+	obj := policy.Object{Type: vfs.TypeReg, Mode: 0o644, UID: testCaller.UID, GID: testCaller.GID}
+
+	p := make([]byte, 6000)
+	for i := range p {
+		p[i] = byte(i*13 + 7)
+	}
+	q := make([]byte, 100)
+	for i := range q {
+		q[i] = byte(250 - i)
+	}
+	h, _ := sp24File(e, fs, root, "f.bin", p, where)
+
+	// The unflushed state.
+	e.write(fs, h, 0, q, `Write of 100 bytes q at 0 of "f.bin", vfs.Unstable`, where)
+	what := `testCaller's SetAttr {Size 5000} of "f.bin"`
+	r := sa24SetAttr(e, fs, testCaller, h, vfs.SetAttr{Size: sa24U64(5000)}, what, where)
+	if r.err != nil || r.v.Size != 5000 {
+		t.Fatalf("setup: %s = (size %d, %v), want (size 5000, nil) (ADR 0024 section 7, S7; %s)", what, r.v.Size,
+			r.err, where)
+	}
+	b1 := append(append([]byte(nil), q...), p[100:5000]...)
+	got, err := e.readFile(fs, h, `reading "f.bin" whole in the unflushed state`, where)
+	if err != nil || !bytes.Equal(got, b1) {
+		t.Fatalf("setup: reading \"f.bin\" whole in the unflushed state gives %d bytes (err %v), want 5000 bytes: q "+
+			"followed by p[100:5000] (ADR 0024 section 7, the facts; %s)", len(got), err, where)
+	}
+	a1 := sa24GetAttr(e, fs, h, `GetAttr of "f.bin" in the unflushed state`, where)
+	if a1.Size != 5000 || a1.Mode != 0o644 {
+		t.Fatalf("setup: in the unflushed state \"f.bin\" has size %d and mode %#o, want 5000 and 0644 (%s)", a1.Size,
+			a1.Mode, where)
+	}
+	s1 := bpSnapshot(t, bpMustOpen(t, fs, a1.FileID, `FS.open of "f.bin" in the unflushed state`),
+		`the openFile of "f.bin" in the unflushed state`)
+	if !slices.Equal(s1.indices(), []uint64{0}) || s1.pending != 1 {
+		t.Fatalf("setup: in the unflushed state the openFile of \"f.bin\" has buffers at %v and %d pending trims, want "+
+			"a buffer at [0], from the Write of q, and 1 pending trim, from the SetAttr to 5000 inside the second "+
+			"stored chunk (ADR 0024 section 7, the facts; ADR 0006 section 3(b); %s)", s1.indices(), s1.pending, where)
+	}
+	f1 := sa24Read(e, fs, "reading FS.dirty and FS.changes in the unflushed state", where)
+	if !f1.dirty {
+		t.Fatalf("setup: FS.dirty is false in the unflushed state, want true: the Write and the SetAttr each marked "+
+			"the namespace dirty (ADR 0024 section 7, the facts; %s)", where)
+	}
+	c1 := f1.changes
+
+	cases := []struct {
+		name string
+		sa   vfs.SetAttr
+	}{
+		{"whose size-change body would shorten the buffered chunk, drop the second chunk's trim and cut the " +
+			"chunk list", vfs.SetAttr{Size: sa24U64(10), Mode: sa24U32(0o600)}},
+		{"whose size-change body would record a shorter trim on the second chunk",
+			vfs.SetAttr{Size: sa24U64(4500), Mode: sa24U32(0o600)}},
+	}
+	for _, tc := range cases {
+		a := sa24GetAttr(e, fs, h, `GetAttr of "f.bin" before the refused call`, where)
+		call := fmt.Sprintf(`root's SetAttr %s of "f.bin", %s, the policy refusing its request at index 2`,
+			sa24Describe(tc.sa), tc.name)
+		mark := len(e.h.records())
+		rec.reset(2)
+		r := sa24SetAttr(e, fs, sp24Root, h, tc.sa, call, where)
+		calls := e.h.records()[mark:]
+		if !errors.Is(r.err, vfs.ErrNXIO) {
+			t.Errorf("%s = %v, want vfs.ErrNXIO, the policy's refusal returned unchanged (ADR 0024 section 2; %s)",
+				call, r.err, where)
+		}
+		sp24WantRequests(t, call, rec.taken(), []sp24Want{{op: policy.OpTruncate}, {op: policy.OpChmod},
+			{op: policy.OpTruncate}}, sp24Root, obj, "the pre-check allows the list whole and the exclusive hold's "+
+			"first request is refused (ADR 0024 section 2, steps 2 and 4)", where)
+		if len(calls) != 0 {
+			t.Errorf("the harness recorded %v during %s, want no call (ADR 0024 section 7, S7; %s)", calls, call,
+				where)
+		}
+		after := sa24GetAttr(e, fs, h, `GetAttr of "f.bin" after `+call, where)
+		if d := sa24Diff(a, after); d != "" || after.Size != 5000 || after.Mode != 0o644 {
+			t.Errorf("after %s, GetAttr of \"f.bin\" reports size %d and mode %#o, and differs from before the call in "+
+				"[%s]; want every attribute as it was, size 5000 and mode 0644: a call refused in the exclusive hold "+
+				"applies nothing (ADR 0024 section 2, step 4; %s)", call, after.Size, after.Mode, d, where)
+		}
+		f := sa24Read(e, fs, "reading FS.dirty and FS.changes after "+call, where)
+		if !f.dirty {
+			t.Errorf("after %s, FS.dirty is false, want true, as it was: the unflushed state is still dirty, and a "+
+				"refused SetAttr leaves FS.dirty as it was (ADR 0024 section 2; Assumption 28; %s)", call, where)
+		}
+		if f.changes != c1 {
+			t.Errorf("after %s, FS.changes is %d, want %d, as it was (ADR 0024 section 2, \"What a refused call "+
+				"leaves\"; %s)", call, f.changes, c1, where)
+		}
+		s := bpSnapshot(t, bpMustOpen(t, fs, a1.FileID, `FS.open of "f.bin" after `+call),
+			`the openFile of "f.bin" after `+call)
+		if s.bytes != s1.bytes || !maps.Equal(s.caps, s1.caps) || s.pending != s1.pending {
+			t.Errorf("after %s, the openFile of \"f.bin\" has charge %d, buffer capacities %v and %d pending trims; "+
+				"want %d, %v and %d, as they were: a refused call leaves every dirty buffer and pending trim as it "+
+				"was (ADR 0024 section 2, \"What a refused call leaves\"; %s)", call, s.bytes, s.caps, s.pending,
+				s1.bytes, s1.caps, s1.pending, where)
+		}
+		data, err := e.readFile(fs, h, `reading "f.bin" whole after `+call, where)
+		if err != nil || !bytes.Equal(data, b1) {
+			t.Errorf("after %s, reading \"f.bin\" whole gives %d bytes (err %v), want b1, its 5000 bytes before the "+
+				"call (ADR 0024 section 2, \"What a refused call leaves\"; Assumption 28; %s)", call, len(data), err,
+				where)
+		}
+	}
+
+	if err := e.sync(fs, "the Sync after the two refused calls", where); err != nil {
+		t.Fatalf("the Sync after the two refused calls = %v, want nil against a healthy store (%s)", err, where)
+	}
+	rwhere := where + ", the remount"
+	if rm := e.remount(rwhere); rm != nil {
+		if l := e.lookup(rm, e.root(rm, rwhere), "f.bin", rwhere); l.err != nil {
+			t.Errorf("Lookup of \"f.bin\" on a remount of the inner store = %v, want success (%s)", l.err, rwhere)
+		} else {
+			ra := sa24GetAttr(e, rm, l.h, `GetAttr of "f.bin" on the remount`, rwhere)
+			if ra.Size != 5000 || ra.Mode != 0o644 {
+				t.Errorf("on a remount after the Sync, \"f.bin\" has size %d and mode %#o, want 5000 and 0644: the "+
+					"refused calls changed nothing (ADR 0024 section 2; %s)", ra.Size, ra.Mode, rwhere)
+			}
+			data, err := e.readFile(rm, l.h, `reading "f.bin" whole on the remount`, rwhere)
+			if err != nil || !bytes.Equal(data, b1) {
+				t.Errorf("on a remount after the Sync, reading \"f.bin\" whole gives %d bytes (err %v), want b1, "+
+					"5000 bytes: the buffers and the trim were committed as they stood, after two refused calls left "+
+					"them as they were (ADR 0024 section 7, S7; %s)", len(data), err, rwhere)
+			}
+		}
+	}
+
+	// The control, on the first mount: the remount commits nothing.
+	ctl := vfs.SetAttr{Size: sa24U64(10), Mode: sa24U32(0o600)}
+	what = fmt.Sprintf(`root's SetAttr %s of "f.bin", the control, the policy refusing nothing`, sa24Describe(ctl))
+	rec.reset(-1)
+	r = sa24SetAttr(e, fs, sp24Root, h, ctl, what, where)
+	if r.err != nil {
+		t.Errorf("%s = %v, want nil (ADR 0024 section 2; %s)", what, r.err, where)
+	} else if d := sa24Unapplied(r.v, ctl); d != "" {
+		t.Errorf("%s returned attributes with %s (ADR 0024 section 2; %s)", what, d, where)
+	}
+	rd := sa24ReadOnce(e, fs, h, 0, 100, `one Read of 100 bytes at 0 of "f.bin" after the control`, where)
+	if rd.err != nil || !bytes.Equal(rd.data, q[:10]) || !rd.eof {
+		t.Errorf("after %s, one Read of 100 bytes at 0 of \"f.bin\" = (%x, eof %v, %v), want (%x, eof true, nil) "+
+			"(ADR 0024 section 7, S7; %s)", what, rd.data, rd.eof, rd.err, q[:10], where)
 	}
 }

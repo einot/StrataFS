@@ -164,37 +164,6 @@ func dg24Setup(t *testing.T, where string) *dg24Env {
 	return &dg24Env{e: e, fs: r.v, root: e.root(r.v, where)}
 }
 
-// dg24Fields is what dg24Read reads of an FS.
-type dg24Fields struct {
-	dirty   bool
-	changes uint64
-}
-
-// dg24Read reads FS.dirty and FS.changes in one hold of FS.mu for reading,
-// inside uc43Go (ADR 0022 section 8; ADR 0023 section 11).
-func dg24Read(e *uc43Env, fs *FS, what, where string) dg24Fields {
-	e.t.Helper()
-	return uc43Go(e, func() dg24Fields {
-		fs.mu.RLock()
-		defer fs.mu.RUnlock()
-		return dg24Fields{dirty: fs.dirty, changes: fs.changes}
-	}).wait(e.t, what, where)
-}
-
-// dg24GetAttr runs fs.GetAttr of h, which must succeed.
-func dg24GetAttr(e *uc43Env, fs *FS, h vfs.Handle, what, where string) vfs.Attr {
-	e.t.Helper()
-	ctx := e.ctx
-	r := uc43Go(e, func() uc43R[vfs.Attr] {
-		a, err := fs.GetAttr(ctx, h)
-		return uc43R[vfs.Attr]{a, err}
-	}).wait(e.t, what, where)
-	if r.err != nil {
-		e.t.Fatalf("%s = %v, want success (%s)", what, r.err, where)
-	}
-	return r.v
-}
-
 // dg24Listing is what one ReadDir returned: the names, eof and the verifier.
 type dg24Listing struct {
 	names []string
@@ -261,7 +230,7 @@ func TestRemoveOfAnEntryThatNamesNoInodeChangesNothing(t *testing.T) {
 	s := dg24Setup(t, where)
 	e, fs, root := s.e, s.fs, s.root
 	mark := len(e.h.records())
-	f0 := dg24Read(e, fs, "reading FS.dirty and FS.changes after New", where)
+	f0 := sa24Read(e, fs, "reading FS.dirty and FS.changes after New", where)
 	if f0.dirty {
 		t.Fatalf("setup: FS.dirty is true on a fresh mount that has changed nothing, want false (%s)", where)
 	}
@@ -280,7 +249,7 @@ func TestRemoveOfAnEntryThatNamesNoInodeChangesNothing(t *testing.T) {
 			"skipped (ADR 0024 section 3's table; %s)", dg24Ghost, l1.names, where)
 	}
 	v := l1.verf
-	rootBefore := dg24GetAttr(e, fs, root, "GetAttr of the root directory before the Remove", where)
+	rootBefore := sa24GetAttr(e, fs, root, "GetAttr of the root directory before the Remove", where)
 
 	what := fmt.Sprintf("testCaller's Remove of %q", dg24Ghost)
 	if err := dg24Do(e, what, where, func(ctx context.Context) error {
@@ -296,7 +265,7 @@ func TestRemoveOfAnEntryThatNamesNoInodeChangesNothing(t *testing.T) {
 	}
 
 	after := "after the Remove and the Rmdir"
-	f := dg24Read(e, fs, "reading FS.dirty and FS.changes "+after, where)
+	f := sa24Read(e, fs, "reading FS.dirty and FS.changes "+after, where)
 	if f.dirty {
 		t.Errorf("%s, FS.dirty is true, want false: a Remove or Rmdir that returns vfs.ErrNoEnt has changed nothing "+
 			"(ADR 0024 sections 1 and 3; %s)", after, where)
@@ -319,7 +288,7 @@ func TestRemoveOfAnEntryThatNamesNoInodeChangesNothing(t *testing.T) {
 				"table; %s)", after, dg24Ghost, l2.names, where)
 		}
 	}
-	rootAfter := dg24GetAttr(e, fs, root, "GetAttr of the root directory "+after, where)
+	rootAfter := sa24GetAttr(e, fs, root, "GetAttr of the root directory "+after, where)
 	if !rootAfter.MTime.Equal(rootBefore.MTime) {
 		t.Errorf("%s, the root directory's mtime is %v, want %v, as it was: nothing changed, so nothing touched "+
 			"it (ADR 0024 section 3; %s)", after, rootAfter.MTime, rootBefore.MTime, where)
@@ -380,7 +349,7 @@ func TestARenameOntoAnEntryThatNamesNoInodeReplacesIt(t *testing.T) {
 	e, fs, root := s.e, s.fs, s.root
 
 	donorH := e.create(fs, root, donor, where)
-	id := dg24GetAttr(e, fs, donorH, fmt.Sprintf("GetAttr of %q", donor), where).FileID
+	id := sa24GetAttr(e, fs, donorH, fmt.Sprintf("GetAttr of %q", donor), where).FileID
 
 	what := fmt.Sprintf("testCaller's Rename of %q to %q in the root directory", donor, dg24Ghost)
 	if err := dg24Do(e, what, where, func(ctx context.Context) error {
@@ -398,7 +367,7 @@ func TestARenameOntoAnEntryThatNamesNoInodeReplacesIt(t *testing.T) {
 	if l := e.lookup(fs, root, donor, where); !errors.Is(l.err, vfs.ErrNoEnt) {
 		t.Errorf("Lookup of %q after %s = %v, want vfs.ErrNoEnt (%s)", donor, what, l.err, where)
 	}
-	if f := dg24Read(e, fs, "reading FS.dirty after "+what, where); !f.dirty {
+	if f := sa24Read(e, fs, "reading FS.dirty after "+what, where); !f.dirty {
 		t.Errorf("after %s, FS.dirty is false, want true: the Rename changed the namespace and is marked dirty "+
 			"(ADR 0024 sections 1 and 3; %s)", what, where)
 	}

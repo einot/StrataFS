@@ -42,8 +42,10 @@ package blobfs
 //
 // Not covered, on purpose: GetAttr's Used, which no SetAttr here sets and
 // whose value the spec does not pin; the requests made of the policy, which
-// are S4's; the exclusive hold's second check, which only a change made
-// between the two checks can reach (ADR 0024 section 2, Assumption 19).
+// are S4's; the exclusive hold's second check, which under Unix() only a
+// change made between the two checks can reach (ADR 0024 section 2,
+// Assumption 19), and which S4 (iii) and S7 in setattr_policy_test.go reach
+// with a policy that refuses it.
 
 import (
 	"bytes"
