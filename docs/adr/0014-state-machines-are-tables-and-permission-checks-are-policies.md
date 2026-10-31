@@ -79,6 +79,15 @@ module's `Checked against` line moves once the architect has read rows 14 to
 16 against coder's commit (Assumption 49). Assumptions 43 to 51 are added.
 The APIs, the rows, the stages, §6's request lists and every test this ADR
 pins are unchanged.
+**Revised:** 2026-10-31, second — after coder's commit `555fc64`, read and
+not run. §6's block records the helper coder added, `checkPerm`, and the
+`Checked against` pass: `trace.tsv` rows 14 to 16 were read against
+`555fc64` and hold, so the module's `Checked against` line,
+`docs/tla/README.md`'s and vocabulary V3's statements now read `555fc64`,
+and `trace.tsv` is unchanged (Assumption 49). §11's W2 paragraph answers
+test-author's question: its `FS.changes` and `FS.dirty` check is meant for
+every row, the two allowed `Read`s included, as a restatement of ADR 0005
+§2's holds (Assumption 52). No test changes, and nothing else moves.
 **Issue:** #114
 
 ## Context
@@ -707,6 +716,14 @@ This is for the PR that wires the policy. It changes no behaviour.
     `f.perm`, used where no other field is set; `Rename`'s `Dst` and the
     `OpChown`'s `UID` may be set on a `Request` built in place. Its name, if
     one is added, is recorded here after coder's commit (Assumption 47).
+    Coder's commit `555fc64` added it, named `checkPerm`:
+    `func (f *FS) checkPerm(op policy.Op, c vfs.Caller, n *inode) error`,
+    which returns
+    `f.perm.Check(policy.Request{Op: op, Caller: c, Object: objectOf(n)})`,
+    placed after `objectOf`; `Lookup`, `ReadDir`, `createEntry`'s
+    `OpAddEntry`, `unlink`, `readable` and `Write` call it, and `Rename` and
+    the creation-time `OpChown` build their `Request` in place. `Access`
+    gained a doc comment citing this section and E12.
 
   **Why nothing a client sees changes** (Assumption 44). Each replacement
   asks `Unix()`'s row for the `Op` named, and for every request `blobfs`
@@ -729,6 +746,25 @@ This is for the PR that wires the policy. It changes no behaviour.
   W4 passes before the wiring and after it, and no `CHANGES` line is due.
   What a substituted policy makes possible, such as a non-root caller's
   requested uid applied in W2, is reachable only through the test seam.
+
+  **The `Checked against` pass** (Assumption 49), made on 2026-10-31 against
+  coder's commit `555fc64`, read and not run. `trace.tsv` rows 14 to 16
+  hold: `createEntry`, `unlink` and `Rename` are declared on `*FS` in
+  `internal/blobfs/fs.go`; each keeps its
+  `TLA+: docs/tla/CommitProtocol.tla Mutate` line; each calls `mutable()`
+  before its lock and then takes `FS.mu` for writing by `Lock` with a
+  deferred `Unlock`; and each makes its change and its `markDirty` in that
+  hold: `createEntry` through `allocInode`'s and its own, after
+  `checkPerm(policy.OpAddEntry, …)` and the creation-time `OpChown`, both
+  in the hold; `unlink` after `checkPerm(policy.OpRemoveEntry, …)`, its
+  dangling branch still returning before any change (ADR 0024 §3); `Rename`
+  after its `OpRename` request. Nothing in the three moved but the check at
+  stage D. `trace.tsv` is unchanged; the module's `Checked against` line,
+  `docs/tla/README.md`'s and vocabulary V3's statements moved from
+  `f6d20e1` to `555fc64`. The module changed in its header comment alone, so
+  TLC's outcome cannot differ from the run that calibrated the forty-five
+  rows; CLAUDE.md's merge bar still asks for `tla.sh full` on the PR, which
+  the session runs.
 
 ### 7. The mount mode machine
 
@@ -1184,7 +1220,13 @@ the unpinned rows U1 to U6 or on how `sa.GID` at creation is handled (#98).
   the row says otherwise; the recorder has recorded exactly the requests the
   row lists, in order, each with `Caller` `testCaller`; `FS.changes` is c
   and `FS.dirty` is false; and the row's check that nothing changed holds,
-  made after `reset(-1)` where it needs a call that asks the policy.
+  made after `reset(-1)` where it needs a call that asks the policy. The
+  `FS.changes` and `FS.dirty` check is meant for every row, the two `Read`s
+  the policy allows included: a `Read` holds `FS.mu` for reading only
+  (ADR 0005 §2) and `markDirty` needs it for writing (ADR 0023 §3), so a
+  `Read` marks nothing, and an ADR that gave `Read` a write hold, for an
+  access time say, would revise ADR 0005 §2 and strike those two assertions
+  then (Assumption 52).
   - `Lookup(d, "f")`, index 0: `[OpLookup on D]`.
   - `ReadDir(d, 0, zero verifier, 4096, false)`, index 0:
     `[OpReadDir on D]`; with `plus` true, the same.
@@ -1606,7 +1648,8 @@ says how it bears on this ADR.
     `tla.sh full`, whose outcome cannot differ from the run that calibrated
     the forty-five rows. The cheaper reading, leaving the line where it is,
     would have it name a commit before code the trace points at, which
-    ADR 0013 §6 defines it not to.
+    ADR 0013 §6 defines it not to. The pass was made on 2026-10-31 against
+    `555fc64`; §6's *The `Checked against` pass* records what was read.
 50. **Doc comments are pinned in substance, not text** (§6): `FS.perm`'s,
     which loses its `SetAttr`-first sentence, and `readable`'s, which says
     it asks `f.perm`. `Access` has no doc comment at `a6cff50`; coder may
@@ -1616,6 +1659,19 @@ says how it bears on this ADR.
     form to check against, and so that the mask stays a condition on the
     mount alone, with a diverged mount unmasked, as now; whether it should
     be is #97's (§7).
+52. **W2's `FS.changes` and `FS.dirty` check covers the two allowed `Read`s**
+    (§11). Test-author asked whether "for each row" was meant there, since
+    ADR 0024 §7's S7 reads the access time a `Read` "may or may not set"
+    into its baseline. It was written for every row and is kept as written.
+    The two rows pin that a `Read` marks nothing, which I did not set out to
+    pin but which follows from ADR 0005 §2, under which both of `Read`'s
+    steps hold `FS.mu` for reading only, and ADR 0023 §3, under which
+    `markDirty` needs it for writing; `Read`'s own comment at `555fc64` says
+    it leaves the access time to writes. S7's wording kept S7 independent of
+    a question it did not need to decide, and is no statement that a `Read`
+    may mark the namespace. An ADR that gave `Read` a write hold, for an
+    access time say, would revise ADR 0005 §2 and strike those two
+    assertions then. No test changes.
 
 ## Alternatives considered
 
