@@ -1735,15 +1735,16 @@ func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off ui
 		}
 		n2.touchM(now)
 		n2.touchA(now)
+		f.markDirty()
 	} else {
 		// Unlinked while this write buffered: nothing will flush these
 		// buffers, so drop them and return the file's whole charge, this
-		// write's included (ADR 0003 §2, site 2).
+		// write's included (ADR 0003 §2, site 2). That changes nothing in the
+		// namespace, so it marks nothing (ADR 0024 §1).
 		released := of.bytes.Swap(0)
 		of.dirty = make(map[uint64][]byte)
 		f.budget.release(released)
 	}
-	f.markDirty()
 	f.mu.Unlock()
 	return written, nil
 }
