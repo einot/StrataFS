@@ -103,12 +103,12 @@ type FS struct {
 	// stand for a build with another limit (ADR 0007 §7).
 	maxFileSize uint64
 
-	// perm decides what a caller may do (ADR 0014 §6). New sets it to
-	// policy.Unix() and nothing else writes it, so it is read without a lock;
-	// a test may replace it after New returns and before first use (ADR 0014
-	// §6, Assumption 22). SetAttr is the first method that asks it; the rest
-	// still check inline, through permitted and inGroup, until #114 moves
-	// them (ADR 0024 §2).
+	// perm decides what a caller may do (ADR 0014 §6). Every check of what a
+	// caller may do goes through it, at stage D in the hold each method has;
+	// Access alone reads policy.AccessBits and the mount's mask instead. New
+	// sets it to policy.Unix() and nothing else writes it, so it is read
+	// without a lock; a test may replace it after New returns and before first
+	// use (ADR 0014 §6, Assumption 22).
 	perm policy.Policy
 
 	// commitMu serialises commits: Sync holds it from after its first pass until
@@ -461,45 +461,17 @@ func (f *FS) resolve(h vfs.Handle) (*inode, error) {
 
 // ---- permissions ----
 
-// permitted applies classic Unix mode checks. want is a bitmask of 4 (read),
-// 2 (write) and 1 (execute/search).
-func permitted(n *inode, c vfs.Caller, want uint32) bool {
-	if c.UID == 0 {
-		// Root may read and write anything. Execute still requires that some
-		// execute bit is set, matching Unix behaviour.
-		if want&1 != 0 && n.Mode&0o111 == 0 && !n.isDir() {
-			return false
-		}
-		return true
-	}
-	var bits uint32
-	switch {
-	case c.UID == n.UID:
-		bits = (n.Mode >> 6) & 7
-	case inGroup(c, n.GID):
-		bits = (n.Mode >> 3) & 7
-	default:
-		bits = n.Mode & 7
-	}
-	return bits&want == want
-}
-
-func inGroup(c vfs.Caller, gid uint32) bool {
-	if c.GID == gid {
-		return true
-	}
-	for _, g := range c.GIDs {
-		if g == gid {
-			return true
-		}
-	}
-	return false
-}
-
 // objectOf is the part of n a policy reads (ADR 0014 §6). Caller must hold mu
 // for reading or writing.
 func objectOf(n *inode) policy.Object {
 	return policy.Object{Type: n.Type, Mode: n.Mode, UID: n.UID, GID: n.GID}
+}
+
+// checkPerm asks f.perm whether c may do op to n, for a request that sets no
+// field but those three, and returns its refusal unchanged (ADR 0014 §6).
+// Caller must hold mu for reading or writing.
+func (f *FS) checkPerm(op policy.Op, c vfs.Caller, n *inode) error {
+	return f.perm.Check(policy.Request{Op: op, Caller: c, Object: objectOf(n)})
 }
 
 // setAttrRequests asks f.perm about every attribute sa sets, in ADR 0024 §2's
@@ -658,6 +630,9 @@ func (f *FS) SetAttr(ctx context.Context, c vfs.Caller, h vfs.Handle, sa vfs.Set
 	return n.attr(f.fsid), nil
 }
 
+// Access answers from the mode bits, through policy.AccessBits, less a
+// read-only mount's write bits. It does not ask f.perm, and the mount's mask
+// stays here rather than in a policy (ADR 0014 §6; ADR 0018 §4, E12).
 func (f *FS) Access(ctx context.Context, c vfs.Caller, h vfs.Handle, want uint32) (uint32, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -666,24 +641,9 @@ func (f *FS) Access(ctx context.Context, c vfs.Caller, h vfs.Handle, want uint32
 		return 0, err
 	}
 
-	var granted uint32
-	if permitted(n, c, 4) {
-		granted |= vfs.AccessRead
-		if n.isDir() {
-			granted |= vfs.AccessLookup
-		}
-	}
-	if n.isDir() && permitted(n, c, 1) {
-		granted |= vfs.AccessLookup
-	}
-	if f.mode.State() != mountReadOnly && permitted(n, c, 2) {
-		granted |= vfs.AccessModify | vfs.AccessExtend
-		if n.isDir() {
-			granted |= vfs.AccessDelete
-		}
-	}
-	if !n.isDir() && n.Mode&0o111 != 0 && permitted(n, c, 1) {
-		granted |= vfs.AccessExecute
+	granted := policy.AccessBits(c, objectOf(n))
+	if f.mode.State() == mountReadOnly {
+		granted &^= vfs.AccessModify | vfs.AccessExtend | vfs.AccessDelete
 	}
 	return granted & want, nil
 }
@@ -696,11 +656,8 @@ func (f *FS) Lookup(ctx context.Context, c vfs.Caller, dir vfs.Handle, name stri
 	if err != nil {
 		return nil, vfs.Attr{}, err
 	}
-	if !d.isDir() {
-		return nil, vfs.Attr{}, vfs.ErrNotDir
-	}
-	if !permitted(d, c, 1) {
-		return nil, vfs.Attr{}, vfs.ErrAcces
+	if err := f.checkPerm(policy.OpLookup, c, d); err != nil {
+		return nil, vfs.Attr{}, err
 	}
 
 	var target *inode
@@ -826,11 +783,8 @@ func (f *FS) createEntry(ctx context.Context, c vfs.Caller, dir vfs.Handle, name
 	if err != nil {
 		return nil, vfs.Attr{}, err
 	}
-	if !d.isDir() {
-		return nil, vfs.Attr{}, vfs.ErrNotDir
-	}
-	if !permitted(d, c, 2|1) {
-		return nil, vfs.Attr{}, vfs.ErrAcces
+	if err := f.checkPerm(policy.OpAddEntry, c, d); err != nil {
+		return nil, vfs.Attr{}, err
 	}
 
 	if existing, ok := d.Entries[name]; ok {
@@ -861,8 +815,13 @@ func (f *FS) createEntry(ctx context.Context, c vfs.Caller, dir vfs.Handle, name
 	}
 
 	n := f.allocInode(t, mode, c, d.ID)
-	if sa.UID != nil && c.UID == 0 {
-		n.UID = *sa.UID
+	if sa.UID != nil {
+		// A refused uid is left unapplied and fails nothing: the new inode
+		// stays the caller's, as when none is asked for (ADR 0014 §6).
+		r := policy.Request{Op: policy.OpChown, Caller: c, Object: objectOf(n), UID: *sa.UID}
+		if f.perm.Check(r) == nil {
+			n.UID = *sa.UID
+		}
 	}
 	if sa.GID != nil {
 		n.GID = *sa.GID
@@ -916,11 +875,8 @@ func (f *FS) unlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name stri
 	if err != nil {
 		return err
 	}
-	if !d.isDir() {
-		return vfs.ErrNotDir
-	}
-	if !permitted(d, c, 2|1) {
-		return vfs.ErrAcces
+	if err := f.checkPerm(policy.OpRemoveEntry, c, d); err != nil {
+		return err
 	}
 
 	id, ok := d.Entries[name]
@@ -1029,11 +985,9 @@ func (f *FS) Rename(ctx context.Context, c vfs.Caller, fromDir vfs.Handle, fromN
 	if err != nil {
 		return err
 	}
-	if !src.isDir() || !dst.isDir() {
-		return vfs.ErrNotDir
-	}
-	if !permitted(src, c, 2|1) || !permitted(dst, c, 2|1) {
-		return vfs.ErrAcces
+	r := policy.Request{Op: policy.OpRename, Caller: c, Object: objectOf(src), Dst: objectOf(dst)}
+	if err := f.perm.Check(r); err != nil {
+		return err
 	}
 
 	id, ok := src.Entries[fromName]
@@ -1115,11 +1069,8 @@ func (f *FS) ReadDir(ctx context.Context, c vfs.Caller, dir vfs.Handle, cookie u
 	if err != nil {
 		return nil, false, zero, err
 	}
-	if !d.isDir() {
-		return nil, false, zero, vfs.ErrNotDir
-	}
-	if !permitted(d, c, 4) {
-		return nil, false, zero, vfs.ErrAcces
+	if err := f.checkPerm(policy.OpReadDir, c, d); err != nil {
+		return nil, false, zero, err
 	}
 
 	names := make([]string, 0, len(d.Entries))
@@ -1417,18 +1368,16 @@ type readRef struct {
 	trimmed bool
 }
 
-// readable resolves h for a Read and applies its checks, in the order Read has
-// always applied them. Caller must hold mu.
+// readable resolves h for a Read and asks f.perm for OpRead on the inode it
+// names, in the hold its caller has, returning the refusal unchanged (ADR 0014
+// §6). Caller must hold mu.
 func (f *FS) readable(c vfs.Caller, h vfs.Handle) (*inode, error) {
 	n, err := f.resolve(h)
 	if err != nil {
 		return nil, err
 	}
-	if n.isDir() {
-		return nil, vfs.ErrIsDir
-	}
-	if !permitted(n, c, 4) {
-		return nil, vfs.ErrAcces
+	if err := f.checkPerm(policy.OpRead, c, n); err != nil {
+		return nil, err
 	}
 	return n, nil
 }
@@ -1574,13 +1523,9 @@ func (f *FS) Write(ctx context.Context, c vfs.Caller, h vfs.Handle, off uint64, 
 		f.mu.RUnlock()
 		return 0, 0, err
 	}
-	if n.isDir() {
+	if err := f.checkPerm(policy.OpWrite, c, n); err != nil {
 		f.mu.RUnlock()
-		return 0, 0, vfs.ErrIsDir
-	}
-	if !permitted(n, c, 2) {
-		f.mu.RUnlock()
-		return 0, 0, vfs.ErrAcces
+		return 0, 0, err
 	}
 	id := n.ID
 	f.mu.RUnlock()
