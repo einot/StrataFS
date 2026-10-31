@@ -63,6 +63,22 @@ is asked at `truncate`'s second resolve each gain a sentence saying so;
 `FS.perm` and `objectOf` arrive with that
 ADR, for `SetAttr` alone, as the first step of §6's wiring. The APIs, the
 rows, the stages and every test this ADR pins are unchanged.
+**Revised:** 2026-10-31 — for the PR that completes §6's wiring, #114's
+next step after ADR 0024, against the code at `a6cff50`, which is
+`origin/main` with ADR 0024 merged (Assumption 43). §6 is the spec for it
+and no new ADR is written: each method's inline check is replaced by the
+request §6 lists, in the same hold, with the same error in the same order,
+which §6's new block *The wiring at `a6cff50`* gives method by method;
+`permitted` and `inGroup` are removed, since nothing calls them once `Access`
+reads `policy.AccessBits`; `Access` itself still asks no policy; and
+`FS.perm`'s doc comment stops saying that `SetAttr` alone asks it. Nothing a
+client sees changes, so there is no `CHANGES` line (Assumption 44). §6's
+`Access` bullet gains a sentence saying §7 is done. §11 gains the detailed
+form of W2 to W5 and the test file's name. `trace.tsv`'s rows stand, and the
+module's `Checked against` line moves once the architect has read rows 14 to
+16 against coder's commit (Assumption 49). Assumptions 43 to 51 are added.
+The APIs, the rows, the stages, §6's request lists and every test this ADR
+pins are unchanged.
 **Issue:** #114
 
 ## Context
@@ -618,7 +634,9 @@ This is for the PR that wires the policy. It changes no behaviour.
   - `Access`: `AccessBits(c, objectOf(n))`; then, only when the mount mode is
     `ReadOnly` (`f.readOnly` until §7 is done), minus `vfs.AccessModify`,
     `vfs.AccessExtend` and `vfs.AccessDelete`; then `& want`. It does not go
-    through `f.perm` until #97's fix.
+    through `f.perm` until #97's fix. §7 is done: at `a6cff50` the mask
+    reads `f.mode.State() == mountReadOnly`, and the wiring below keeps it
+    in `Access`, under E12 (ADR 0018 §4).
   - `GetAttr`, `ReadLink`, `FSStat` and `Commit` consult no policy.
 - **What `blobfs` relies on** (Assumption 34). `Unix()`'s type rows guard more
   than permission. Past them, `createEntry` and `Rename` add a name to the
@@ -634,6 +652,83 @@ This is for the PR that wires the policy. It changes no behaviour.
   `policy.All(policy.Unix(), p)` does. A test that replaces `f.perm` with a
   policy that allows more makes its calls only on objects of the type each
   operation needs (§11).
+- **The wiring at `a6cff50`** (2026-10-31; Assumptions 43 to 47, 50 and
+  51). `SetAttr` and `truncate` already make every request they make
+  through `f.perm` (ADR 0024 §2: `setAttrRequests`, once for a call without
+  a size and twice for one with a size, the second time in the exclusive
+  hold), so nothing moves there. Every other check of what a caller may do
+  is one of `permitted`, `inGroup` or `isDir()` in `internal/blobfs/fs.go`,
+  and each is replaced by one `f.perm.Check` at the same place, in the same
+  hold, as follows. `objectOf(n)` builds every `Object`, from the inode as
+  it stands at the check, and every refusal is returned unchanged.
+  - `Lookup`: holding `FS.mu` for reading, after `resolve`, the two
+    statements `if !d.isDir() { … ErrNotDir }` and
+    `if !permitted(d, c, 1) { … ErrAcces }` become one request, `OpLookup`
+    on `d`.
+  - `ReadDir`: the same hold and shape; `isDir()` and `permitted(d, c, 4)`
+    become `OpReadDir` on `d`.
+  - `createEntry`: holding `FS.mu` for writing, after `resolve`, `isDir()`
+    and `permitted(d, c, 2|1)` become `OpAddEntry` on `d`. Then, after
+    `allocInode` has made the new inode `n` and before `sa.GID` is applied,
+    where `if sa.UID != nil && c.UID == 0 { n.UID = *sa.UID }` stands: if
+    `sa.UID` is set, one `OpChown` on `n` with `UID` `*sa.UID`, and
+    `n.UID = *sa.UID` only if it returns nil; its refusal is not returned
+    and ends nothing. Its `Object` is `n` as `allocInode` made it: `Type`
+    the kind created, `Mode` the mode chosen masked to `0o7777`, `UID`
+    `c.UID`, `GID` `c.GID`. The existing-name branches make no `OpChown`
+    and are unchanged, and so is `sa.GID`'s apply (#98).
+  - `unlink`: holding `FS.mu` for writing, after `resolve`, `isDir()` and
+    `permitted(d, c, 2|1)` become `OpRemoveEntry` on `d`.
+  - `Rename`: holding `FS.mu` for writing, after both resolves, the two
+    statements over `src` and `dst` become one `OpRename` with `Object`
+    `objectOf(src)` and `Dst` `objectOf(dst)`.
+  - `readable`, for both of `Read`'s steps: `isDir()` and
+    `permitted(n, c, 4)` become `OpRead` on `n`, in the hold `readable`'s
+    caller has: `FS.mu` for reading in step 1, and `openFile.mu` with
+    `FS.mu` for reading in step 2. Its doc comment says it asks `f.perm`.
+  - `Write`: holding `FS.mu` for reading, after `resolve` and before the
+    budget's wait, `isDir()` and `permitted(n, c, 2)` become `OpWrite` on
+    `n`. Nothing else in `Write` moves (#101).
+  - `Access`: the four `permitted` calls and their `isDir()` conditions
+    become `granted := policy.AccessBits(c, objectOf(n))`; then, if
+    `f.mode.State() == mountReadOnly`,
+    `granted &^= vfs.AccessModify | vfs.AccessExtend | vfs.AccessDelete`;
+    then `return granted & want, nil`. `Access` does not call `f.perm`
+    (W5), and the mask stays in `Access` under E12.
+  - `permitted` and `inGroup` are deleted. At `a6cff50` nothing outside
+    `fs.go` names either, no test included.
+  - `FS.perm`'s doc comment says that every check of what a caller may do
+    goes through it, at stage D in the hold each method has; that `Access`
+    reads `policy.AccessBits` and the mount's mask instead; and that `New`
+    sets it and a test may replace it, as before. The sentence that
+    `SetAttr` is the first method to ask it and the rest check inline goes.
+  - Coder may add one unexported method on `*FS` that builds a `Request`
+    from an `Op`, a `Caller` and an `*inode` through `objectOf` and asks
+    `f.perm`, used where no other field is set; `Rename`'s `Dst` and the
+    `OpChown`'s `UID` may be set on a `Request` built in place. Its name, if
+    one is added, is recorded here after coder's commit (Assumption 47).
+
+  **Why nothing a client sees changes** (Assumption 44). Each replacement
+  asks `Unix()`'s row for the `Op` named, and for every request `blobfs`
+  makes that row is the inline check it replaces, exactly (§5): `Permits`
+  is `permitted` for the `want` values 1, 2, 3 and 4, the only ones `fs.go`
+  passes; `Unix()`'s "a directory" is `Type == vfs.TypeDir`, which is
+  `isDir()`; every row makes its type check before its permission check,
+  as each method did; `OpRename`'s row checks both types before either
+  permission, as `Rename` did; and the refusal is the bare `vfs.Status` the
+  inline code returned. Each request is made in the hold its inline check
+  was made in, and a policy takes no lock (§4), so nothing moves relative
+  to a lock or a wait: `Write`'s check stays before the budget's wait,
+  `Read`'s second stays under `openFile.mu`, and no check moves across
+  `getOpen` or the commit gate. The `OpChown` at creation gives, under
+  `Unix()`, what `c.UID == 0` gave: root's request is allowed and applied,
+  and anyone else's is allowed only for the uid the new inode already has,
+  where applying it changes nothing. `AccessBits` sets exactly the bits
+  `Access` set, with the mask applied after the bits are computed rather
+  than inside the condition that sets them, which gives the same bits. So
+  W4 passes before the wiring and after it, and no `CHANGES` line is due.
+  What a substituted policy makes possible, such as a non-root caller's
+  requested uid applied in W2, is reachable only through the test seam.
 
 ### 7. The mount mode machine
 
@@ -1037,6 +1132,203 @@ unexported field. No existing test file changes.
 - **W5.** `GetAttr`, `ReadLink`, `FSStat`, `Commit` and `Access` never consult
   `f.perm`.
 
+**W2 to W5 in detail, for the PR that completes §6** (2026-10-31; package
+`blobfs`, one new file, `internal/blobfs/policy_wiring_test.go`;
+Assumption 48). Every name is spelled as in Go. W1 is shown by the seam these
+tests and ADR 0024 §7's S4 use, and gets no test of its own. The harness is
+ADR 0011 §7's as ADR 0023 §11 and ADR 0024 §7 apply it: a `*store.Local`
+under `t.TempDir()` behind an unarmed `uc43Store`, through `uc43Setup`;
+`SnapshotRetention` −1 and `MaxDirtyBytes` −1 through `uc43Config`; every
+`New` and every `FS` call in `uc43Go`, waited for under `uc43Bound`; nothing
+sleeps or polls; `FS.dirty` and `FS.changes` read holding `FS.mu` for
+reading. A test may reuse `sp24Recorder` (`check`, `reset`, `taken`),
+`sp24Mount`, `sp24File` and `sp24Root` from `setattr_policy_test.go`, the
+`sa24` helpers and `sa24Other` from `setattr_atomic_test.go`, and `uc43Env`
+and its methods; it writes helpers of its own, prefixed `pw`, for the rest,
+and changes no existing test file. `FS.perm` is replaced only as W1 allows:
+once, right after `New` returns and before any other call, in `uc43Go`, as
+`sp24Mount` does. The callers are `testCaller` (`vfs.Caller{UID: 501, GID:
+20}`, the owner of the root and of everything it creates), `sp24Root`
+(`vfs.Caller{UID: 0}`), `sa24Other` (`vfs.Caller{UID: 502, GID: 30}`,
+neither owner nor group member of anything `testCaller` makes) and a
+primary-group member, `vfs.Caller{UID: 503, GID: 20}`.
+
+Facts a test may rely on, beside ADR 0022 §8's, ADR 0023 §11's and
+ADR 0024 §7's: the root directory of a mount made with `uc43Config` is a
+directory of mode `0o755` owned by `501:20`; `Create` with no `Mode` makes a
+regular file of mode `0o644`, `Mkdir` a directory of `0o755` and `Symlink` a
+symlink of `0o777`, each owned by the caller's uid and gid, and a `Mode`
+given is applied masked to `0o7777`; `Attr.FileID` is the inode number; a
+file that has only been created, never written or truncated, has no `FS.open`
+entry, and one that has been written keeps its entry until it is removed
+(ADR 0005 §3), a `Sync` included; a `Read` at an offset at or past the size
+returns `(nil, true, nil)`, after step 1 for a file with no `FS.open` entry
+and after step 2 for one with an entry; a `Read` records one `OpRead` for a
+file with no `FS.open` entry and two for a file with one; a refused call
+changes nothing, so `FS.changes` is what it was and `FS.dirty` is still false
+if it was; `vfs.ErrNXIO` is a status no row of `Unix()` returns; and a
+refusal through the `FS` is the bare `vfs.Status`, unwrapped (§5). Every
+call made with a policy that allows more than `Unix()` is on an object of
+the type the operation needs (the safety rule below), and no test relies on
+the unpinned rows U1 to U6 or on how `sa.GID` at creation is handled (#98).
+
+- **W2, in detail** (`TestEveryMethodAsksThePolicyAndStopsAtItsRefusal`).
+  `sp24Mount` with an `sp24Recorder`. With it refusing nothing, `testCaller`
+  makes directories `d` and `d2` in the root, a file `d/f` with 100 bytes
+  written at 0, `vfs.Unstable`, a file `d/e` never written, and a symlink
+  `d/ln` to `f`, and `Sync`s. `D`, `F` and `E` name the `Object`s
+  `{vfs.TypeDir, 0o755, 501, 20}`, `{vfs.TypeReg, 0o644, 501, 20}` and the
+  same as `F`; `d2`'s and the root's `Object` equal `D`. Then, for each row
+  below: the recorder is reset to refuse the index given; `FS.changes` is
+  read, c; the call is made by `testCaller`; it returns `vfs.ErrNXIO` unless
+  the row says otherwise; the recorder has recorded exactly the requests the
+  row lists, in order, each with `Caller` `testCaller`; `FS.changes` is c
+  and `FS.dirty` is false; and the row's check that nothing changed holds,
+  made after `reset(-1)` where it needs a call that asks the policy.
+  - `Lookup(d, "f")`, index 0: `[OpLookup on D]`.
+  - `ReadDir(d, 0, zero verifier, 4096, false)`, index 0:
+    `[OpReadDir on D]`; with `plus` true, the same.
+  - `Create(d, "new", vfs.SetAttr{}, true)`, index 0: `[OpAddEntry on D]`;
+    `Lookup(d, "new")` is then `vfs.ErrNoEnt`.
+  - `Mkdir(d, "sub", vfs.SetAttr{})`, index 0: `[OpAddEntry on D]`; `Lookup`
+    `vfs.ErrNoEnt`.
+  - `Symlink(d, "s", "f", vfs.SetAttr{})`, index 0: `[OpAddEntry on D]`;
+    `Lookup` `vfs.ErrNoEnt`.
+  - `Remove(d, "f")`, index 0: `[OpRemoveEntry on D]`; `GetAttr` of `f`'s
+    handle still succeeds and `Lookup(d, "f")` finds it.
+  - `Rmdir(root, "d2")`, index 0: `[OpRemoveEntry on D]`, the root's
+    `Object`; `Lookup(root, "d2")` finds it.
+  - `Rename(d, "f", d2, "g")`, index 0: `[OpRename with Object D and Dst
+    D]`, the source's then the target's; `Lookup(d, "f")` finds it and
+    `Lookup(d2, "g")` is `vfs.ErrNoEnt`. And `Rename(d, "f", d, "g")`,
+    index 0: `[OpRename with Object D and Dst D]`.
+  - `Read(f, 0, 10)`, index 0: `[OpRead on F]`. `Read(f, 0, 10)`, index 1:
+    `vfs.ErrNXIO` with `[OpRead on F, OpRead on F]`, since `f` has an
+    `FS.open` entry and step 2 asks again. `Read(f, 0, 10)`, index −1: the
+    first 10 bytes written, with `[OpRead on F, OpRead on F]`.
+    `Read(e, 0, 10)`, index −1: no bytes, `eof` true and nil, with
+    `[OpRead on E]` alone, since `e` has no entry. `Read(e, 0, 10)`,
+    index 0: `vfs.ErrNXIO` with `[OpRead on E]`.
+  - `Write(f, 0, 10 bytes, vfs.Unstable)`, index 0: `[OpWrite on F]`;
+    `GetAttr` of `f` reports size 100, and a `Read` of 100 bytes at 0, the
+    recorder reset to −1, returns the bytes written in setup.
+  - `SetAttr` is S4's and is not repeated.
+- **W2 for the requested uid**
+  (`TestARequestedUIDAtCreationGoesThroughOpChownAndARefusalIsIgnored`).
+  W2's mount, recorder and `d`. `sp24Root`'s
+  `Create(d, "r1", vfs.SetAttr{UID: 7}, true)`, index 1: returns nil, and
+  the attributes it returns and `GetAttr` report `UID` 0, the caller's, and
+  `GID` 0; recorded exactly `[OpAddEntry on D, OpChown with Object
+  {vfs.TypeReg, 0o644, 0, 0} and UID 7]`, each with `Caller` `sp24Root`.
+  `sp24Root`'s `Create(d, "r2", vfs.SetAttr{UID: 7}, true)`, index −1: nil,
+  `UID` 7, the same two requests. `testCaller`'s
+  `Create(d, "r3", vfs.SetAttr{UID: 7}, true)`, index −1: nil, `UID` 7,
+  `[OpAddEntry on D, OpChown with Object {vfs.TypeReg, 0o644, 501, 20} and
+  UID 7]`, each with `Caller` `testCaller`, which shows the decision is the
+  policy's and not `c.UID == 0`'s. `testCaller`'s
+  `Mkdir(d, "r4", vfs.SetAttr{UID: 7})`, index −1: nil, `UID` 7, the
+  `OpChown`'s `Object` `{vfs.TypeDir, 0o755, 501, 20}`; its
+  `Symlink(d, "r5", "f", vfs.SetAttr{UID: 7})`, index −1: nil, `UID` 7,
+  `Object` `{vfs.TypeLnk, 0o777, 501, 20}`; its
+  `Create(d, "r6", vfs.SetAttr{Mode: 0o600, UID: 7}, true)`, index −1: the
+  `OpChown`'s `Object` has `Mode` `0o600`. `testCaller`'s
+  `Create(d, "r1", vfs.SetAttr{UID: 7}, false)`, index −1, the non-exclusive
+  create of a name that exists: nil, the handle of `r1`, whose `UID` is
+  still 0, and exactly `[OpAddEntry on D]`. Its
+  `Create(d, "r1", vfs.SetAttr{UID: 7}, true)`, index −1: `vfs.ErrExist`
+  and exactly `[OpAddEntry on D]`.
+- **W3, in detail** (`TestNoCheckRemainsOutsideThePolicy`). `sp24Mount`
+  with `policy.Func(func(policy.Request) error { return nil })`.
+  `testCaller` makes `p`, a directory of mode `0o700`, and in it `x`, a file
+  of mode `0o600` with 100 bytes written, and `Sync`s. `sa24Other`, whom
+  every `Unix()` row refuses on them: `Lookup(p, "x")` returns `x`'s
+  handle; `ReadDir(p, 0, zero verifier, 4096, false)` lists `x`;
+  `Create(p, "y", vfs.SetAttr{}, true)`, `Mkdir(p, "q", vfs.SetAttr{})` and
+  `Symlink(p, "s", "x", vfs.SetAttr{})` return nil; `Read(x, 0, 100)`
+  returns the 100 bytes; `Write(x, 100, 10 bytes, vfs.Unstable)` returns 10
+  and nil; `Rename(p, "y", p, "z")`, `Remove(p, "z")`, `Remove(p, "s")` and
+  `Rmdir(p, "q")` return nil; `GetAttr` of `x` then reports size 110. Every
+  object is of the type its operation needs.
+- **W4, in detail** (`TestTheUnixRowsAreUnchangedThroughTheFS`), a
+  characterisation that passes at `a6cff50` and after the wiring
+  (Assumption 48). `e.newFS`, with `Unix()` left in place. `testCaller`
+  makes, in the root: `d`, `0o755`, holding `f` (`0o644`, with bytes), `sub`
+  (a directory, `0o755`) and `x` (a regular file, `0o755`); `priv`, a
+  directory `0o700`; `ro`, a directory `0o555` holding `k` (`0o644`); `wo`,
+  a directory `0o333`; `rd`, a directory `0o644`; `g750` and `g705`,
+  directories of those modes; `secret`, a regular file `0o600`; `fg640` and
+  `fg604`, regular files of those modes with bytes; and `fo`, a regular file
+  `0o664`. Each row is a call, its caller, the status it must return,
+  compared with `==` against the bare `vfs.Status`, and why.
+  - `OpLookup`: `sa24Other`'s `Lookup(priv, "nope")` `vfs.ErrAcces`, not
+    `vfs.ErrNoEnt` (D before E); `Lookup(f, "nope")` `vfs.ErrNotDir`;
+    `Lookup(rd, "nope")` `vfs.ErrAcces` (read without search does not look
+    up); the group member's `Lookup(g750, "nope")` `vfs.ErrNoEnt` (allowed,
+    then E) and `Lookup(g705, "nope")` `vfs.ErrAcces` (one class only);
+    `sp24Root`'s `Lookup(priv, "nope")` `vfs.ErrNoEnt`.
+  - `OpReadDir`: `sa24Other`'s `ReadDir(wo, …)` `vfs.ErrAcces`;
+    `ReadDir(f, …)` `vfs.ErrNotDir`; `ReadDir(rd, …)` nil (read without
+    search lists).
+  - `OpAddEntry`: `sa24Other`'s `Create(ro, "n", vfs.SetAttr{}, true)`,
+    `Mkdir(ro, "n", vfs.SetAttr{})` and `Symlink(ro, "n", "k",
+    vfs.SetAttr{})` `vfs.ErrAcces`; the same three on `f` `vfs.ErrNotDir`;
+    `Mkdir(ro, "k", vfs.SetAttr{})` `vfs.ErrAcces`, not `vfs.ErrExist`;
+    `Create(ro, "", vfs.SetAttr{}, true)` `vfs.ErrInval` (B before D);
+    `sp24Root`'s `Create(ro, "n", vfs.SetAttr{}, true)` nil.
+  - `OpRemoveEntry`: `sa24Other`'s `Remove(ro, "k")` and `Rmdir(ro, "k")`
+    `vfs.ErrAcces`; `Remove(ro, "nope")` `vfs.ErrAcces`, not `vfs.ErrNoEnt`;
+    `Remove(f, "k")` `vfs.ErrNotDir`; `testCaller`'s `Remove(d, "sub")`
+    `vfs.ErrIsDir` and `Rmdir(d, "f")` `vfs.ErrNotDir` (E, after D allowed).
+  - `OpRename`: `sa24Other`'s `Rename(ro, "k", d, "k2")` `vfs.ErrAcces`;
+    `Rename(d, "f", ro, "k2")` `vfs.ErrAcces`; `Rename(ro, "nope", ro,
+    "k2")` `vfs.ErrAcces`, not `vfs.ErrNoEnt`; `Rename(f, "k", ro, "k2")`
+    `vfs.ErrNotDir` (a non-directory source, before `ro`'s refusal);
+    `Rename(ro, "k", f, "k2")` `vfs.ErrNotDir`.
+  - `OpRead`: `sa24Other`'s `Read(secret, 0, 10)` `vfs.ErrAcces`;
+    `Read(d, 0, 10)` `vfs.ErrIsDir`; `Read(fg604, 0, 10)` nil (the other
+    bits); the group member's `Read(fg640, 0, 10)` nil and
+    `Read(fg604, 0, 10)` `vfs.ErrAcces` (one class only).
+  - `OpWrite`: `sa24Other`'s `Write(f, 0, b, vfs.Unstable)` `vfs.ErrAcces`;
+    `Write(d, 0, b, vfs.Unstable)` `vfs.ErrIsDir`; the group member's
+    `Write(fo, 0, b, vfs.Unstable)` nil; `sp24Root`'s
+    `Write(secret, 0, b, vfs.Unstable)` nil.
+  - The requested uid under `Unix()`: `testCaller`'s
+    `Create(d, "u1", vfs.SetAttr{UID: 7}, true)` returns nil with `UID`
+    501; `sp24Root`'s `Create(d, "u2", vfs.SetAttr{UID: 7}, true)` nil with
+    `UID` 7.
+  - `Access`, with `want` all six bits: `sa24Other` on `f` `AccessRead`; on
+    `secret` 0; on `x` `AccessRead|AccessExecute`; on `d`
+    `AccessRead|AccessLookup`; `testCaller` on `f`
+    `AccessRead|AccessModify|AccessExtend`; on `d`
+    `AccessRead|AccessLookup|AccessModify|AccessExtend|AccessDelete`;
+    `sp24Root` on `f` `AccessRead|AccessModify|AccessExtend` (no execute
+    bit, so no `AccessExecute`); on `x`
+    `AccessRead|AccessModify|AccessExtend|AccessExecute`; on `d` all but
+    `AccessExecute`. And `testCaller` on `f` with `want` `AccessRead` alone
+    gives `AccessRead`. No row has a directory with read but not search, or
+    write but not search (U5).
+
+  Rows that would pin U1 to U6 are left out: no owner lacking its own bits,
+  no read through execute alone, no `Read` or `Write` of a symlink, no
+  sticky bit, no times by a non-owner.
+- **W5, in detail**
+  (`TestGetAttrReadLinkFSStatCommitAndAccessConsultNoPolicy`). W2's mount
+  and recorder, with `d`, `f` and `ln` as there, the recorder reset to
+  refuse index 0 before each call: `GetAttr(f)` returns `f`'s attributes
+  with nil; `ReadLink(ln)` returns `"f"` with nil; `FSStat(root)` returns
+  nil; `Commit(f, 0, 0)` returns nil; `Access(testCaller, f, all six bits)`
+  returns `AccessRead|AccessModify|AccessExtend` with nil; and after every
+  one of them `rec.taken()` is empty. Then, on a second `sp24Mount` with the
+  allow-all policy of W3, `testCaller` makes `y`, a regular file of mode
+  `0o600`, and `sa24Other`'s `Access(y, all six bits)` returns 0: `Access`
+  answers from the mode bits and the mount, not from `f.perm`.
+
+**Red run.** At `a6cff50`, W2's rows for every method but `SetAttr` fail,
+since the recorder records nothing and the call succeeds or is refused by the
+inline check; the requested-uid test fails on its requests and on `r3`'s uid;
+W3 fails with `vfs.ErrAcces` on its first call; W4 and W5 pass. After the
+wiring every one passes.
+
 **Safety rules for `blobfs` tests**: ADR 0011 §7 and ADR 0012 §9, and one
 more. A test that replaces `f.perm` with a policy that allows what `Unix()`
 refuses with `vfs.ErrIsDir` or `vfs.ErrNotDir` makes no call on an object of
@@ -1253,6 +1545,77 @@ says how it bears on this ADR.
     is a unit test of `mutable()` over a machine made once, not the
     reassignment §3 forbids, and is sound because `mutable()` reads nothing
     but `f.mode` (§7).
+43. **No new ADR for the rest of §6's wiring; read at `a6cff50`, not run**
+    (§6, *The wiring at `a6cff50`*). §6 was written for this PR: it lists
+    each method's requests, the stages and the holds, and ADR 0024 revised
+    it for `SetAttr`. Nothing in it fails to say what the code does at
+    `a6cff50` but the parenthetical "`f.readOnly` until §7 is done", which
+    says its own expiry and gets a sentence. A new ADR would decide nothing
+    §6 has not, and the 2026-10-27 revision recorded §7's conversion the
+    same way. Every statement about the code was checked by reading it at
+    `a6cff50`; nothing was run.
+44. **The wiring is a pure refactor, and no `CHANGES` line is due** (§6).
+    The equivalences are listed under *Why nothing a client sees changes*,
+    and rest on §5's rule that `Unix()`'s rows are the inline checks exactly
+    for every request `blobfs` makes, which P4 and P5 test and W4 tests
+    through the `FS`. The one way to a different answer is the test seam,
+    which no client reaches. Decision 3 bears on the later fixes (#93, #94,
+    #97, #98, #69, #99, #100, #101), each of which is its own PR under #114,
+    not on this one.
+45. **`permitted` and `inGroup` go in this PR** (§6). §1 gave them a policy,
+    and nothing calls them once `Access` reads `AccessBits`; at `a6cff50`
+    no test names either. Keeping them would leave a second implementation
+    of `Permits` and `InGroup` in `fs.go` for review to keep in step with
+    `policy` for no caller.
+46. **The `OpChown` at creation is made after `allocInode` and before
+    `sa.GID` is applied** (§6). That is where `c.UID == 0` stood, so the
+    request's `Object` is the new inode as `allocInode` made it, which makes
+    W2's recorded `Object` determinate; `Unix()`'s `OpChown` row reads
+    neither the type nor the gid, so for the installed policy the place
+    changes no verdict. It is made after the inode is in the table and the
+    namespace marked dirty, which is right, since a refusal is ignored and
+    the create succeeds either way.
+47. **One optional helper, recorded after coder's commit** (§6), as ADR 0024
+    §2 recorded `setAttrRequests` and `applySetAttr`. Its name and shape
+    are coder's; the requests, their fields and their places are pinned
+    here, so the helper can change nothing a test or review checks.
+48. **The test file, the detail of W2 to W5, and which pass before the
+    wiring** (§11). One new file, `internal/blobfs/policy_wiring_test.go`,
+    named so that coder and review find it, as `mount_mode_test.go` was
+    (Assumption 42). W2 and W3 are red at `a6cff50` and green after, which
+    is the session's red run; W4 and W5 pass at both, W4 being the
+    characterisation that shows the refactor pure. W4 covers the pinned
+    rows only and names which U rows it leaves out, so that a later fix
+    changes one of them without a test contradicting it. The group member
+    `vfs.Caller{UID: 503, GID: 20}` is added so that class exclusivity
+    (P3) is seen through the `FS`. Refusals are compared with `==` so that
+    bareness (§5) is pinned through the `FS` too. W1 gets no test of its
+    own, since every policy-substituting test is one.
+49. **The trace: rows 14 to 16 stand, `Checked against` moves, and
+    `tla.sh full` is due** (§6). `createEntry`, `unlink` and `Rename` carry
+    `TLA+: … Mutate` lines, and this PR edits each, so ADR 0013 §8's rule
+    for a refactor of traced code applies, as ADR 0024's Assumptions 23 and
+    29 applied it to one-line moves. The permission check is not the
+    action and is not modelled (ADR 0013 §1 gives permission rules to
+    exhaustive tests and review), and the hold each row names and the ADR
+    that decides each are untouched, so `trace.tsv` does not change. The
+    architect reads the three against coder's commit and moves the module's
+    `Checked against` line, `docs/tla/README.md`'s and vocabulary V3's
+    statements to it, on the same branch, as ADR 0024 §5 did; that header
+    change is a change under `docs/tla/`, so CLAUDE.md's merge bar asks for
+    `tla.sh full`, whose outcome cannot differ from the run that calibrated
+    the forty-five rows. The cheaper reading, leaving the line where it is,
+    would have it name a commit before code the trace points at, which
+    ADR 0013 §6 defines it not to.
+50. **Doc comments are pinned in substance, not text** (§6): `FS.perm`'s,
+    which loses its `SetAttr`-first sentence, and `readable`'s, which says
+    it asks `f.perm`. `Access` has no doc comment at `a6cff50`; coder may
+    add one that cites §6 and E12, and need not.
+51. **`Access`'s form** (§6): `AccessBits`, then the mask subtracted when
+    the mode is `mountReadOnly`, then `& want`. Stated so that review has a
+    form to check against, and so that the mask stays a condition on the
+    mount alone, with a diverged mount unmasked, as now; whether it should
+    be is #97's (§7).
 
 ## Alternatives considered
 
