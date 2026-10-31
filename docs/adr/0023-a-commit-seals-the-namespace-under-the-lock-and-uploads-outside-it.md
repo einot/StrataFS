@@ -54,7 +54,8 @@ it and hold, and the module's line, the README and V3 say so (§10;
 Assumption 23). The rule, the pipeline, the guard, the model and the
 configurations are unchanged, and the model needs no run.
 **Revised:** 2026-10-30 — cross-reference only: ADR 0024 fixed #143 and
-#144, the two error paths §8 named as the exceptions to its third fact, that
+#144 (its code is `369cbad`, read on 2026-10-31), the two error paths §8
+named as the exceptions to its third fact, that
 every hold of `FS.mu` for writing that changes the namespace calls
 `markDirty`. `SetAttr` now applies all of `sa` or none, and `unlink` makes no
 change on the path that answers `ErrNoEnt`, so §8 strikes both, as it asked
@@ -687,7 +688,8 @@ that commit (Assumption 17).
   writes it false but `applyLocked`, as `f.changes != s.changes`; and every
   hold of `FS.mu` for writing that changes the namespace calls `markDirty`.
   The third holds at each of §3's eight sites and at every hold that
-  changes the namespace, whatever it returns. Until ADR 0024 it held at
+  changes the namespace, whatever it returns, read at `369cbad`, coder's
+  commit for ADR 0024. Until that commit it held at
   every site but two, error paths older than this ADR that changed the
   namespace and then returned an error without the call: `unlink`'s removal
   of an entry that names an inode the table lacks (#144), and `SetAttr`'s

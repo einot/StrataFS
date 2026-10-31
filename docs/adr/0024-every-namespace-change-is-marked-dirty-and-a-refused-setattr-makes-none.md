@@ -2,6 +2,27 @@
 
 **Status:** Accepted
 **Date:** 2026-10-30
+**Revised:** 2026-10-31 — after coder's commit `369cbad`, against the code
+at that commit, read and not run. §2 records what coder chose where this
+ADR left room: the helpers `setAttrRequests` and `applySetAttr`, the latter
+reporting whether it applied anything, which `SetAttr` uses to mark nothing
+for an empty call, and `truncate`'s last lines, one `time.Now()` for its
+`touchM` and the rest of `sa` (Assumption 22). §5's pass is made: the three
+`trace.tsv` rows hold at `369cbad`, and the module's `Checked against`,
+`docs/tla/README.md` and vocabulary V3 say so (Assumption 23). §7's D1 sentence is
+corrected: at `f8398c4` the dropped entry was never marked, so `FS.dirty`
+stays false after the `Remove`, and D1 fails on the verifier and the
+exclusive `Create` instead; and the *Red runs* paragraph says, for each
+test, which assertion fails there and why, from the code and the tests'
+own doc comments. For S1's refused cases `FS.dirty` stays false, but its
+empty call and every S2 case do mark it, since `f8398c4`'s `SetAttr` marks
+an empty call and its `truncate` marks the size before the refusal; a first
+version of this revision wrongly said otherwise of S1 and S2, which
+supervisor found (Assumption 24). `vfs.FS.SetAttr`'s doc comment
+gained §2's sentence, under the session's authorisation (Assumption 17).
+The rule, the checks, the holds, the choice for #144 and the tests'
+assertions are unchanged, and the model needs no run for the header's
+change.
 **Issue:** #143, #144
 
 ## Context
@@ -308,6 +329,27 @@ check before its wait (#101) and `Access` are untouched. ADR 0006's trim
 rules, ADR 0012's gate, mark and settle pass, and ADR 0003 §2's accounting
 at `truncate` (site 3) are untouched.
 
+**What coder's commit chose**, recorded against `369cbad` where the pins
+above left room (Assumption 22):
+
+- `setAttrRequests(c vfs.Caller, n *inode, sa vfs.SetAttr) error`, a method
+  on `*FS` that builds one `Object` with `objectOf(n)` and asks `f.perm`
+  the six requests in order, returning the first refusal; and
+  `applySetAttr(n *inode, sa vfs.SetAttr, now time.Time) bool`, a plain
+  function that applies every attribute but the size, in the order above,
+  and reports whether it applied any. `SetAttr`'s no-size path calls
+  `markDirty` only when it reports true, which is how the empty call marks
+  nothing; `truncate` calls `markDirty` unconditionally, since a size set
+  is a change.
+- `truncate`'s last lines are `now := time.Now()`, `n.touchM(now)`,
+  `applySetAttr(n, sa, now)`, `f.markDirty()`, `return n.attr(f.fsid), nil`,
+  in place of `n.touchM(time.Now())`, `f.markDirty()`, `return nil`: the one
+  edit inside the size-change body, made so that one time serves the hold.
+  Everything above those lines in the body is as at `f8398c4`.
+- `FS.perm`'s doc comment says that `SetAttr` is the first method that asks
+  it and that the rest still check inline until #114 moves them; `New`
+  sets it in the literal that builds the `FS`, before `loadOrInit`.
+
 **The policy rule.** This is changed code that decides what a caller may do,
 so ADR 0018 §1's policy rule binds it, and the checks go to `f.perm` rather
 than being exempted (Assumption 6). It is the first step of ADR 0014 §6's
@@ -410,7 +452,15 @@ once coder's commit is on the branch, by the architect, who reads those
 three rows against it (ADR 0013 §8; ADR 0023 Assumption 23), and that pass,
 not this one, is what makes the PR's `tla.sh full` run due for the header's
 change; the `decided` edit alone already makes it due under CLAUDE.md's
-merge bar.
+merge bar. The pass was made on 2026-10-31 against `369cbad`: `SetAttr`
+performs `Mutate` holding `FS.mu` for writing, through `markDirty`, on its
+no-size path, and hands a sized call to `truncate`; `unlink` holds `FS.mu`
+for writing from its resolve to its `markDirty`, and its dangling branch
+returns before any change; `truncate` makes its change and its `markDirty`
+holding the gate for reading, the file's `openFile.mu` and `FS.mu` for
+writing, taken in that order after its pre-check's read hold has been
+released; and all three keep their `TLA+: … Mutate` lines. The three lines
+read `369cbad` (Assumption 23).
 
 ### 6. Cross-references
 
@@ -671,9 +721,13 @@ nothing sleeps.
   reported before; an exclusive `Create` of `ghost` answers `vfs.ErrExist`;
   `Sync` returns nil and the harness recorded no call since the mark; a
   remount of the inner store answers `vfs.ErrNoEnt` to `Lookup` of `ghost`
-  and `vfs.ErrExist` to an exclusive `Create` of it. At `f8398c4` `FS.dirty`
-  is true after the `Remove` and the exclusive `Create` succeeds, which is
-  #144 and the repair this ADR declines.
+  and `vfs.ErrExist` to an exclusive `Create` of it. At `f8398c4` the
+  `Remove` drops the entry in memory without `markDirty`, so `FS.dirty`
+  stays false there and that assertion passes; the test fails on the
+  verifier, which changes, and on the exclusive `Create`, which succeeds,
+  and that create is a change, so the `Sync` that follows commits it, with
+  store calls, and the remount finds a real `ghost`. That is #144 and the
+  repair this ADR declines (Assumption 24).
 - **D2, a rename onto such an entry replaces it**
   (`TestARenameOntoAnEntryThatNamesNoInodeReplacesIt`; §3; ADR 0017 §2). The
   same setup; `testCaller` creates `donor`; `Rename` of `donor` to `ghost`
@@ -686,10 +740,39 @@ nothing sleeps.
   a characterisation of the recovery path: it passes at `f8398c4` too
   (Assumption 15).
 
-**Red runs.** At `f8398c4`: S1 and S2 fail on the attribute left applied and
-on `FS.dirty`; S6 hangs to the bound; D1 fails on `FS.dirty` and the
-exclusive `Create`; S4 and S5 do not build; S3 and D2 pass, and are pinned so
-that the fix cannot move the order or the recovery path.
+**Red runs.** At `f8398c4`, from the code as *Context* quotes it and from
+the tests' own doc comments (Assumption 24):
+
+- **S1** fails in its three refused cases on the attribute left applied,
+  mode `0o600`, and on the ctime its apply moved, while `FS.dirty` stays
+  false there: the refusal returns before `SetAttr`'s one `markDirty`,
+  which is the defect (`internal/blobfs/setattr_atomic_test.go` lines
+  355–357, and the shared assertion at lines 299–301). Its empty-call case
+  fails on `FS.dirty` and on `FS.changes`, since `f8398c4`'s `SetAttr`
+  reaches that `markDirty` with nothing set (the same file, lines 356–357
+  and 400–407).
+- **S2** fails on the size left applied, 0 or 10, and on `FS.dirty`, which
+  `truncate` set with its `touchM` and `markDirty` before `SetAttr` refused
+  the uid or the group (the same file, lines 469–470 and 299–301); and,
+  because the namespace is then dirty, its `Sync` commits and its remount
+  loads the shortened file, so those assertions fail too.
+- **S6** hangs to the bound: `truncate`'s own checks pass, it waits for the
+  gate, and only once the gate opens does it apply size 0 and `SetAttr`
+  refuse the uid (the same file, lines 667–669).
+- **D1** fails on the verifier, which changes once the entry is dropped,
+  and on the exclusive `Create`, which succeeds; that create is a change,
+  so the `Sync` that follows commits it and the remount finds a real
+  `ghost`. `FS.dirty` after the `Remove` is false there, since the dropped
+  entry was never marked (`internal/blobfs/dangling_entry_test.go` lines
+  254–258).
+- **S4 and S5** do not build, since `FS.perm` does not exist there.
+- **S3 and D2** pass, and are pinned so that the fix cannot move the order
+  or the recovery path.
+
+The session's red run at `f8398c4` showed only the outcomes: S1, S2 and D1
+failed, S6 hung, S3 and D2 passed. It did not show the mechanisms, which
+are read from the code and the test files as cited above. At `369cbad` all
+six pass, thirty repeats each under `-race`, by the session's run.
 
 **Changes to existing tests.** None in their assertions. `TestMaxFileSizeSetAttrAboveTheLimit`
 and `TestMaxFileSizeSetAttrTakesNoLock` (ADR 0007 §7) stand: `vfs.ErrFBig`
@@ -837,11 +920,13 @@ Each is mine unless it says otherwise.
     session closes or links it; if it was closed as a duplicate, nothing
     changes. ADR 0014 §6's "the ADR that settles #96" is read as this ADR
     either way.
-17. **`vfs.FS.SetAttr`'s doc comment is proposed, not edited** (§2). The
-    contract is this ADR's and the package is the architect's, but the brief
-    that produced this ADR forbade editing code, and `internal/vfs/vfs.go`
-    is code. The sentence is pinned above so that whoever edits it, in a
-    later dispatch to the architect, adds that and nothing else.
+17. **`vfs.FS.SetAttr`'s doc comment was proposed first, and edited on
+    2026-10-31** (§2). The contract is this ADR's and the package is the
+    architect's, but the brief that produced this ADR forbade editing code,
+    and `internal/vfs/vfs.go` is code, so the sentence was pinned above and
+    added only once the session authorised it, in the dispatch after
+    coder's commit: §2's words, wrapped to the file's width, after the
+    sentence on `ErrFBig`, and nothing else in the file.
 18. **ADR 0018 is not revised** (§6). Its §5 sentence that `SetAttr`, "for
     the attributes it sets after the size", holds `FS.mu` for writing from
     stage C to its change still holds, and for a call with a size now holds
@@ -864,6 +949,46 @@ Each is mine unless it says otherwise.
     two, `truncate`'s and `SetAttr`'s. `FS.changes` is compared, not
     counted (ADR 0023 §3), so nothing depends on the number, and U10 asks
     only that it move.
+22. **Coder's choices at `369cbad` are accepted** (§2). The helpers' names
+    and `applySetAttr`'s bool are forms this ADR left open; the bool is the
+    plainest way to have the empty call mark nothing, and `truncate`'s
+    unconditional `markDirty` is right, since a size set is a change even
+    to the same size, its mtime moving. The one edit inside the size-change
+    body, its last lines, is what "one `time.Now()` serves the hold" asked
+    for; everything above those lines was read against `f8398c4` and is as
+    it was.
+23. **The `Checked against` pass is read, not run** (§5). The three rows
+    were read against `369cbad` by reading `SetAttr`, `unlink` and
+    `truncate` whole: each symbol is declared on `*FS` in
+    `internal/blobfs/fs.go`, each keeps its `TLA+: … Mutate` line, and each
+    makes its change and its `markDirty` under the locks its row names. The
+    module changed in its header line alone, a comment, so TLC's outcome
+    for the forty-five calibrated rows cannot differ from the run that
+    calibrated them; CLAUDE.md's merge bar still asks for `tla.sh full` on
+    this PR, which the session runs. `docs/tla/README.md` and vocabulary V3
+    name the commit as coder's commit for ADR 0024, in the form ADR 0023's
+    bumps used.
+24. **The red-run record was wrong twice, and is now read from the tests
+    and the code** (§7). The first draft said `FS.dirty` is true after D1's
+    `Remove` at `f8398c4`; it is not, since `unlink`'s dangling branch
+    dropped the entry without `markDirty`, which test-author found against
+    this ADR's own *Context*. The first version of the 2026-10-31 revision
+    then extended that correction to S1 and S2, saying `FS.dirty` stays
+    false for them too; that was wrong, as supervisor found from the test
+    files: at `f8398c4` `SetAttr` called `markDirty` unconditionally at its
+    end, which an empty call reached, so S1's empty-call case fails on
+    `FS.dirty` and `FS.changes` (`setattr_atomic_test.go` lines 356–357,
+    400–407); and `truncate` called `touchM` and `markDirty` before
+    returning to a `SetAttr` that then refused, so every S2 case fails on
+    `FS.dirty` (lines 469–470, 299–301). Only S1's three refused cases, the
+    mode-then-uid path and its two siblings, leave the flag false there
+    (lines 355–356, 299–301). The first draft's "on `FS.dirty`" for S1 and
+    S2 had been right. The session's red run at `f8398c4` showed only that
+    S1, S2 and D1 failed, S6 hung and S3 and D2 passed; every mechanism in
+    §7's *Red runs* is read from the code at `f8398c4`, as *Context* quotes
+    `SetAttr` and `truncate`, and from the test files at the lines cited.
+    The tests' assertions were right throughout and are unchanged; only
+    this ADR's record of the red run was wrong, twice.
 
 ## Alternatives considered
 
@@ -930,8 +1055,7 @@ Each is mine unless it says otherwise.
   mount does with one; a mount-time warning about them; an operator tool.
 - Whether `createEntry` should treat an entry that names no inode as absent.
 - Whether `ReadDir` should hash into its verifier a name it does not list.
-- The edit of `vfs.FS.SetAttr`'s doc comment (Assumption 17), and #96's
-  status (Assumption 16).
+- #96's status (Assumption 16).
 
 ## Sources
 
