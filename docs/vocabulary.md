@@ -144,8 +144,9 @@ name the verdicts those branches take (ADR 0022 §3), and are no events.
 
 ## V3. Commit protocol
 
-`docs/tla/CommitProtocol.tla`, checked against `369cbad`, coder's commit
-for ADR 0024, for every action (ADR 0023 Assumption 23; ADR 0024 §5). Its Go sites
+`docs/tla/CommitProtocol.tla`, checked against `f6d20e1`, coder's second
+commit for ADR 0024, for every action (ADR 0023 Assumption 23; ADR 0024 §5,
+Assumption 29). Its Go sites
 exist: `Sync`, `loadOrInit`, `initEmpty`, `decodeSnapshot`,
 `classifyRoot`, `resolveRoot`, `fallbackAllowed`, `schedulePrune` and
 `pruneSnapshots` in `internal/blobfs/commit.go`; `New`,

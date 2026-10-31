@@ -39,6 +39,13 @@ hold on a file with a buffered write and a pending trim, asks
 covered, and asks for `dangling_entry_test.go`'s duplicated helpers to be
 replaced by `setattr_atomic_test.go`'s. The rule, the checks, the holds and
 every existing assertion are unchanged, and the model needs no run.
+**Revised:** 2026-10-31, third — the `Checked against` pass for coder's
+`bufferWrite` commit `f6d20e1`: `trace.tsv` row 17 read against it, and the
+module's `Checked against` line, `docs/tla/README.md`'s and vocabulary V3's
+statements moved to it (§5, Assumption 29). §7 records one accepted
+exception to its harness rule, that S7's `bpMustOpen` and `bpSnapshot`
+recover no panic (Assumption 30). Nothing else moved; the module changed in
+its header comment alone.
 **Issue:** #143, #144
 
 ## Context
@@ -497,7 +504,8 @@ returns before any change; `truncate` makes its change and its `markDirty`
 holding the gate for reading, the file's `openFile.mu` and `FS.mu` for
 writing, taken in that order after its pre-check's read hold has been
 released; and all three keep their `TLA+: … Mutate` lines. The three lines
-read `369cbad` (Assumption 23).
+read `369cbad` from that pass until the second pass below moved them
+(Assumption 23).
 
 `docs/tla/trace.tsv`'s row for `FS.bufferWrite` gains this ADR in its
 `decided` column too, beside ADR 0003 §3, since §1 decides that its unlinked
@@ -507,7 +515,15 @@ that resolves the inode (Assumption 29). Coder's commit for that branch is a
 refactor of traced code under ADR 0013 §8, so the architect reads the row
 against it and moves the module's `Checked against` line, `docs/tla/README.md`'s
 and vocabulary V3's statements to that commit, a second pass of the kind
-above; `tla.sh full` is due on the PR either way.
+above; `tla.sh full` is due on the PR either way. That pass was made on
+2026-10-31 against `f6d20e1`, read and not run: `bufferWrite` takes the
+file's `openFile.mu` at its top and releases it by defer, takes `FS.mu` for
+writing for its tail block, and in that hold calls `markDirty` once, on the
+branch whose second resolve succeeds, after the size and the times, and on
+no other; the unlinked branch drops the buffers, releases the charge and
+reaches the unlock with no mark, its comment saying so; the function's
+`TLA+: … Mutate` line stands, and nothing else in it moved. The three
+lines read `f6d20e1` (Assumption 29).
 
 ### 6. Cross-references
 
@@ -691,7 +707,10 @@ harness is ADR 0011 §7's and ADR 0023 §11's: a `*store.Local` under
 `t.TempDir()`, behind `uc43Store` where the test counts store calls;
 `SnapshotRetention` −1; `MaxDirtyBytes` −1; every `New` and every call in a
 goroutine that recovers a panic and is waited for under a bound of 10 s;
-nothing sleeps.
+nothing sleeps. One accepted exception: S7's `bpMustOpen` and `bpSnapshot`,
+which make no `FS` call but read `FS.open` and an `openFile`'s fields under
+their locks, run under `btBounded`, which bounds them at 10 s and recovers
+no panic (Assumption 30).
 
 - **S1, the issue's example** (`TestARefusedSetAttrAppliesNothing`; §2).
   `New` over an empty bucket; `testCaller` creates `f.txt`; `Sync`; read
@@ -1219,7 +1238,30 @@ Each is mine unless it says otherwise.
     Assumption 13 had it for the three rows: the column names the ADR that
     decides the row's behaviour, and §1 now decides the tail block's; the
     `locks` column is untouched; the line moves when the architect reads the
-    row against coder's commit (ADR 0013 §8).
+    row against coder's commit (ADR 0013 §8). That reading was made on
+    2026-10-31 against `f6d20e1`, coder's commit for the move, by reading
+    `bufferWrite`'s tail block whole: `markDirty` is called in the `if`
+    branch after `touchA`, under `FS.mu` for writing with `openFile.mu` held
+    from the function's top; the `else` branch has the drop and the release
+    and no mark; nothing else in the function changed, and the session
+    reports that supervisor confirmed the commit holds nothing else. Read,
+    not run; the session's gate and its thirty repeats of B1 at `f6d20e1`
+    are the run. The module changed in its header comment alone, so TLC's
+    outcome for the forty-five calibrated rows cannot differ from the run
+    that calibrated them; CLAUDE.md's merge bar still asks for `tla.sh full`
+    on the PR, which the session runs.
+30. **S7's two field-reading helpers recover no panic** (§7), which
+    supervisor noted against ADR 0023 §11's rule for every `New` and `FS`
+    call. `bpMustOpen` and `bpSnapshot` make no `FS` call: they read
+    `FS.open` holding `FS.mu` for reading and an `openFile`'s fields holding
+    its `mu`, under `btBounded`, which bounds them at 10 s and lets a panic
+    out. The exception is accepted rather than closed by wrapping them in
+    `uc43Go`: the only way those reads can fail is a lock that does not
+    return, which the bound catches, and a panic there could only be the
+    test's own, a nil map or a wrong type, which crashing the binary reports
+    as plainly as a recovered one would. The rule's point is that a hold
+    the test opened is released and the goroutine waited for; both helpers
+    hold nothing across a wait. No test changes for this.
 
 ## Alternatives considered
 
