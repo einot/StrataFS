@@ -46,6 +46,12 @@ statements moved to it (§5, Assumption 29). §7 records one accepted
 exception to its harness rule, that S7's `bpMustOpen` and `bpSnapshot`
 recover no panic (Assumption 30). Nothing else moved; the module changed in
 its header comment alone.
+**Revised:** 2026-10-31, fourth — reviewer's follow-up. §7's S7 gains a
+third refused call, `Size` 0, which reaches the drop loop and its release
+that 10 and 4500 do not, and Assumption 28 lists what S7 detects and what
+stays review's, the unsettled mark and the growth hole fill (F2);
+Assumption 30 is reworded to what `btBounded` does on a timeout (F1).
+Nothing else moved.
 **Issue:** #143, #144
 
 ## Context
@@ -814,12 +820,15 @@ no panic (Assumption 30).
   the whole file returns 5000 bytes, q followed by p[100:5000], b1; after
   that read, `GetAttr`, a1, reports `Size` 5000 and `Mode` `0o644`;
   `bpSnapshot` of `bpMustOpen(fs, a1.FileID)`, s1, has `indices` [0] and
-  `pending` 1; `FS.dirty` is true, and `FS.changes` is read, c1. Then two refused
-  calls by root, the recorder reset to refuse index 2 before each, and each
-  asserted the same way: `SetAttr` with `Size` 10 and `Mode` `0o600`, whose
-  size-change body would shorten the buffered chunk, drop the second chunk's
-  trim and cut the chunk list; and `SetAttr` with `Size` 4500 and `Mode`
-  `0o600`, whose body would record a shorter trim on the second chunk.
+  `pending` 1; `FS.dirty` is true, and `FS.changes` is read, c1. Then three
+  refused calls by root, the recorder reset to refuse index 2 before each,
+  and each asserted the same way: `SetAttr` with `Size` 10 and `Mode`
+  `0o600`, whose size-change body would shorten the buffered chunk in place,
+  drop the second chunk's trim and cut the chunk list to one chunk;
+  `SetAttr` with `Size` 4500 and `Mode` `0o600`, whose body would record a
+  shorter trim on the second chunk; and `SetAttr` with `Size` 0 and `Mode`
+  `0o600`, whose body would drop the buffered chunk whole and release its
+  charge, drop the second chunk's trim and cut the chunk list to none.
   Before each, `GetAttr` is read again, after any `Read`, as a. After each:
   the call returned `vfs.ErrNXIO` with exactly `OpTruncate`, `OpChmod`,
   `OpTruncate` recorded; the harness recorded no call during it; `GetAttr`
@@ -828,15 +837,22 @@ no panic (Assumption 30).
   `pending`; and, last, a `Read` of the whole file returns b1. Then `Sync`
   returns nil, and a remount of the inner store reads b1, 5000 bytes, with
   `Size` 5000 and `Mode` `0o644`: the buffers and the trim were applied as
-  they stood, after two refused calls left them as they were. The remount
+  they stood, after three refused calls left them as they were. The remount
   commits nothing, so the first mount is used again for the control, the
   recorder reset to refuse nothing: root's `SetAttr` with `Size` 10 and
   `Mode` `0o600` returns nil with `Size` 10 and `Mode` `0o600`, and a
-  `Read` of 100 bytes at 0 returns q[:10] with eof. A statement of the
-  size-change body moved above the second check would show in a, s1 or b1,
-  except the unsettled mark, which the `Size` 5000 call has already set and
-  which no test can tell from a spurious set; that line is review's
-  (Assumption 28). The calls are on a regular file (ADR 0014 §11's safety
+  `Read` of 100 bytes at 0 returns q[:10] with eof. Between them the three
+  sizes exercise, of the size-change body, the drop of whole buffered
+  chunks past the new end and the release of their charge (`Size` 0), the
+  drop of trims past the new end (0 and 10), the shortening of the buffered
+  chunk at the new end (10), the cut of the chunk list (0 and 10), the
+  record of a trim on a stored chunk at the new end (4500), and the size,
+  the times and the rest of `sa` (all three); each would show in a, s1 or
+  b1 if it ran before the second check. Two statements no size here reaches
+  stay review's: the unsettled mark, which the `Size` 5000 call has already
+  set and which no test can tell from a spurious set, and the hole fill of
+  a file that grows, since every size here shrinks (Assumption 28). The
+  calls are on a regular file (ADR 0014 §11's safety
   rule); the atime a `Read` may or may not set is read into a after each
   read and before each refused call, so no assertion depends on it. Passes
   at `369cbad`, read from `truncate`, whose second check returns before the
@@ -1216,24 +1232,45 @@ Each is mine unless it says otherwise.
     guard; that is #99, which §2 lists as untouched, and the sentence says
     "modulo #99" rather than "already preserves". Reviewer's R4.
 28. **S7's shape** (§7). The file is 6000 bytes so that a buffered write
-    sits on the first chunk and a trim on the second, and the two refused
-    sizes, 10 and 4500, are chosen so that every statement of the
-    size-change body but the unsettled mark would show if it ran before the
-    second check: 10 shortens the buffered chunk, drops the second chunk's
-    trim and cuts the chunk list; 4500 records a shorter trim on the second
-    chunk, whose `to` the trim count cannot show but the bytes can. The
-    unsettled mark is set by the allowed `Size` 5000 call and cannot be told
-    from a spurious set; a test that cleared it first would need the settle
-    pass, which is ADR 0012's, so that line stays review's. `FS.dirty` is
-    true throughout, since the state is unflushed, so S7 asserts it
-    unchanged, and the remount after the `Sync` is what shows the buffers
-    and the trim were kept; a `Sync` that made no store call, S2's
-    assertion, is impossible here and is S4 (iii)'s. `bpSnapshot` reads an
-    `openFile` under its `mu` as the `bp` tests do, and `FileID` is the
-    inode number, as D2 relies on. The remount commits nothing, so the
-    first mount is used again for the control: no ADR forbids it, and the
-    doctoring recipe's "never use it again" is for a mount whose bucket is
-    then written behind its back. Reviewer's R5.
+    sits on the first chunk and a trim on the second, and the three refused
+    sizes are chosen against `truncate`'s size-change body, read at
+    `f6d20e1`, so that each statement a size reaches would show if it ran
+    before the second check. S7's state is `of.dirty` holding index 0 only,
+    `pendingTrim` holding the second chunk's trim to 904, a chunk list of
+    two and a size of 5000, with the chunk size 4096. `Size` 0, with
+    `lastIdx` 0 and `tail` 0: the drop loop takes an index equal to
+    `lastIdx` only when `tail` is 0, so it drops the buffered chunk whole
+    and the release that follows takes its 4096 from `of.bytes` and the
+    budget, which `bpSnapshot`'s `bytes` and `caps` show; the trim loop
+    drops the second chunk's trim, which `pending` shows; the chunk list is
+    cut to none, which the read shows; the reslice, the trim record and
+    the unsettled mark are skipped, since `tail` is 0. `Size` 10, with
+    `lastIdx` 0 and `tail` 10: the drop loop and its release do nothing,
+    since index 0 is `lastIdx` and `tail` is not 0; the trim loop drops the
+    second chunk's trim; the buffered chunk is shortened to 10 bytes in
+    place, which the read shows and `caps` cannot, a reslice keeping its
+    capacity; the chunk list is cut to one; the trim record is skipped,
+    index 0 being dirty. `Size` 4500, with `lastIdx` 1 and `tail` 404:
+    nothing is dropped or cut, and a trim to 404 is recorded on the second
+    chunk in place of the one to 904, which the read shows and the trim
+    count cannot. The first version of this assumption said 10 and 4500
+    exposed every statement but the unsettled mark; reviewer found that
+    they leave the drop loop and its release untouched, which `Size` 0 now
+    reaches, and that the hole fill of a file that grows runs at no size
+    here (its F2). So two statements stay review's: the unsettled mark,
+    which the allowed `Size` 5000 call sets and which cannot be told from a
+    spurious set, since a test that cleared it first would need the settle
+    pass, which is ADR 0012's; and the growth hole fill, since S7 only
+    shrinks. `FS.dirty` is true throughout, since the state is unflushed,
+    so S7 asserts it unchanged, and the remount after the `Sync` is what
+    shows the buffers and the trim were kept; a `Sync` that made no store
+    call, S2's assertion, is impossible here and is S4 (iii)'s.
+    `bpSnapshot` reads an `openFile` under its `mu` as the `bp` tests do,
+    and `FileID` is the inode number, as D2 relies on. The remount commits
+    nothing, so the first mount is used again for the control: no ADR
+    forbids it, and the doctoring recipe's "never use it again" is for a
+    mount whose bucket is then written behind its back. Reviewer's R5 and
+    F2.
 29. **Row 17's `decided` now, `Checked against` after the code** (§5), as
     Assumption 13 had it for the three rows: the column names the ADR that
     decides the row's behaviour, and §1 now decides the tail block's; the
@@ -1250,18 +1287,28 @@ Each is mine unless it says otherwise.
     outcome for the forty-five calibrated rows cannot differ from the run
     that calibrated them; CLAUDE.md's merge bar still asks for `tla.sh full`
     on the PR, which the session runs.
-30. **S7's two field-reading helpers recover no panic** (§7), which
-    supervisor noted against ADR 0023 §11's rule for every `New` and `FS`
-    call. `bpMustOpen` and `bpSnapshot` make no `FS` call: they read
-    `FS.open` holding `FS.mu` for reading and an `openFile`'s fields holding
-    its `mu`, under `btBounded`, which bounds them at 10 s and lets a panic
-    out. The exception is accepted rather than closed by wrapping them in
-    `uc43Go`: the only way those reads can fail is a lock that does not
-    return, which the bound catches, and a panic there could only be the
-    test's own, a nil map or a wrong type, which crashing the binary reports
-    as plainly as a recovered one would. The rule's point is that a hold
-    the test opened is released and the goroutine waited for; both helpers
-    hold nothing across a wait. No test changes for this.
+30. **S7's two field-reading helpers recover no panic and are not drained**
+    (§7), which supervisor noted against ADR 0023 §11's rule for every
+    `New` and `FS` call, and whose first wording reviewer corrected (its
+    F1). `bpMustOpen` and `bpSnapshot` make no `FS` call: `bpOpen` reads
+    `FS.open[id]` holding `FS.mu` for reading, and `bpSnapshot` reads an
+    `openFile`'s `bytes`, the capacity of each buffer in `dirty` and the
+    length of `pendingTrim` holding its `mu`, each in `btBounded`
+    (`internal/blobfs/budget_test.go`), which runs its function in a
+    goroutine with a one-slot channel and waits for it only up to
+    `btHangBound`, 10 s. On a timeout it abandons the goroutine, with no
+    cleanup to drain it as `uc43Go`'s has, and the helper fails the test
+    with `t.Fatalf`. The rule's point is that no call the test starts can
+    hang the binary or outlive the test holding a lock, and that holds: a
+    goroutine abandoned there is blocked acquiring `FS.mu` or the
+    `openFile`'s `mu` and holds neither, so it blocks nothing else; if the
+    lock is later released it takes it, reads, sends into the one-slot
+    channel without blocking and exits, and if not, it is leaked until the
+    test binary exits, holding nothing. Neither helper holds a lock across
+    a wait, and neither recovers a panic: a panic in them could only be the
+    test's own, which crashing the binary reports as plainly as a recovered
+    one would. The exception is accepted rather than closed by wrapping
+    them in `uc43Go`; no test changes for it.
 
 ## Alternatives considered
 
