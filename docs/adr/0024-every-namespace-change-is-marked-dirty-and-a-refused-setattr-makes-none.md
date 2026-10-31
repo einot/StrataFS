@@ -23,6 +23,22 @@ gained §2's sentence, under the session's authorisation (Assumption 17).
 The rule, the checks, the holds, the choice for #144 and the tests'
 assertions are unchanged, and the model needs no run for the header's
 change.
+**Revised:** 2026-10-31, second — after reviewer's review of
+`f8398c4..2ef1eb4`, in `docs/` alone (Assumptions 25 to 29). §8's first
+`CHANGES` line is corrected: at `f8398c4` a refused call with a size had its
+size change, and anything applied with it, committed at the next commit,
+since `truncate` marked the namespace before `SetAttr` refused, and a refusal
+on the mode occurs too. *Context*'s sentence on the guard is qualified by
+#99. §1 brings `bufferWrite`'s tail block under its rule: its unlinked branch
+changes nothing and from this ADR marks nothing, which B1 (§7) tests, and
+`trace.tsv`'s `FS.bufferWrite` row gains this ADR in `decided`. §6 lists
+ADR 0014 §6's stages paragraph, which said no policy is asked at `truncate`'s
+second resolve. §7 strengthens S4 (iii), adds S7, a refusal in the exclusive
+hold on a file with a buffered write and a pending trim, asks
+`setattr_atomic_test.go`'s header to stop saying the second check is not
+covered, and asks for `dangling_entry_test.go`'s duplicated helpers to be
+replaced by `setattr_atomic_test.go`'s. The rule, the checks, the holds and
+every existing assertion are unchanged, and the model needs no run.
 **Issue:** #143, #144
 
 ## Context
@@ -127,7 +143,10 @@ guard's: "If guard.check is TRUE, the server must compare the value of
 guard.obj_ctime to the current ctime of the object." and "If the values are
 different, the server must preserve the object attributes and must return a
 status of NFS3ERR_NOT_SYNC." (*Sources*), which `internal/nfs` checks before
-it calls `SetAttr`, so that case already preserves the attributes. ADR 0012
+it calls `SetAttr`, against a `GetAttr` of its own in a hold of its own, so
+that case preserves the attributes modulo #99: a change that lands between
+the handler's `GetAttr` and its `SetAttr` passes the guard, which #99 owns
+and §2 leaves untouched (Assumption 27). ADR 0012
 §2 cited the same sentence to allow a `SETATTR`'s size and other attributes
 to land in two commits. So the atomicity this ADR decides rests on this
 repository's own rule, not on the RFC, which permits either; a server may do
@@ -159,12 +178,13 @@ handles and asks the policy again". ADR 0011 §7 and ADR 0022 §8 give the
 test safety rules and the names a test may use, which ADR 0023 §11 extends.
 ADR 0006's trim rules are untouched.
 
-**What this constrains.** `SetAttr`, `truncate` and `unlink` in
-`internal/blobfs/fs.go`; `FS`, which gains `perm`; `blobfs`, which from this
-ADR imports `internal/policy`; `vfs.FS.SetAttr`'s contract (§2); ADR 0014
-§6's `SetAttr` bullets, ADR 0017 §2's bullet and ADR 0012 §2's paragraph, by
+**What this constrains.** `SetAttr`, `truncate`, `unlink` and
+`bufferWrite`'s tail block in `internal/blobfs/fs.go`; `FS`, which gains
+`perm`; `blobfs`, which from this ADR imports `internal/policy`;
+`vfs.FS.SetAttr`'s contract (§2); ADR 0014 §6's `SetAttr` bullets and its
+stages paragraph, ADR 0017 §2's bullet and ADR 0012 §2's paragraph, by
 cross-reference; ADR 0023 §8 and the register's E13 (§4);
-`docs/tla/trace.tsv`'s `decided` column for three rows and, after the code
+`docs/tla/trace.tsv`'s `decided` column for four rows and, after the code
 lands, the module's `Checked against` line (§5). Nothing on the wire, no
 object format, no flag and no `store.Store` method changes.
 
@@ -194,6 +214,23 @@ nothing (§2, the empty call; Assumption 9).
 §2 and §3 bring the two paths ADR 0023 §8 named under the rule: `SetAttr`
 by applying nothing when it refuses, and `unlink` by making no change on the
 path that returns `vfs.ErrNoEnt`. §4 strikes them from ADR 0023 §8.
+
+One more site marks where nothing changes. `bufferWrite`'s tail block,
+holding the file's `openFile.mu` and `FS.mu` for writing, resolves the handle
+again: if the inode is there it sets the size and the times, and if it is
+gone, unlinked while the write buffered, it drops the `openFile`'s buffers
+and releases their charge (ADR 0003 §2, site 2), which changes no inode,
+entry, attribute, size or chunk list. At `f8398c4` and at `369cbad` it calls
+`markDirty` after both branches, so the second marks a change that is not
+one, and the next `Sync` can commit for nothing. From this ADR the call is
+made on the first branch only: the second changes nothing and marks nothing
+(Assumption 25). The over-mark is reachable, not only in principle: `unlink`
+drops the file's `FS.open` entry as it deletes the inode, so a `Sync` begun
+between the unlink and the tail block flushes nothing of that file, commits
+the removal and clears the flag before the block runs, and the block's mark
+then costs an empty commit, which B1 (§7) shows. The branch is a hold of
+`FS.mu` for writing that changes nothing, so ADR 0023 §8's third fact, on
+which E13 rests and which §4 restates, is untouched by the move.
 
 ### 2. `SetAttr` applies all of `sa` or none
 
@@ -462,6 +499,16 @@ writing, taken in that order after its pre-check's read hold has been
 released; and all three keep their `TLA+: … Mutate` lines. The three lines
 read `369cbad` (Assumption 23).
 
+`docs/tla/trace.tsv`'s row for `FS.bufferWrite` gains this ADR in its
+`decided` column too, beside ADR 0003 §3, since §1 decides that its unlinked
+branch marks nothing; its `locks` column stands, the `Mutate` still being
+performed holding `openFile.mu` and then `FS.mu` for writing, on the branch
+that resolves the inode (Assumption 29). Coder's commit for that branch is a
+refactor of traced code under ADR 0013 §8, so the architect reads the row
+against it and moves the module's `Checked against` line, `docs/tla/README.md`'s
+and vocabulary V3's statements to that commit, a second pass of the kind
+above; `tla.sh full` is due on the PR either way.
+
 ### 6. Cross-references
 
 This ADR replaces, under `docs/adr/README.md`'s rule for a part a later ADR
@@ -471,7 +518,11 @@ replaces, with a `Revised` line and one sentence each:
   in turn … until the ADR that settles #96 decides otherwise", and the
   `SetAttr` bullet under *The requests each method makes*, whose "each before
   the attribute it guards is applied" is since this ADR "every request before
-  any attribute is applied", twice for a call with a size.
+  any attribute is applied", twice for a call with a size; and its stages
+  paragraph's sentence that at `truncate`'s second resolve "no policy is
+  asked there, and whether one should be is #101's question", since this ADR
+  every request is made there again (§2, step 4), which answers #101 for
+  `SetAttr` alone and leaves `Write`'s check to #101.
 - **ADR 0017 §2**: "An entry that names no inode is removed or replaced as
   now": `unlink` leaves one, `Rename` replaces one.
 - **ADR 0012 §2**: the paragraph allowing a `SETATTR`'s size and other
@@ -551,7 +602,14 @@ and the harness of `internal/blobfs/commit_window_test.go` and
 `bpNew`, `bpLookup`, `cwMount` with `createHeld`, `holdSync` and
 `truncateA`, `newBTGate`, `bpHook`, `cwKey`, `cwCut` and `bpCS`, which
 between them hold a `Sync` in its first pass or its settle pass, as
-`TestCommitWindowTruncateDuringSettleIsWholeOrAbsent` does.
+`TestCommitWindowTruncateDuringSettleIsWholeOrAbsent` does; and, for S7 and
+B1, `bpOpen`, `bpMustOpen`, `bpSnapshot` and `bpOFSnap` with its `indices`,
+which read an `openFile`'s buffer indices and capacities, its charge and the
+count of its pending trims under its `mu` (ADR 0003 §4's test surface), and
+`bpStore` with `setGet`, `bpHook`'s `key`, `entered` and `gate` fields, and
+`bpIsChunkKey`, which hold a `Get` of a chunk. `bpStore` embeds a
+`store.Store`, so it can wrap a `*uc43Store`, which records what passes
+through it.
 
 **Facts a test may rely on.**
 
@@ -600,14 +658,35 @@ between them hold a `Sync` in its first pass or its settle pass, as
   commit gate is held for writing (ADR 0012 §2; ADR 0023 §2), and a
   `SetAttr` with a size that passes its checks waits for it; one the policy
   refuses does not (§2).
+- `uc43Config` sets `ChunkSize` 4096, so a file of 6000 bytes written at 0
+  and committed is stored as two chunks, of 4096 and 1904 bytes. A `Write`
+  that covers part of a stored chunk loads that chunk before it overlays the
+  bytes, from the mount's cache if it holds it (ADR 0004) and otherwise with
+  one `Get` under `chunkPrefix`; a fresh mount's cache is empty, so on a
+  mount of a bucket another mount wrote, such a `Write` makes that `Get`. A
+  `Write` with `vfs.Unstable` that returns nil leaves its bytes in the file's
+  `openFile` buffers until the next flush, marks the namespace dirty, and
+  reads back through `Read`.
+- A `SetAttr` that shortens a file to a size inside a stored chunk that holds
+  no buffered write records a pending trim for that chunk rather than
+  fetching it (ADR 0006 §3(b)): afterwards `bpSnapshot` of the file's
+  `openFile` counts one more pending trim, and a `Read` to the end of the
+  file returns the bytes below the new size. `Attr.FileID` is the inode
+  number `bpOpen` takes, as D2 relies on.
+- A `Remove` of a file drops its `FS.open` entry with its inode, so a `Sync`
+  that follows flushes nothing of that file and does not wait for a `Write`
+  of it still holding the file's lock (§1; ADR 0003 §2, site 5). A `Write`
+  whose file is removed while it buffers returns its full length and nil
+  (ADR 0003, *If the inode goes away*).
 
-**Tests**, each from §1 to §3, in three new files:
+**Tests**, each from §1 to §3, in four new files:
 `internal/blobfs/setattr_atomic_test.go` for S1, S2, S3 and S6, which use
 only names that exist at `f8398c4`, so that the package builds there and the
-session can take a red run; `internal/blobfs/setattr_policy_test.go` for S4
-and S5, which need `FS.perm` and are written once coder's code is on the
-branch, as ADR 0023 §11's second part was; and
-`internal/blobfs/dangling_entry_test.go` for D1 and D2 (Assumption 14). The
+session can take a red run; `internal/blobfs/setattr_policy_test.go` for S4,
+S5 and S7, which need `FS.perm` and are written once coder's code is on the
+branch, as ADR 0023 §11's second part was;
+`internal/blobfs/dangling_entry_test.go` for D1 and D2 (Assumption 14); and
+`internal/blobfs/unlinked_write_test.go` for B1 (Assumption 25). The
 harness is ADR 0011 §7's and ADR 0023 §11's: a `*store.Local` under
 `t.TempDir()`, behind `uc43Store` where the test counts store calls;
 `SnapshotRetention` −1; `MaxDirtyBytes` −1; every `New` and every call in a
@@ -677,11 +756,19 @@ nothing sleeps.
     before the last request was made; `GetAttr` reports `Mode` `0o600`,
     `UID` 7, `GID` 8, `ATime` t1 and `MTime` t2.
 
-  Then `f.bin` with 100 bytes committed, and root's `SetAttr` with `Size`
-  `10` and `Mode` `0o600`:
-  - refusing index 2: returns `vfs.ErrNXIO`; the recorded requests are
-    exactly `OpTruncate`, `OpChmod`, `OpTruncate`; `Size` is 100 and `Mode`
-    `0o644`; `FS.dirty` is false;
+  Then `f.bin` with 100 bytes committed, `FS.changes` read after that
+  commit, c1, and the harness's record marked there; root's `SetAttr` with
+  `Size` `10` and `Mode` `0o600`:
+  - refusing index 2, which is the exclusive hold's first request: returns
+    `vfs.ErrNXIO`; the recorded requests are exactly `OpTruncate`,
+    `OpChmod`, `OpTruncate`; `GetAttr` reports `Size` 100, `Mode` `0o644`
+    and every other attribute as before the call; `FS.dirty` is false and
+    `FS.changes` is c1; a `Read` of 100 bytes at 0 returns the 100 bytes;
+    `Sync` returns nil and the harness recorded no call since the mark. This
+    is S2's assertion set for a refusal in the exclusive hold, which under
+    `Unix()` only a change between the two checks reaches and which this
+    policy reaches directly; S7 makes the same refusal on a file whose
+    buffers and trim are unflushed;
   - refusing nothing: returns nil; the recorded requests are exactly
     `OpTruncate`, `OpChmod`, `OpTruncate`, `OpChmod`, every one with `Object`
     `{Type: vfs.TypeReg, Mode: 0o644, UID: 501, GID: 20}`; `Size` is 10 and
@@ -696,6 +783,45 @@ nothing sleeps.
   `0o600`, `UID` `502`, `GID` `30`, `ATime` t1 and `MTime` t2 returns nil,
   and `GetAttr` reports every one of those values. Does not build at
   `f8398c4`.
+- **S7, a refusal in the exclusive hold leaves a file's buffers and trim**
+  (`TestARefusalInTheExclusiveHoldLeavesTheFilesBuffersAndTrim`; §2, steps 4
+  and 5, and *What a refused call leaves*). S4's recorder, refusing nothing,
+  behind an unarmed `uc43Store`. `testCaller` creates `f.bin`, writes 6000
+  bytes p at 0, `vfs.Unstable`, and `Sync`s, so the file is two stored
+  chunks and `FS.dirty` is false. Then the unflushed state: `testCaller`
+  writes 100 bytes q at 0, `vfs.Unstable`, which buffers them over the first
+  chunk; `testCaller`'s `SetAttr` with `Size` 5000 returns nil with `Size`
+  5000, which records a pending trim on the second chunk. Now a `Read` of
+  the whole file returns 5000 bytes, q followed by p[100:5000], b1; after
+  that read, `GetAttr`, a1, reports `Size` 5000 and `Mode` `0o644`;
+  `bpSnapshot` of `bpMustOpen(fs, a1.FileID)`, s1, has `indices` [0] and
+  `pending` 1; `FS.dirty` is true, and `FS.changes` is read, c1. Then two refused
+  calls by root, the recorder reset to refuse index 2 before each, and each
+  asserted the same way: `SetAttr` with `Size` 10 and `Mode` `0o600`, whose
+  size-change body would shorten the buffered chunk, drop the second chunk's
+  trim and cut the chunk list; and `SetAttr` with `Size` 4500 and `Mode`
+  `0o600`, whose body would record a shorter trim on the second chunk.
+  Before each, `GetAttr` is read again, after any `Read`, as a. After each:
+  the call returned `vfs.ErrNXIO` with exactly `OpTruncate`, `OpChmod`,
+  `OpTruncate` recorded; the harness recorded no call during it; `GetAttr`
+  equals a, with `Size` 5000 and `Mode` `0o644`; `FS.dirty` is true and
+  `FS.changes` is c1; `bpSnapshot` equals s1 in `bytes`, `caps` and
+  `pending`; and, last, a `Read` of the whole file returns b1. Then `Sync`
+  returns nil, and a remount of the inner store reads b1, 5000 bytes, with
+  `Size` 5000 and `Mode` `0o644`: the buffers and the trim were applied as
+  they stood, after two refused calls left them as they were. The remount
+  commits nothing, so the first mount is used again for the control, the
+  recorder reset to refuse nothing: root's `SetAttr` with `Size` 10 and
+  `Mode` `0o600` returns nil with `Size` 10 and `Mode` `0o600`, and a
+  `Read` of 100 bytes at 0 returns q[:10] with eof. A statement of the
+  size-change body moved above the second check would show in a, s1 or b1,
+  except the unsettled mark, which the `Size` 5000 call has already set and
+  which no test can tell from a spurious set; that line is review's
+  (Assumption 28). The calls are on a regular file (ADR 0014 §11's safety
+  rule); the atime a `Read` may or may not set is read into a after each
+  read and before each refused call, so no assertion depends on it. Passes
+  at `369cbad`, read from `truncate`, whose second check returns before the
+  body; does not build at `f8398c4`.
 - **S6, a refused call with a size does not wait for the gate**
   (`TestARefusedSetAttrWithASizeDoesNotWaitForTheCommitGate`; §2, step 2;
   ADR 0012 §2). With `commit_window_test.go`'s harness: a file A truncated
@@ -739,6 +865,32 @@ nothing sleeps.
   `Inodes[rootInodeID].Entries["ghost"]` equal to it and no `donor`. This is
   a characterisation of the recovery path: it passes at `f8398c4` too
   (Assumption 15).
+- **B1, a write that lands after an unlink marks nothing**
+  (`TestAWriteThatLandsAfterAnUnlinkMarksNothing`; §1, `bufferWrite`'s tail
+  block; ADR 0003 §2, site 2; Assumption 25). A first mount on the harness's
+  bucket: `testCaller` creates `f.bin`, writes 4096 bytes p at 0,
+  `vfs.Unstable`, and `Sync`s; the mount is dropped and not used again.
+  Then `New` over a `bpStore` wrapping the `uc43Store`, so that the mount's
+  cache is empty and a `Get` of a chunk can be held: `setGet` armed with a
+  `bpHook` whose `key` is empty, with `entered` and a `gate` the test closes.
+  In a goroutine under the bound, `testCaller`'s `Write` of 10 bytes at 100
+  of `f.bin`, `vfs.Unstable`: it covers part of the stored chunk, so it
+  fetches it, and the hook's `entered` closes while the `Write` runs, which
+  the test waits for under the bound. While the `Get` is held: `testCaller`'s
+  `Remove` of `f.bin` returns nil; `Sync` returns nil, committing the
+  removal; `FS.dirty` is false and `FS.changes` is c2. Close the gate; the
+  `Write` returns 10 and nil under the bound. Then: `FS.dirty` is false and
+  `FS.changes` is c2, since the write's tail block found the inode gone and
+  changed nothing; mark the harness's record; `Sync` returns nil and the
+  harness recorded no call since the mark; a remount answers `vfs.ErrNoEnt`
+  to `Lookup` of `f.bin`. At `369cbad` and at `2ef1eb4` the tail block marks
+  on that branch, so `FS.dirty` is true after the `Write`, `FS.changes` is
+  above c2, and the `Sync` records a `Put` under `snapshotPrefix` and a
+  `PutIfMatch` of `rootKey` for a commit that changes nothing: the over-mark
+  §1 removes. The `Sync` made while the `Get` is held does not wait for the
+  write, since `Remove` dropped the file's `FS.open` entry (the facts); if
+  it did, the bound would fail the test rather than hang it. The held `Get`
+  passes through once the gate opens and is recorded then, before the mark.
 
 **Red runs.** At `f8398c4`, from the code as *Context* quotes it and from
 the tests' own doc comments (Assumption 24):
@@ -772,9 +924,25 @@ the tests' own doc comments (Assumption 24):
 The session's red run at `f8398c4` showed only the outcomes: S1, S2 and D1
 failed, S6 hung, S3 and D2 passed. It did not show the mechanisms, which
 are read from the code and the test files as cited above. At `369cbad` all
-six pass, thirty repeats each under `-race`, by the session's run.
+six pass, thirty repeats each under `-race`, by the session's run. S7 and
+B1 are later (the second `Revised` line): S7 passes at `369cbad` and at
+`2ef1eb4`, read from the code, and B1 fails at both on `FS.dirty` after the
+`Write`, on `FS.changes` and on the calls its last `Sync` makes, as its
+entry says, until coder moves the call (Assumption 25). Neither is run at
+`f8398c4`: S7 needs `FS.perm`, and B1 uses only names that exist there but
+sits in a package that no longer builds there, so B1's red run is taken at
+`2ef1eb4`, before coder's commit.
 
-**Changes to existing tests.** None in their assertions. `TestMaxFileSizeSetAttrAboveTheLimit`
+**Changes to existing tests.** None in their assertions.
+`setattr_atomic_test.go`'s header lists, as not covered, "the exclusive
+hold's second check, which only a change made between the two checks can
+reach", which S4 (iii) and S7 in `setattr_policy_test.go` make false: the
+header is to say that under `Unix()` only such a change reaches it
+(Assumption 19) and that S4 (iii) and S7 reach it with a policy that refuses
+it. `dangling_entry_test.go`'s `dg24Fields`, `dg24Read` and `dg24GetAttr`
+duplicate `setattr_atomic_test.go`'s `sa24Fields`, `sa24Read` and
+`sa24GetAttr` in the same package and are replaced by them, with no
+assertion changed (reviewer's R6). `TestMaxFileSizeSetAttrAboveTheLimit`
 and `TestMaxFileSizeSetAttrTakesNoLock` (ADR 0007 §7) stand: `vfs.ErrFBig`
 is still `truncate`'s first statement, before any lock. ADR 0023 §11's U1,
 U2, U8, U11 and U12 make a `SetAttr` of a size while a store call is held,
@@ -791,10 +959,16 @@ proposed for the session to record, newest first:
 
 > A SETATTR that is refused for any attribute it sets now changes none of
 > them: every attribute's permission is checked before any is applied, so a
-> call refused on the owner, group or times leaves the mode, the size and
-> the rest as they were, where before it had already applied the earlier
-> attributes, a size change included, and left that change uncommitted
-> until some other change was committed.
+> call refused on the mode, the owner, the group or the times leaves the
+> size and every other attribute as they were. Before, it had already
+> applied the attributes it checked first: a call with a size had its size
+> change, and anything applied with it, committed at the next commit, and
+> one without left the change uncommitted until some other change was
+> committed.
+
+The first version of this line said every refused call had left its change
+uncommitted; that was true without a size and false with one, and the line
+named no refusal on the mode (Assumption 26).
 
 > A REMOVE or RMDIR of a name whose directory entry names no inode, which
 > only a snapshot written by another build or a corruption can hold, now
@@ -989,6 +1163,63 @@ Each is mine unless it says otherwise.
     `SetAttr` and `truncate`, and from the test files at the lines cited.
     The tests' assertions were right throughout and are unchanged; only
     this ADR's record of the red run was wrong, twice.
+25. **(b) for `bufferWrite`'s over-mark, with a test** (§1, §7). Reviewer
+    found the mark on the unlinked branch (its R3) and offered narrowing §1's
+    wording instead. The move is chosen because §1 reads `markDirty` as the
+    record of a change (Assumption 9) and the branch records none; the
+    alternative would have the ADR that states the rule carry an exception
+    for a one-line move. The over-mark is reachable, by reading `unlink`,
+    which calls `dropOpen` as it deletes the inode, and `flushAll`, which
+    lists `FS.open` under `FS.mu` for reading and takes each listed file's
+    `openFile.mu`: a file unlinked during its write's fetch is not listed,
+    so a `Sync` passes the write's hold of `openFile.mu`, and the mark then
+    lands on a namespace the commit has just made clean. B1 holds the fetch
+    with `bpStore`'s `Get` hook on a mount whose cache is cold, which is why
+    its file is written by a mount that is dropped first, and it is in a
+    file of its own since it is §1's, not `SetAttr`'s. E13's third fact is
+    about holds that change the namespace, and this one does not, so it is
+    untouched. No `CHANGES` line: a client cannot observe an empty commit,
+    as Assumption 9 has it for the empty call. The branch's other work, the
+    drop and the release, is ADR 0003 §2's and does not move.
+26. **The corrected `CHANGES` line** (§8). The first version said a refused
+    call had "left that change uncommitted until some other change was
+    committed", which is true without a size and false with one: at
+    `f8398c4` `truncate` called `markDirty` before returning to the
+    `SetAttr` that refused, so the size change and whatever was applied
+    with it were in the next commit, as §7's S2 red-run paragraph already
+    said, and the line now says both. "Mode" joins the list of refusals: a
+    caller with write permission who is not the owner, as a member of the
+    group of a file of mode `0o664`, had the size applied and the mode
+    refused at `f8398c4`. Reviewer found both (its R1).
+27. **The guard is the handler's own read** (*Context*). The `setattr`
+    handler compares the guard's ctime with a `GetAttr` it makes before
+    `SetAttr`, in a hold of its own, so a change between the two passes the
+    guard; that is #99, which §2 lists as untouched, and the sentence says
+    "modulo #99" rather than "already preserves". Reviewer's R4.
+28. **S7's shape** (§7). The file is 6000 bytes so that a buffered write
+    sits on the first chunk and a trim on the second, and the two refused
+    sizes, 10 and 4500, are chosen so that every statement of the
+    size-change body but the unsettled mark would show if it ran before the
+    second check: 10 shortens the buffered chunk, drops the second chunk's
+    trim and cuts the chunk list; 4500 records a shorter trim on the second
+    chunk, whose `to` the trim count cannot show but the bytes can. The
+    unsettled mark is set by the allowed `Size` 5000 call and cannot be told
+    from a spurious set; a test that cleared it first would need the settle
+    pass, which is ADR 0012's, so that line stays review's. `FS.dirty` is
+    true throughout, since the state is unflushed, so S7 asserts it
+    unchanged, and the remount after the `Sync` is what shows the buffers
+    and the trim were kept; a `Sync` that made no store call, S2's
+    assertion, is impossible here and is S4 (iii)'s. `bpSnapshot` reads an
+    `openFile` under its `mu` as the `bp` tests do, and `FileID` is the
+    inode number, as D2 relies on. The remount commits nothing, so the
+    first mount is used again for the control: no ADR forbids it, and the
+    doctoring recipe's "never use it again" is for a mount whose bucket is
+    then written behind its back. Reviewer's R5.
+29. **Row 17's `decided` now, `Checked against` after the code** (§5), as
+    Assumption 13 had it for the three rows: the column names the ADR that
+    decides the row's behaviour, and §1 now decides the tail block's; the
+    `locks` column is untouched; the line moves when the architect reads the
+    row against coder's commit (ADR 0013 §8).
 
 ## Alternatives considered
 
@@ -1033,6 +1264,8 @@ Each is mine unless it says otherwise.
 - A `SETATTR` with a size asks the policy twice, which takes no lock.
 - A directory entry that names no inode stays until a `RENAME` replaces it,
   and `REMOVE` of it is honest: it changes nothing and says so.
+- `bufferWrite` marks the namespace only where it changed it: a write that
+  lands after its file's removal costs no commit.
 - `truncate`'s signature changes and it applies the rest of `sa`; the three
   trace rows gain this ADR, and the module's `Checked against` moves once
   the code lands.

@@ -14,7 +14,7 @@ CommitProtocol	Mutate	internal/blobfs/fs.go	FS.SetAttr	FS.mu (write)	ADR 0024 se
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.createEntry	FS.mu (write)	-
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.unlink	FS.mu (write)	ADR 0024 section 3
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.Rename	FS.mu (write)	-
-CommitProtocol	Mutate	internal/blobfs/fs.go	FS.bufferWrite	openFile.mu, then FS.mu (write)	ADR 0003 section 3
+CommitProtocol	Mutate	internal/blobfs/fs.go	FS.bufferWrite	openFile.mu, then FS.mu (write)	ADR 0003 section 3; ADR 0024 section 1
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.truncate	commitGate (read), openFile.mu, FS.mu (write)	ADR 0012 section 2; ADR 0024 section 2
 CommitProtocol	Flush	internal/blobfs/commit.go	FS.Sync	none for flushAll; commitMu from after flushAll until it returns; commitGate (write) from settleAll until the seal	ADR 0012 section 2; ADR 0023 section 2; README.md How a commit works
 CommitProtocol	Flush	internal/blobfs/fs.go	FS.flushAll	FS.mu (read) for its listing	ADR 0012 section 2
