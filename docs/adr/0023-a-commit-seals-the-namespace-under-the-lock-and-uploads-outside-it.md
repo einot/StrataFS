@@ -53,6 +53,17 @@ it vouches for: the fourteen rows that name `commitSealed` were read against
 it and hold, and the module's line, the README and V3 say so (§10;
 Assumption 23). The rule, the pipeline, the guard, the model and the
 configurations are unchanged, and the model needs no run.
+**Revised:** 2026-10-30 — cross-reference only: ADR 0024 fixed #143 and
+#144 (its code is `369cbad`, read on 2026-10-31), the two error paths §8
+named as the exceptions to its third fact, that
+every hold of `FS.mu` for writing that changes the namespace calls
+`markDirty`. `SetAttr` now applies all of `sa` or none, and `unlink` makes no
+change on the path that answers `ErrNoEnt`, so §8 strikes both, as it asked
+the fixing PR to do, and states the fact without qualification; ADR 0024 §1
+makes it the package's rule. Assumption 38, *Consequences* and *What this
+does not decide* gain a sentence each. E13's register row gains ADR 0024.
+The rule, the pipeline, the guard, the model and the configurations are
+unchanged, and the model needs no run.
 
 ## Context
 
@@ -675,28 +686,22 @@ that commit (Assumption 17).
   rests on three facts that review checks and no table would: no non-test
   code writes `f.dirty = true` but `markDirty` (Assumption 10); nothing
   writes it false but `applyLocked`, as `f.changes != s.changes`; and every
-  hold of `FS.mu` for writing that changes the namespace calls `markDirty`,
-  at every site but two. The third holds at each of §3's eight sites and at
-  every hold that changes the namespace and returns success, read at
-  `a9e85cc`. The two are error paths older than this ADR, each of which
-  changes the namespace and then returns an error without the call, so that
-  at each the namespace in memory holds a change the flag does not record,
-  which is committed only when something else dirties the namespace and is
-  otherwise undone at the next mount (Assumption 38):
-
-  - `unlink`, when the entry names an inode the table lacks, which a
-    snapshot can hold since `decodeSnapshot` does not check entries: it
-    removes the entry and returns `ErrNoEnt` (#144);
-  - `SetAttr`, when it has applied `Mode` and then refuses `UID` or `GID`
-    with `ErrPerm` (#143).
-
-  The PR that fixes each, by `markDirty` in the hold or by making no
-  change, strikes its site from this list under a `Revised` line, since
-  the fact is this ADR's and the register's row restates it; with both
-  struck, the fact holds without qualification. ADR 0011 §7's seam, a test
-  writing the field on a read-only FS, stands. The register gains row E13,
-  citing this section; ADR 0018 §3's list is the record of what stood at
-  `2d7ff34` and is not edited.
+  hold of `FS.mu` for writing that changes the namespace calls `markDirty`.
+  The third holds at each of §3's eight sites and at every hold that
+  changes the namespace, whatever it returns, read at `369cbad`, coder's
+  commit for ADR 0024. Until that commit it held at
+  every site but two, error paths older than this ADR that changed the
+  namespace and then returned an error without the call: `unlink`'s removal
+  of an entry that names an inode the table lacks (#144), and `SetAttr`'s
+  apply of `Mode` before a refusal of `UID` or `GID` (#143). This section
+  named both, with their issues, until the PR that fixed them struck them,
+  as it asked (Assumption 38): since ADR 0024 §3 `unlink` makes no change on
+  that path, and since ADR 0024 §2 `SetAttr` applies nothing when it
+  refuses, so the fact holds without qualification, and ADR 0024 §1 states
+  it as the package's rule. ADR 0011 §7's seam, a test writing the field on
+  a read-only FS, stands. The register gains row E13, citing this section,
+  and ADR 0024 §4 restates it; ADR 0018 §3's list is the record of what
+  stood at `2d7ff34` and is not edited.
 - **`FS.changes` is a value, not a state** (ADR 0018 §2), as `rootETag` is:
   it names no legal next step.
 - **No policy.** Nothing here decides what a caller may do. The guard is a
@@ -1633,7 +1638,10 @@ Each is mine unless it says otherwise.
     was not set, which shows until then and is #143's complaint. Neither
     path is a commit outcome, so `DirtyUntilCommitted`, the Unlocked rows
     and U1 to U12, which are about commits, say nothing of them, and no
-    configuration changes.
+    configuration changes. ADR 0024 fixed both on 2026-10-30: `SetAttr`
+    applies nothing when it refuses (its §2), and `unlink` makes no change
+    on that path, as `Rename` does (its §3); §8 now states the fact without
+    qualification.
 
 ## Alternatives considered
 
@@ -1693,8 +1701,8 @@ Each is mine unless it says otherwise.
   `markDirty` being its one setter, `applyLocked` its one clearer and
   `DirtyUntilCommitted` its invariant; a change that adds a writer or a
   reader outside those revisits the exemption (§8). Two error paths older
-  than this ADR change the namespace without the setter, each with an
-  issue (§8; Assumption 38).
+  than this ADR changed the namespace without the setter, each with an
+  issue, until ADR 0024 fixed both (§8; Assumption 38).
 - The probe's read, the reclaim and the fallback's calls run off the lock,
   closing what ADRs 0021 and 0022 left to #43.
 - Four MustHold configurations widen the module's envelope to changes made
@@ -1713,7 +1721,8 @@ Each is mine unless it says otherwise.
   that no snapshot of its own will name (Assumption 36).
 - Whether a mount should repair a directory entry that names no inode when
   a snapshot holds one, as `unlink` does today in memory and `Rename` does
-  not (#144; Assumption 38).
+  not (#144; Assumption 38). ADR 0024 §3 decided it: `unlink` makes no
+  change, and a repair at load is left open there.
 - Releasing `FS.mu` during the encode itself, which still holds the
   uncompressed snapshot under the lock (ADR 0007 *Context*).
 - Whether a `Sync` queued behind a commit in flight should run its first

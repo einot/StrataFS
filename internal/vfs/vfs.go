@@ -180,7 +180,9 @@ type FS interface {
 
 	// SetAttr changes the attributes sa sets. If sa.Size is above
 	// MaxFileSize it fails with ErrFBig, whatever the file's current size,
-	// and applies none of sa.
+	// and applies none of sa. SetAttr applies every attribute sa sets or
+	// none of them: a call that returns an error has changed nothing, and
+	// one that returns nil has applied all of sa.
 	SetAttr(ctx context.Context, c Caller, h Handle, sa SetAttr) (Attr, error)
 	Lookup(ctx context.Context, c Caller, dir Handle, name string) (Handle, Attr, error)
 	Access(ctx context.Context, c Caller, h Handle, want uint32) (uint32, error)

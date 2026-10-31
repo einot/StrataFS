@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"strata/internal/fsm"
+	"strata/internal/policy"
 	"strata/internal/store"
 	"strata/internal/vfs"
 )
@@ -101,6 +102,14 @@ type FS struct {
 	// without a lock; a test may set it after New and before first use to
 	// stand for a build with another limit (ADR 0007 §7).
 	maxFileSize uint64
+
+	// perm decides what a caller may do (ADR 0014 §6). New sets it to
+	// policy.Unix() and nothing else writes it, so it is read without a lock;
+	// a test may replace it after New returns and before first use (ADR 0014
+	// §6, Assumption 22). SetAttr is the first method that asks it; the rest
+	// still check inline, through permitted and inGroup, until #114 moves
+	// them (ADR 0024 §2).
+	perm policy.Policy
 
 	// commitMu serialises commits: Sync holds it from after its first pass until
 	// it returns, so one commit of this mount is in flight at a time, and a Sync
@@ -329,6 +338,7 @@ func New(ctx context.Context, cfg Config) (*FS, error) {
 		ownerUID:       cfg.OwnerUID,
 		ownerGID:       cfg.OwnerGID,
 		skipVerify:     cfg.SkipChunkVerification,
+		perm:           policy.Unix(),
 		mode:           fsm.NewAtomic(mountModes, initial),
 		rootKnowledge:  fsm.NewMachine(rootStates, rootKnown),
 		retention:      cfg.SnapshotRetention,
@@ -486,6 +496,89 @@ func inGroup(c vfs.Caller, gid uint32) bool {
 	return false
 }
 
+// objectOf is the part of n a policy reads (ADR 0014 §6). Caller must hold mu
+// for reading or writing.
+func objectOf(n *inode) policy.Object {
+	return policy.Object{Type: n.Type, Mode: n.Mode, UID: n.UID, GID: n.GID}
+}
+
+// setAttrRequests asks f.perm about every attribute sa sets, in ADR 0024 §2's
+// order, and returns the first refusal unchanged, asking nothing after it.
+// Every request reads n as it stands, since nothing is applied until all of
+// them are allowed. Caller must hold mu for reading or writing.
+func (f *FS) setAttrRequests(c vfs.Caller, n *inode, sa vfs.SetAttr) error {
+	o := objectOf(n)
+	ask := func(r policy.Request) error {
+		r.Caller, r.Object = c, o
+		return f.perm.Check(r)
+	}
+	if sa.Size != nil {
+		if err := ask(policy.Request{Op: policy.OpTruncate}); err != nil {
+			return err
+		}
+	}
+	if sa.Mode != nil {
+		if err := ask(policy.Request{Op: policy.OpChmod}); err != nil {
+			return err
+		}
+	}
+	if sa.UID != nil {
+		if err := ask(policy.Request{Op: policy.OpChown, UID: *sa.UID}); err != nil {
+			return err
+		}
+	}
+	if sa.GID != nil {
+		if err := ask(policy.Request{Op: policy.OpChgrp, GID: *sa.GID}); err != nil {
+			return err
+		}
+	}
+	if sa.ATime != nil {
+		if err := ask(policy.Request{Op: policy.OpSetTimes}); err != nil {
+			return err
+		}
+	}
+	if sa.MTime != nil {
+		if err := ask(policy.Request{Op: policy.OpSetTimes}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applySetAttr applies every attribute of sa but the size to n, and reports
+// whether it applied any. A given mtime is applied after the size change's
+// touchM, so it wins over it (ADR 0024 §2). Caller must hold mu for writing,
+// and must have had every request allowed in the same hold.
+func applySetAttr(n *inode, sa vfs.SetAttr, now time.Time) bool {
+	applied := false
+	if sa.Mode != nil {
+		n.Mode = *sa.Mode & 0o7777
+		n.touchC(now)
+		applied = true
+	}
+	if sa.UID != nil {
+		n.UID = *sa.UID
+		n.touchC(now)
+		applied = true
+	}
+	if sa.GID != nil {
+		n.GID = *sa.GID
+		n.touchC(now)
+		applied = true
+	}
+	if sa.ATime != nil {
+		n.ATimeNS = sa.ATime.UnixNano()
+		n.touchC(now)
+		applied = true
+	}
+	if sa.MTime != nil {
+		n.MTimeNS = sa.MTime.UnixNano()
+		n.touchC(now)
+		applied = true
+	}
+	return applied
+}
+
 // mutable reports whether the mount accepts changes at all, from the mode
 // alone: nil for Writable, vfs.ErrROFS for ReadOnly and vfs.ErrStale for
 // Diverged. Any other value answers vfs.ErrServerFault, so a state added later
@@ -531,18 +624,23 @@ func (f *FS) GetAttr(ctx context.Context, h vfs.Handle) (vfs.Attr, error) {
 	return n.attr(f.fsid), nil
 }
 
+// SetAttr applies every attribute sa sets or none of them: it asks f.perm
+// about each before it applies any, so a refused call leaves the inode,
+// FS.dirty and FS.changes as they were, and one that returns nil has applied
+// all of sa in one hold of mu for writing (ADR 0024 §2). A call that sets
+// nothing marks nothing (ADR 0024 §1).
+//
 // TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) SetAttr(ctx context.Context, c vfs.Caller, h vfs.Handle, sa vfs.SetAttr) (vfs.Attr, error) {
 	if err := f.mutable(); err != nil {
 		return vfs.Attr{}, err
 	}
 
-	// A size change is a truncate, which touches file data and therefore needs
-	// the per-file lock taken before the namespace lock.
+	// A size change touches file data and therefore needs the commit gate and
+	// the per-file lock taken before the namespace lock, so truncate applies
+	// it and the rest of sa together.
 	if sa.Size != nil {
-		if err := f.truncate(ctx, c, h, *sa.Size); err != nil {
-			return vfs.Attr{}, err
-		}
+		return f.truncate(ctx, c, h, sa)
 	}
 
 	f.mu.Lock()
@@ -551,48 +649,12 @@ func (f *FS) SetAttr(ctx context.Context, c vfs.Caller, h vfs.Handle, sa vfs.Set
 	if err != nil {
 		return vfs.Attr{}, err
 	}
-
-	now := time.Now()
-	// Only the owner or root may change mode or ownership.
-	if sa.Mode != nil || sa.UID != nil || sa.GID != nil {
-		if c.UID != 0 && c.UID != n.UID {
-			return vfs.Attr{}, vfs.ErrPerm
-		}
+	if err := f.setAttrRequests(c, n, sa); err != nil {
+		return vfs.Attr{}, err
 	}
-	if sa.Mode != nil {
-		n.Mode = *sa.Mode & 0o7777
-		n.touchC(now)
+	if applySetAttr(n, sa, time.Now()) {
+		f.markDirty()
 	}
-	if sa.UID != nil {
-		// Only root may give a file away.
-		if c.UID != 0 && *sa.UID != n.UID {
-			return vfs.Attr{}, vfs.ErrPerm
-		}
-		n.UID = *sa.UID
-		n.touchC(now)
-	}
-	if sa.GID != nil {
-		if c.UID != 0 && !inGroup(c, *sa.GID) {
-			return vfs.Attr{}, vfs.ErrPerm
-		}
-		n.GID = *sa.GID
-		n.touchC(now)
-	}
-	if sa.ATime != nil {
-		if c.UID != 0 && c.UID != n.UID && !permitted(n, c, 2) {
-			return vfs.Attr{}, vfs.ErrPerm
-		}
-		n.ATimeNS = sa.ATime.UnixNano()
-		n.touchC(now)
-	}
-	if sa.MTime != nil {
-		if c.UID != 0 && c.UID != n.UID && !permitted(n, c, 2) {
-			return vfs.Attr{}, vfs.ErrPerm
-		}
-		n.MTimeNS = sa.MTime.UnixNano()
-		n.touchC(now)
-	}
-	f.markDirty()
 	return n.attr(f.fsid), nil
 }
 
@@ -835,6 +897,8 @@ func (f *FS) Symlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name, ta
 }
 
 // unlink removes a name, requiring the target to be (or not be) a directory.
+// A name whose entry names no inode is reported absent and changes nothing
+// (ADR 0024 §3).
 //
 // TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) unlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name string, wantDir bool) error {
@@ -865,7 +929,10 @@ func (f *FS) unlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name stri
 	}
 	n := f.inodes[id]
 	if n == nil {
-		delete(d.Entries, name)
+		// The entry names an inode the table lacks. It is reported absent and
+		// left as it is, as Rename leaves one, so that an error changes
+		// nothing; a Rename onto the name replaces it (ADR 0024 §3; ADR 0017
+		// §2).
 		return vfs.ErrNoEnt
 	}
 	switch {
@@ -1668,15 +1735,16 @@ func (f *FS) bufferWrite(ctx context.Context, h vfs.Handle, of *openFile, off ui
 		}
 		n2.touchM(now)
 		n2.touchA(now)
+		f.markDirty()
 	} else {
 		// Unlinked while this write buffered: nothing will flush these
 		// buffers, so drop them and return the file's whole charge, this
-		// write's included (ADR 0003 §2, site 2).
+		// write's included (ADR 0003 §2, site 2). That changes nothing in the
+		// namespace, so it marks nothing (ADR 0024 §1).
 		released := of.bytes.Swap(0)
 		of.dirty = make(map[uint64][]byte)
 		f.budget.release(released)
 	}
-	f.markDirty()
 	f.mu.Unlock()
 	return written, nil
 }
@@ -1690,11 +1758,20 @@ func (f *FS) syncFileAndNamespace(ctx context.Context, id uint64) error {
 	return f.Sync(ctx)
 }
 
-// truncate changes a file's length, dropping or extending chunks as needed.
-// It holds of.mu and then mu for writing across the whole change, and so never
-// fetches: a cut into a stored chunk it cannot shorten becomes a pending trim
-// (ADR 0006 §3). It makes no store call, charges nothing and never waits on
-// the budget.
+// truncate is SetAttr's path for a call that sets a size: it checks every
+// attribute sa sets, applies the size change and then the rest of sa in one
+// hold of mu for writing, under the commit gate and the file's openFile.mu,
+// and marks the namespace dirty once (ADR 0024 §2). sa.Size must be set.
+//
+// It asks f.perm twice: first holding mu for reading, so that a call it would
+// refuse, for the size or for any other attribute, never waits for the gate,
+// and then again in the hold that makes the change, since the first permit
+// does not carry over (ADR 0018 §5). A refusal at either applies nothing.
+//
+// The size change drops or extends chunks as needed. It holds of.mu and then
+// mu for writing across the whole change, and so never fetches: a cut into a
+// stored chunk it cannot shorten becomes a pending trim (ADR 0006 §3). It
+// makes no store call, charges nothing and never waits on the budget.
 //
 // It holds the commit gate for reading from after the checks that can refuse
 // it holding no lock until it returns, so a Sync's commit phase begins either
@@ -1708,35 +1785,36 @@ func (f *FS) syncFileAndNamespace(ctx context.Context, id uint64) error {
 // stored chunk marks the file unsettled for a Sync's settle pass to find (§3).
 //
 // TLA+: docs/tla/CommitProtocol.tla Mutate
-func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint64) error {
+func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, sa vfs.SetAttr) (vfs.Attr, error) {
 	// A size above the limit is refused before anything is looked up or
 	// locked, even one that would shrink a file an earlier build left larger;
 	// this is what bounds the hole fill below to maxFileChunks entries (ADR
 	// 0007 §4, Assumption 6). SetAttr calls this before it changes any
 	// attribute, so it applies none of sa.
-	if size > f.maxFileSize {
-		return vfs.ErrFBig
+	if *sa.Size > f.maxFileSize {
+		return vfs.Attr{}, vfs.ErrFBig
 	}
+	size := *sa.Size
+
+	// The pre-check: a call refused for any attribute returns here, holding
+	// nothing, having waited for no gate and opened no buffer (ADR 0024 §2,
+	// step 2).
 	f.mu.RLock()
 	n, err := f.resolve(h)
 	if err != nil {
 		f.mu.RUnlock()
-		return err
+		return vfs.Attr{}, err
 	}
-	if n.isDir() {
+	if err := f.setAttrRequests(c, n, sa); err != nil {
 		f.mu.RUnlock()
-		return vfs.ErrIsDir
-	}
-	if !permitted(n, c, 2) {
-		f.mu.RUnlock()
-		return vfs.ErrAcces
+		return vfs.Attr{}, err
 	}
 	id := n.ID
 	f.mu.RUnlock()
 
-	// Taken after the checks above, so a refused size change never waits for
-	// it, and before getOpen, so that no lock is held while waiting (ADR 0012
-	// §2, §5). Deferred first, it is released last, after mu and of.mu.
+	// Taken after the checks above, so a refused call never waits for it, and
+	// before getOpen, so that no lock is held while waiting (ADR 0012 §2, §5).
+	// Deferred first, it is released last, after mu and of.mu.
 	f.commitGate.RLock()
 	defer f.commitGate.RUnlock()
 
@@ -1752,7 +1830,13 @@ func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint
 	defer f.mu.Unlock()
 	n, err = f.resolve(h)
 	if err != nil {
-		return err
+		return vfs.Attr{}, err
+	}
+	// The check that counts: the inode may have changed since the pre-check,
+	// so every request is made again in the hold that applies the change, and
+	// a refusal here applies nothing (ADR 0024 §2, step 4; ADR 0018 §5).
+	if err := f.setAttrRequests(c, n, sa); err != nil {
+		return vfs.Attr{}, err
 	}
 
 	// Drop whole chunks past the new end, and their pending trims by the same
@@ -1831,9 +1915,13 @@ func (f *FS) truncate(ctx context.Context, c vfs.Caller, h vfs.Handle, size uint
 		}
 	}
 	n.Size = size
-	n.touchM(time.Now())
+	// One time serves the hold, so the rest of sa is applied after touchM and
+	// a given mtime wins over the size change's (ADR 0024 §2).
+	now := time.Now()
+	n.touchM(now)
+	applySetAttr(n, sa, now)
 	f.markDirty()
-	return nil
+	return n.attr(f.fsid), nil
 }
 
 // trimReq is a pending trim: its index holds the first to bytes of the chunk

@@ -51,6 +51,18 @@ stands (ADR 0022 Assumption 27); and no test changes for it.
 lock order gains `FS.commitMu` at its top, before the commit gate, and no
 machine gains a lock. The type, the table, the `String` values, `mutable()`'s
 mapping and every test this ADR pins are unchanged.
+**Revised:** 2026-10-30 — cross-reference only, for ADR 0024, which is the
+ADR §6 waits for on #96 (#143): `SetAttr` no longer checks and applies each
+attribute in turn. It makes every request §6 lists for it before it applies
+any attribute, each with `Object` from the inode as it stands at the call,
+twice for a call with a size, the second time in the exclusive hold that
+applies the change, and applies all of `sa` or none. §6's exception for
+`SetAttr`, its `SetAttr` bullet under *The requests each method makes* and,
+added 2026-10-31 after review, its stages paragraph's sentence that no policy
+is asked at `truncate`'s second resolve each gain a sentence saying so;
+`FS.perm` and `objectOf` arrive with that
+ADR, for `SetAttr` alone, as the first step of §6's wiring. The APIs, the
+rows, the stages and every test this ADR pins are unchanged.
 **Issue:** #114
 
 ## Context
@@ -559,13 +571,18 @@ This is for the PR that wires the policy. It changes no behaviour.
   runs C and D again. `truncate` resolves its handle a second time, under its
   `openFile.mu` and `FS.mu` once it holds the commit gate, and that resolve
   can still answer `ErrStale` (ADR 0012 §2); no policy is asked there, and
-  whether one should be is #101's question.
+  whether one should be is #101's question. Since ADR 0024 §2 every request
+  `SetAttr` makes is made there again, against the inode as it then stands,
+  and a refusal applies nothing, which answers #101 for `SetAttr` alone;
+  `Write`'s check is still #101's question.
 - Three exceptions stay as they are:
   - `Symlink`'s empty-target `ErrInval` comes before stage A;
   - an empty write returns success after stage A;
   - `SetAttr` checks and applies each attribute in turn (the size through
     `truncate`, then mode, uid, gid and times), until the ADR that settles
-    #96 decides otherwise.
+    #96 decides otherwise. ADR 0024 §2 decided it: every request is made
+    before any attribute is applied, and `SetAttr` applies all of `sa` or
+    none.
 - **The requests each method makes.** Each `Object` is built from the inode as
   it stands at that check.
   - `Read`: `OpRead` on the file in step 1, and again in step 2 when the file
@@ -578,7 +595,11 @@ This is for the PR that wires the policy. It changes no behaviour.
       `sa.Mode`; `OpChown` with `UID` `*sa.UID`; `OpChgrp` with `GID`
       `*sa.GID`; one `OpSetTimes` for each of `sa.ATime` and `sa.MTime`;
     - each before the attribute it guards is applied, so a later check sees
-      the earlier attributes already applied.
+      the earlier attributes already applied. Since ADR 0024 §2 every
+      request is made before any attribute is applied, each with `Object`
+      from the inode as it stands at the call, and for a call with a size
+      the list is made twice, once under a read hold before the commit gate
+      and once in the exclusive hold that applies the change.
   - `Lookup`: `OpLookup` on the directory.
   - `ReadDir`: `OpReadDir` on the directory.
   - `Create`, `Mkdir`, `Symlink`:
