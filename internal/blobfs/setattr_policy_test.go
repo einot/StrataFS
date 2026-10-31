@@ -442,12 +442,14 @@ func TestEverySetAttrCheckIsBehindThePolicy(t *testing.T) {
 // bpSnapshot of bpMustOpen(fs, a1.FileID), s1, has indices [0] and pending 1;
 // FS.dirty is true; FS.changes is read, c1.
 //
-// Then two refused calls by root, the recorder reset to refuse index 2, the
+// Then three refused calls by root, the recorder reset to refuse index 2, the
 // exclusive hold's first request, before each: {Size 10, Mode 0o600}, whose
 // size-change body would shorten the buffered chunk, drop the second chunk's
-// trim and cut the chunk list; and {Size 4500, Mode 0o600}, whose body would
-// record a shorter trim on the second chunk. Before each, GetAttr is read
-// again, after any Read, as a. After each: the call returned vfs.ErrNXIO with
+// trim and cut the chunk list to one chunk; {Size 4500, Mode 0o600}, whose body would
+// record a shorter trim on the second chunk; and {Size 0, Mode 0o600}, whose
+// body would drop the buffered chunk whole and release its charge, drop the
+// second chunk's trim and cut the chunk list to none. Before each, GetAttr is
+// read again, after any Read, as a. After each: the call returned vfs.ErrNXIO with
 // exactly OpTruncate, OpChmod, OpTruncate recorded, each with Caller root and
 // Object {TypeReg, 0o644, 501, 20}; the harness recorded no call during it;
 // GetAttr equals a, with size 5000 and mode 0o644; FS.dirty is true and
@@ -524,6 +526,8 @@ func TestARefusalInTheExclusiveHoldLeavesTheFilesBuffersAndTrim(t *testing.T) {
 			"chunk list", vfs.SetAttr{Size: sa24U64(10), Mode: sa24U32(0o600)}},
 		{"whose size-change body would record a shorter trim on the second chunk",
 			vfs.SetAttr{Size: sa24U64(4500), Mode: sa24U32(0o600)}},
+		{"whose size-change body would drop the buffered chunk whole and release its charge, drop the second " +
+			"chunk's trim and cut the chunk list to none", vfs.SetAttr{Size: sa24U64(0), Mode: sa24U32(0o600)}},
 	}
 	for _, tc := range cases {
 		a := sa24GetAttr(e, fs, h, `GetAttr of "f.bin" before the refused call`, where)
@@ -575,8 +579,8 @@ func TestARefusalInTheExclusiveHoldLeavesTheFilesBuffersAndTrim(t *testing.T) {
 		}
 	}
 
-	if err := e.sync(fs, "the Sync after the two refused calls", where); err != nil {
-		t.Fatalf("the Sync after the two refused calls = %v, want nil against a healthy store (%s)", err, where)
+	if err := e.sync(fs, "the Sync after the three refused calls", where); err != nil {
+		t.Fatalf("the Sync after the three refused calls = %v, want nil against a healthy store (%s)", err, where)
 	}
 	rwhere := where + ", the remount"
 	if rm := e.remount(rwhere); rm != nil {
@@ -591,7 +595,7 @@ func TestARefusalInTheExclusiveHoldLeavesTheFilesBuffersAndTrim(t *testing.T) {
 			data, err := e.readFile(rm, l.h, `reading "f.bin" whole on the remount`, rwhere)
 			if err != nil || !bytes.Equal(data, b1) {
 				t.Errorf("on a remount after the Sync, reading \"f.bin\" whole gives %d bytes (err %v), want b1, "+
-					"5000 bytes: the buffers and the trim were committed as they stood, after two refused calls left "+
+					"5000 bytes: the buffers and the trim were committed as they stood, after three refused calls left "+
 					"them as they were (ADR 0024 section 7, S7; %s)", len(data), err, rwhere)
 			}
 		}
