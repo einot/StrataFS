@@ -1206,11 +1206,13 @@ func (f *FS) loadChunk(ctx context.Context, ref chunkRef) ([]byte, error) {
 	}
 	// The key is the SHA-256 of the contents, so checking what came back costs
 	// one hash of bytes already in memory and catches bit rot, a truncated
-	// transfer that still returned 200, and our own mixed-up references. Bad
-	// data must not reach the cache or the known-chunk set: a hash recorded as
-	// present would let a later putChunk of the correct content skip its
-	// upload, cementing the corruption. So only a verified fetch records its
-	// hash: with verification off, nothing here knows the bytes are good.
+	// transfer that still returned 200, and our own mixed-up references. With
+	// verification on, bad data must not reach the cache or the known-chunk
+	// set: a hash recorded as present would let a later putChunk of the correct
+	// content skip its upload, cementing the corruption. With verification off,
+	// the cache takes whatever the bucket returned (ADR 0004 §1), but the hash
+	// is not recorded as known, since nothing here knows the bytes are good.
+	// putChunk's Head can still skip that upload (#30).
 	if !f.skipVerify {
 		sum := sha256.Sum256(data)
 		got := hex.EncodeToString(sum[:])
