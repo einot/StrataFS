@@ -6,16 +6,19 @@ package blobfs
 // SkipChunkVerification leaves a fetched chunk unchecked), and
 // internal/vfs/vfs.go.
 //
-// The rule: a hash is known to a mount only when the mount has evidence that
-// the bucket holds that hash's bytes. A fetch it verified is such evidence. A
-// fetch it did not verify is not, since the bytes may not match the hash, so it
-// must not spare a later write of those bytes from asking the store. Storing
-// the hash itself, or a Head that found it, still counts on a mount with
-// verification off.
+// #105's rule: a fetch the mount did not verify must not spare a later write of
+// those bytes from asking the store, since the bytes may not match the hash. A
+// fetch it verified does spare the write.
+//
+// TestUnverifiedMountKnowsAHashItStored and
+// TestUnverifiedMountKnowsAHashItsHeadFound are controls against a #105 fix that
+// goes too far, such as a mount with verification off that never marks anything
+// known. The second also records what today's Head path does, until #30 decides
+// it: its own doc comment says why a #30 fix may change or remove it.
 //
 // What the tests observe is the store's Head of the chunk's key, which the
-// harness records, beside FS.isKnown. A Head is what a write of bytes whose hash
-// is not known makes, and a write of a known hash makes none.
+// harness records. A write of bytes the mount has not been spared asking about
+// makes one, and a write it has been spared asking about makes none.
 //
 // Not covered, on purpose:
 //   - that a corrupt object gets repaired. The Head still finds the object and
@@ -36,9 +39,10 @@ package blobfs
 //
 // The safety rules are ADR 0011 section 7's as ADR 0023 section 11 applies them:
 // a *store.Local under t.TempDir() behind an unarmed uc43Store; every New and
-// every FS call in uc43Go, waited for under uc43Bound; no time.Sleep, no polling
-// and no t.Parallel. The bucket is inspected through the inner store only after
-// the harness's records have been read.
+// every FS call in uc43Go, waited for under uc43Bound; no time.Sleep. The bucket
+// is inspected through the inner store only after the harness's records have
+// been read. Two more rules come from the header of unlocked_commit_test.go, not
+// from either ADR: no polling and no t.Parallel.
 
 import (
 	"bytes"
@@ -80,13 +84,6 @@ func uk105IsFetch(c uc43Call) bool {
 	return c.op == "Get" || c.op == "GetRange" || c.op == "GetWithETag"
 }
 
-// uk105Known returns fs.isKnown of uk105Chunk's hash.
-func uk105Known(e *uc43Env, fs *FS, where string) bool {
-	e.t.Helper()
-	hash := uk105Hash()
-	return uc43Go(e, func() bool { return fs.isKnown(hash) }).wait(e.t, "isKnown of the chunk's hash", where)
-}
-
 // uk105Mount runs New on the harness, with SkipChunkVerification as given and
 // the rest of the Config uc43Config's; it must succeed.
 func uk105Mount(e *uc43Env, skipVerification bool, where string) *FS {
@@ -125,20 +122,14 @@ func uk105WriteAndSync(e *uc43Env, fs *FS, name, where string) []uc43Call {
 
 // uk105FetchOnFreshMount stores uk105Chunk through one mount, makes a fresh
 // mount with SkipChunkVerification as given, and has it read the chunk. It
-// requires what the tests stand on: the fresh mount does not know the hash
-// before the read, and the read returned the chunk's bytes from the store. It
-// returns the fresh mount.
+// requires what the tests stand on: the read returned the chunk's bytes from
+// the store. It returns the fresh mount.
 func uk105FetchOnFreshMount(e *uc43Env, skipVerification bool, where string) *FS {
 	e.t.Helper()
 	const name = "seed"
 	uk105WriteAndSync(e, e.newFS(where), name, where)
 
 	fs := uk105Mount(e, skipVerification, where)
-	if uk105Known(e, fs, where) {
-		e.t.Fatalf("a fresh mount knows the chunk's hash before it has read the chunk, want it not known: the test "+
-			"rests on the read being the first evidence this mount has of the hash (#105; %s)", where)
-	}
-
 	mark := len(e.h.records())
 	l := e.lookup(fs, e.root(fs, where), name, where)
 	if l.err != nil {
@@ -157,67 +148,61 @@ func uk105FetchOnFreshMount(e *uc43Env, skipVerification bool, where string) *FS
 	calls := e.h.records()[mark:]
 	if len(uc43Filter(calls, uk105IsFetch)) == 0 {
 		e.t.Fatalf("the fresh mount's Read made no successful read of %q from the store, want one: it shares only the "+
-			"bucket with the mount that wrote the chunk, and a test of what a fetch marks needs a fetch (%s); store "+
-			"calls made: %v", uk105Key(), where, calls)
+			"bucket with the mount that wrote the chunk, and a test of what a fetch does to a later write needs a "+
+			"fetch (%s); store calls made: %v", uk105Key(), where, calls)
 	}
 	return fs
 }
 
-// TestUnverifiedFetchDoesNotMarkItsHashKnown pins #105's done-when: a mount with
-// SkipChunkVerification that fetches a chunk from the store has not marked the
-// chunk's hash known, since nothing checked the bytes against the hash, so a
-// later write of the same bytes, committed by Sync, makes a Head of the chunk's
-// key.
+// TestUnverifiedFetchDoesNotMarkItsHashKnown pins #105's done-when, seen through
+// the Head a write makes: after a mount with SkipChunkVerification fetches a
+// chunk from the store, a later write of the same bytes, committed by Sync,
+// makes a Head of the chunk's key. Nothing checked the fetched bytes against the
+// hash, so the fetch must not spare the write from asking the store.
 func TestUnverifiedFetchDoesNotMarkItsHashKnown(t *testing.T) {
-	const where = "#105: an unverified fetch is no evidence that the bucket holds the hash's bytes"
+	const where = "#105: an unverified fetch must not spare a later write of its bytes a Head"
 	e := uc43Setup(t)
 	fs := uk105FetchOnFreshMount(e, true, where)
 
-	if uk105Known(e, fs, where) {
-		t.Errorf("after a fetch with SkipChunkVerification, isKnown of the chunk's hash = true, want false: the fetch "+
-			"did not verify the bytes, so it must not mark the hash known (%s)", where)
-	}
-
 	calls := uk105WriteAndSync(e, fs, "after-fetch", where)
 	if len(uc43Filter(calls, uk105IsHead)) == 0 {
-		t.Errorf("a write of the fetched bytes, committed by Sync, made no Head of %q, want at least one: the hash "+
-			"came only from an unverified fetch, so the mount must ask the store about it rather than treat it as "+
-			"known (%s); store calls made: %v", uk105Key(), where, calls)
+		t.Errorf("a write of the fetched bytes, committed by Sync, made no Head of %q, want at least one: the mount "+
+			"had those bytes only from a fetch it did not verify, so the fetch must not spare the write from asking "+
+			"the store (%s); store calls made: %v", uk105Key(), where, calls)
 	}
 }
 
 // TestVerifiedFetchMarksItsHashKnown is the control for #105: the same sequence
 // on a mount with verification on. Its fetch checked the bytes against the hash,
-// so the hash is known and the same later write makes no Head of the chunk's
-// key. It keeps the fix for #105 scoped to the unverified path.
+// so the same later write makes no Head of the chunk's key. It keeps the fix for
+// #105 scoped to the unverified path.
 func TestVerifiedFetchMarksItsHashKnown(t *testing.T) {
-	const where = "#105's control: a verified fetch is evidence that the bucket holds the hash's bytes"
+	const where = "#105's control: a verified fetch spares a later write of its bytes a Head"
 	e := uc43Setup(t)
 	fs := uk105FetchOnFreshMount(e, false, where)
 
-	if !uk105Known(e, fs, where) {
-		t.Errorf("after a verified fetch, isKnown of the chunk's hash = false, want true: the fetch checked the bytes "+
-			"against the hash, so the mount knows the bucket holds them (%s)", where)
-	}
-
 	calls := uk105WriteAndSync(e, fs, "after-fetch", where)
 	if heads := uc43Filter(calls, uk105IsHead); len(heads) != 0 {
-		t.Errorf("a write of the fetched bytes, committed by Sync, made the Heads %v of %q, want none: the verified "+
-			"fetch marked the hash known, and a known hash needs no question to the store (%s)",
+		t.Errorf("a write of the fetched bytes, committed by Sync, made the Heads %v of %q, want none: the fetch "+
+			"checked the bytes against the hash, so the write need not ask the store about them (%s)",
 			heads, uk105Key(), where)
 	}
 }
 
-// TestUnverifiedMountKnowsAHashItsHeadFound pins the part of #105's behaviour
-// that a fix must keep: with verification off, a Head that found the object is
-// still evidence. After the write and Sync of
-// TestUnverifiedFetchDoesNotMarkItsHashKnown, whose Head found the object, a
-// further write of the same bytes makes no further Head of the chunk's key.
+// TestUnverifiedMountKnowsAHashItsHeadFound is a control against an over-broad
+// #105 fix, such as a mount with verification off that never marks anything
+// known: after a first write of the fetched bytes, whose Head found the object,
+// a further write of the same bytes makes no further Head of the chunk's key.
+//
+// It records today's Head path until #30 decides it, and is no requirement of
+// #105. A Head that finds an object shows only that an object exists at the key,
+// which is weaker than the unverified fetch #105 stops trusting, so a #30 fix may
+// change or remove this test.
 //
 // It requires the first write to have made that Head, so that it cannot pass
-// merely because the unverified fetch marked the hash known.
+// merely because the unverified fetch spared the write its Head.
 func TestUnverifiedMountKnowsAHashItsHeadFound(t *testing.T) {
-	const where = "#105: with verification off, a Head that found the object still marks its hash known"
+	const where = "#105's control against an over-broad fix, and today's Head path until #30 decides it"
 	e := uc43Setup(t)
 	fs := uk105FetchOnFreshMount(e, true, where)
 
@@ -225,38 +210,30 @@ func TestUnverifiedMountKnowsAHashItsHeadFound(t *testing.T) {
 	heads := uc43Filter(first, uk105IsHead)
 	if len(heads) == 0 {
 		t.Fatalf("setup: the first write of the fetched bytes made no Head of %q, want one: without it this test "+
-			"would pass with the hash marked known by the unverified fetch, which is #105's defect and not what it "+
-			"pins (%s); store calls made: %v", uk105Key(), where, first)
+			"would pass because the unverified fetch spared the write its Head, which is #105's defect and not what "+
+			"this test records (%s); store calls made: %v", uk105Key(), where, first)
 	}
 	if heads[len(heads)-1].err != nil {
 		t.Fatalf("setup: the first write's Head of %q returned %v, want nil: the seeding mount stored the object, so "+
 			"the Head must find it (%s)", uk105Key(), heads[len(heads)-1].err, where)
 	}
-	if !uk105Known(e, fs, where) {
-		t.Errorf("after a Head that found the object, isKnown of the chunk's hash = false, want true: the store "+
-			"answered for the hash (%s)", where)
-	}
 
 	second := uk105WriteAndSync(e, fs, "after-head", where)
 	if again := uc43Filter(second, uk105IsHead); len(again) != 0 {
-		t.Errorf("a further write of the same bytes made the Heads %v of %q, want none: the first write's Head found "+
-			"the object, so the hash is known and the store need not be asked twice (%s)", again, uk105Key(), where)
+		t.Errorf("a further write of the same bytes made the Heads %v of %q, want none: today a Head that found the "+
+			"object spares later writes of those bytes another, and a #105 fix must not take that away, though #30 "+
+			"may (%s)", again, uk105Key(), where)
 	}
 }
 
-// TestUnverifiedMountKnowsAHashItStored pins the other part of #105's behaviour
-// that a fix must keep: with verification off, a mount that stored a hash itself
-// knows it, with no fetch involved, and a further write of the same bytes makes
-// no Head of the chunk's key.
+// TestUnverifiedMountKnowsAHashItStored is a control against an over-broad #105
+// fix: with verification off and no fetch involved, a mount that stored a chunk
+// itself makes no Head of the chunk's key on a further write of the same bytes.
 func TestUnverifiedMountKnowsAHashItStored(t *testing.T) {
-	const where = "#105: with verification off, a hash the mount stored itself is known"
+	const where = "#105's control against an over-broad fix: a mount with verification off need not ask about a " +
+		"chunk it stored itself"
 	e := uc43Setup(t)
 	fs := uk105Mount(e, true, where)
-
-	if uk105Known(e, fs, where) {
-		t.Fatalf("a mount over an empty bucket knows the chunk's hash before anything wrote it, want it not known: "+
-			"the test rests on the write being the mount's first evidence of the hash (%s)", where)
-	}
 
 	uk105WriteAndSync(e, fs, "first", where)
 	stored, err := e.innerGet(uk105Key(), where)
@@ -268,14 +245,11 @@ func TestUnverifiedMountKnowsAHashItStored(t *testing.T) {
 		t.Fatalf("after the commit, the object at %q is %d bytes that are not the %d written, want the chunk: its key "+
 			"is the hash of its bytes (%s)", uk105Key(), len(stored), len(uk105Chunk()), where)
 	}
-	if !uk105Known(e, fs, where) {
-		t.Errorf("after the mount stored the chunk, isKnown of its hash = false, want true: the mount put those bytes "+
-			"there itself, whatever SkipChunkVerification says about what it fetches (%s)", where)
-	}
 
 	second := uk105WriteAndSync(e, fs, "second", where)
 	if heads := uc43Filter(second, uk105IsHead); len(heads) != 0 {
-		t.Errorf("a further write of the same bytes made the Heads %v of %q, want none: the mount stored the hash "+
-			"itself, so it is known and the store need not be asked (%s)", heads, uk105Key(), where)
+		t.Errorf("a further write of the same bytes made the Heads %v of %q, want none: the mount put those bytes "+
+			"there itself, whatever SkipChunkVerification says about what it fetches, so the store need not be asked "+
+			"(%s)", heads, uk105Key(), where)
 	}
 }
