@@ -1209,7 +1209,8 @@ func (f *FS) loadChunk(ctx context.Context, ref chunkRef) ([]byte, error) {
 	// transfer that still returned 200, and our own mixed-up references. Bad
 	// data must not reach the cache or the known-chunk set: a hash recorded as
 	// present would let a later putChunk of the correct content skip its
-	// upload, cementing the corruption.
+	// upload, cementing the corruption. So only a verified fetch records its
+	// hash: with verification off, nothing here knows the bytes are good.
 	if !f.skipVerify {
 		sum := sha256.Sum256(data)
 		got := hex.EncodeToString(sum[:])
@@ -1223,7 +1224,9 @@ func (f *FS) loadChunk(ctx context.Context, ref chunkRef) ([]byte, error) {
 		}
 	}
 	f.cache.put(ref.Hash, data)
-	f.markKnown(ref.Hash)
+	if !f.skipVerify {
+		f.markKnown(ref.Hash)
+	}
 	return data, nil
 }
 
