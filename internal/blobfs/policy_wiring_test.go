@@ -42,13 +42,16 @@ package blobfs
 // methods are made as uc43Caller, which is vfs.Caller{UID: 501, GID: 20}, the
 // same identity as testCaller.
 //
-// Not covered, on purpose: ADR 0014 section 11's unpinned rows U1 to U6 (an
-// owner lacking its own bits, read through execute alone, Read or Write of a
+// Not covered, on purpose: ADR 0014 section 11's rows U1 to U6 (an owner
+// lacking its own bits, read through execute alone, Read or Write of a
 // symlink, the sticky bit, AccessBits for a directory with read but not
 // search or write but not search, times set by a non-owner), how sa.GID at
 // creation is handled (#98), and the Dst field of any request but OpRename's
 // and the UID field of any request but OpChown's, which ADR 0014 section 5
-// says no row reads.
+// says no row reads. Of those rows, an owner lacking its own bits (U1) and
+// read through execute alone (U2) are pinned for a regular file since ADR
+// 0025 section 6, and are tested in owner_access_test.go; W4 still leaves
+// them out. U3 to U6 stay unpinned.
 
 import (
 	"bytes"
@@ -996,14 +999,17 @@ type pwCheck struct {
 // regular file 0o600; fg640 and fg604, regular files of those modes with
 // bytes; and fo, a regular file 0o664. ro is made 0o755, k made in it, and ro
 // then set to 0o555 by its owner, so that no setup step relies on an owner
-// lacking its own bits (U1). Each row is a call, its caller, and the status
+// lacking its own bits: ro is a directory, whose owner is held to its mode
+// (ADR 0025 section 1). Each row is a call, its caller, and the status
 // it must return, compared with == against the bare vfs.Status. Then the
 // requested uid under Unix(), and Access with every bit asked for.
 //
 // Rows that would pin U1 to U6 are left out: no owner lacking its own bits, no
 // read through execute alone, no Read or Write of a symlink, no sticky bit, no
 // directory with read but not search, or write but not search, asked of
-// Access, and no times set by a non-owner.
+// Access, and no times set by a non-owner. The first two, U1 and U2, are
+// pinned for a regular file since ADR 0025 section 6 and tested in
+// owner_access_test.go; W4 still leaves them out.
 func TestTheUnixRowsAreUnchangedThroughTheFS(t *testing.T) {
 	const where = "W4, ADR 0014 sections 5, 6 and 11"
 	e := uc43Setup(t)

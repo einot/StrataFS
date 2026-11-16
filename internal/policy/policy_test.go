@@ -9,7 +9,14 @@ package policy_test
 //	§5  the policy API, the Permits rule, the Unix table, AccessBits, All, Func
 //	    and purity
 //	§11 the test surface, P1 to P13, which each test cites, and the unpinned
-//	    rows U1 to U6, which no test here relies on
+//	    rows U1 to U6
+//
+// Since ADR 0025 §6, U1 and U2 are pinned for a regular file, as allowed: the
+// owner override (ADR 0025 §1, line 3) and read with execute (§2, line 4).
+// Both are asked by A2's rows in unixCases() and p5Cases() below, and by A1,
+// A3 and A4 in owner_access_test.go. U3 is pinned only as a refusal, where
+// Permits refuses the row's permission, by A2's symlink rows and A1. U4, U5,
+// U6 and the rest of U3 stay unpinned, and no test here relies on them.
 //
 // The oracles here, oracleInGroup and oraclePermits, are written from §5's
 // rules alone. Every refusal Unix() gives is compared with == against the bare
@@ -350,25 +357,38 @@ func TestPermitsJudgesByExactlyOneClass(t *testing.T) {
 
 // unixCase is one request to Unix().Check and its pinned answer: nil to
 // allow, the bare vfs.Status to refuse, or, when refusedOnly is set, only that
-// it is refused (U6's refusal, §11).
+// it is refused (U6's refusal, §11, and U3's refusing half, ADR 0025 §6), with
+// rule saying which row pins the refusal.
 type unixCase struct {
 	name        string
 	req         policy.Request
 	want        error
 	refusedOnly bool
+	rule        string
 }
 
+// oaU6Rule is the rule of a case U6 pins as a refusal only.
+const oaU6Rule = "neither root nor the owner, and no write permission (ADR 0014 §5's OpSetTimes row; §11 U6 pins " +
+	"only that it is refused)"
+
+// oaU3Rule is the rule of a case ADR 0025 §6 pins as a refusal only: U3's
+// refusing half.
+const oaU3Rule = "a symlink is neither a regular file nor a directory, so neither the owner override nor read with " +
+	"execute reaches it, and Permits refuses it the row's permission (ADR 0025 §1 and §6 A2; ADR 0014 §11 U3's " +
+	"refusing half, pinned only as a refusal)"
+
 // unixCases is P4's table: for each pinned row of §5's Unix table, at least one
-// allowing and one refusing request for each check in the row. It avoids
-// every row U1 to U6 leave unpinned (§11):
+// allowing and one refusing request for each check in the row. Since ADR 0025
+// §6 it also holds A2's rows: U1 and U2, pinned for a regular file as allowed
+// by ADR 0025 §1's lines 3 and 4, asked in the OpRead row and in the OpWrite
+// and OpTruncate row; and U3's refusing half, asked of symlinks as refusedOnly.
+// It avoids every row that stays unpinned (§11; ADR 0025 §6):
 //
-// U1: no owner whose owner bits lack the permission is asked OpRead, OpWrite
-// or OpTruncate; U2: no OpRead refusal has a class with
-// execute but not read; U3: OpRead, OpWrite and OpTruncate are asked only of
-// vfs.TypeReg and vfs.TypeDir; U4: no directory has 0o1000 set; U5 is
-// AccessBits', not these; U6: no OpSetTimes asks for a caller who is neither
-// root nor the owner but may write, and where such a caller may not write the
-// case is refusedOnly.
+// U3: OpRead, OpWrite and OpTruncate are asked of a symlink only where Permits
+// refuses the row's permission, and then the case is refusedOnly; U4: no
+// directory has 0o1000 set; U5 is AccessBits', not these; U6: no OpSetTimes
+// asks for a caller who is neither root nor the owner but may write, and where
+// such a caller may not write the case is refusedOnly.
 func unixCases() []unixCase {
 	reg, dir, lnk := vfs.TypeReg, vfs.TypeDir, vfs.TypeLnk
 	var cs []unixCase
@@ -376,11 +396,16 @@ func unixCases() []unixCase {
 		cs = append(cs, unixCase{name: name, req: r, want: want})
 	}
 	refused := func(name string, r policy.Request) {
-		cs = append(cs, unixCase{name: name, req: r, refusedOnly: true})
+		cs = append(cs, unixCase{name: name, req: r, refusedOnly: true, rule: oaU6Rule})
+	}
+	refusedU3 := func(name string, r policy.Request) {
+		cs = append(cs, unixCase{name: name, req: r, refusedOnly: true, rule: oaU3Rule})
 	}
 
 	// OpRead: ErrIsDir if Object is a directory; ErrAcces unless
-	// Permits(Caller, Object, PermRead).
+	// Permits(Caller, Object, PermRead). Since ADR 0025 §1, also nil for a
+	// regular file's owner (line 3), and for a regular file if
+	// Permits(Caller, Object, PermExec) (line 4, §2).
 	add("OpRead: the owner, of 0o400", mkReq(policy.OpRead, callerOwner(), mkObj(reg, 0o400)), nil)
 	add("OpRead: a primary-group member, of 0o040", mkReq(policy.OpRead, callerGroup(), mkObj(reg, 0o040)), nil)
 	add("OpRead: a supplementary-group member, of 0o040", mkReq(policy.OpRead, callerSupp(), mkObj(reg, 0o040)), nil)
@@ -392,8 +417,27 @@ func unixCases() []unixCase {
 	add("OpRead: a supplementary-group member, of 0o620", mkReq(policy.OpRead, callerSupp(), mkObj(reg, 0o620)), vfs.ErrAcces)
 	add("OpRead: other, of 0o662", mkReq(policy.OpRead, callerOther(), mkObj(reg, 0o662)), vfs.ErrAcces)
 
+	// ADR 0025 §6, A2: OpRead of a regular file. The owner whatever the owner
+	// bits (line 3, U1); a caller whose one class has execute (line 4, U2).
+	add("OpRead: the owner, of 0o000", mkReq(policy.OpRead, callerOwner(), mkObj(reg, 0)), nil)
+	add("OpRead: the owner, of 0o077", mkReq(policy.OpRead, callerOwner(), mkObj(reg, 0o077)), nil)
+	add("OpRead: the owner, also in the group, of 0o000", mkReq(policy.OpRead, callerOwnerInGroup(), mkObj(reg, 0)), nil)
+	add("OpRead: a primary-group member, of 0o010", mkReq(policy.OpRead, callerGroup(), mkObj(reg, 0o010)), nil)
+	add("OpRead: a supplementary-group member, of 0o010", mkReq(policy.OpRead, callerSupp(), mkObj(reg, 0o010)), nil)
+	add("OpRead: other, of 0o001", mkReq(policy.OpRead, callerOther(), mkObj(reg, 0o001)), nil)
+	// One class judges: neither another class's execute nor write gives a read.
+	add("OpRead: a primary-group member, of 0o701", mkReq(policy.OpRead, callerGroup(), mkObj(reg, 0o701)), vfs.ErrAcces)
+	add("OpRead: a primary-group member, of 0o020", mkReq(policy.OpRead, callerGroup(), mkObj(reg, 0o020)), vfs.ErrAcces)
+	add("OpRead: other, of 0o110", mkReq(policy.OpRead, callerOther(), mkObj(reg, 0o110)), vfs.ErrAcces)
+	add("OpRead: other, of 0o002", mkReq(policy.OpRead, callerOther(), mkObj(reg, 0o002)), vfs.ErrAcces)
+	// Lines 3 and 4 do not reach a symlink: refused where Permits refuses
+	// (U3's refusing half, pinned only as a refusal).
+	refusedU3("OpRead: the owner, of a symlink 0o000", mkReq(policy.OpRead, callerOwner(), mkObj(lnk, 0)))
+	refusedU3("OpRead: other, of a symlink 0o001", mkReq(policy.OpRead, callerOther(), mkObj(lnk, 0o001)))
+
 	// OpWrite and OpTruncate: ErrIsDir if Object is a directory; ErrAcces
-	// unless Permits(Caller, Object, PermWrite).
+	// unless Permits(Caller, Object, PermWrite). Since ADR 0025 §1, also nil
+	// for a regular file's owner (line 3).
 	for _, op := range []policy.Op{policy.OpWrite, policy.OpTruncate} {
 		n := opName(op)
 		add(n+": the owner, of 0o200", mkReq(op, callerOwner(), mkObj(reg, 0o200)), nil)
@@ -406,6 +450,16 @@ func unixCases() []unixCase {
 		add(n+": a primary-group member, of 0o747", mkReq(op, callerGroup(), mkObj(reg, 0o747)), vfs.ErrAcces)
 		add(n+": a supplementary-group member, of 0o757", mkReq(op, callerSupp(), mkObj(reg, 0o757)), vfs.ErrAcces)
 		add(n+": other, of 0o775", mkReq(op, callerOther(), mkObj(reg, 0o775)), vfs.ErrAcces)
+
+		// ADR 0025 §6, A2: the owner of a regular file whatever the owner bits
+		// (line 3, U1); execute gives no write.
+		add(n+": the owner, of 0o000", mkReq(op, callerOwner(), mkObj(reg, 0)), nil)
+		add(n+": the owner, of 0o444", mkReq(op, callerOwner(), mkObj(reg, 0o444)), nil)
+		add(n+": the owner, also in the group, of 0o555", mkReq(op, callerOwnerInGroup(), mkObj(reg, 0o555)), nil)
+		add(n+": a primary-group member, of 0o010", mkReq(op, callerGroup(), mkObj(reg, 0o010)), vfs.ErrAcces)
+		add(n+": other, of 0o001", mkReq(op, callerOther(), mkObj(reg, 0o001)), vfs.ErrAcces)
+		// Line 3 does not reach a symlink (U3's refusing half).
+		refusedU3(n+": the owner, of a symlink 0o000", mkReq(op, callerOwner(), mkObj(lnk, 0)))
 	}
 
 	// OpChmod: ErrPerm unless root or the owner.
@@ -521,12 +575,19 @@ func unixCases() []unixCase {
 }
 
 // p5Cases are requests where both a row's type check and its permission check
-// fail, so the type check's refusal must be the one given (P5). None is asked
-// of the owner for OpRead, OpWrite or OpTruncate (U1), and OpRead,
-// OpWrite and OpTruncate are asked only of directories (U3).
+// fail, so the type check's refusal must be the one given (P5). OpRead,
+// OpWrite and OpTruncate are asked only of directories (U3). Since ADR 0025
+// §6, where U1 and U2 are pinned for a regular file, they are also asked of a
+// directory's owner whose owner bits are empty, and OpRead of a directory
+// whose other bits have execute alone (A2): line 1 refuses a directory before
+// the owner override or read with execute is looked at (ADR 0025 §1).
 func p5Cases() []unixCase {
 	reg, dir, lnk := vfs.TypeReg, vfs.TypeDir, vfs.TypeLnk
 	return []unixCase{
+		{name: "OpRead: the owner, of a directory 0o000", req: mkReq(policy.OpRead, callerOwner(), mkObj(dir, 0)), want: vfs.ErrIsDir},
+		{name: "OpWrite: the owner, of a directory 0o000", req: mkReq(policy.OpWrite, callerOwner(), mkObj(dir, 0)), want: vfs.ErrIsDir},
+		{name: "OpTruncate: the owner, of a directory 0o000", req: mkReq(policy.OpTruncate, callerOwner(), mkObj(dir, 0)), want: vfs.ErrIsDir},
+		{name: "OpRead: other, of a directory 0o111", req: mkReq(policy.OpRead, callerOther(), mkObj(dir, 0o111)), want: vfs.ErrIsDir},
 		{name: "OpRead: other, of a directory 0o000", req: mkReq(policy.OpRead, callerOther(), mkObj(dir, 0)), want: vfs.ErrIsDir},
 		{name: "OpRead: a primary-group member, of a directory 0o000", req: mkReq(policy.OpRead, callerGroup(), mkObj(dir, 0)), want: vfs.ErrIsDir},
 		{name: "OpRead: root, of a directory 0o000", req: mkReq(policy.OpRead, callerRoot(), mkObj(dir, 0)), want: vfs.ErrIsDir},
@@ -554,14 +615,14 @@ func unknownOps() []policy.Op {
 }
 
 // checkUnix asserts one unixCase's pinned answer. A refusal must be the bare
-// vfs.Status, compared with == (§5: never wrapped).
+// vfs.Status, compared with == (§5: never wrapped). A case pinned as a
+// refusal only names its own rule, tc.rule, when it is allowed.
 func checkUnix(t *testing.T, what string, tc unixCase, err error) {
 	t.Helper()
 	switch {
 	case tc.refusedOnly:
 		if err == nil {
-			t.Errorf("%s: %s: Check(%+v) = nil, want a refusal: neither root nor the owner, and no write permission (ADR 0014 §5's OpSetTimes row; §11 U6 pins only that it is refused)",
-				what, tc.name, tc.req)
+			t.Errorf("%s: %s: Check(%+v) = nil, want a refusal: %s", what, tc.name, tc.req, tc.rule)
 		}
 	case tc.want == nil:
 		if err != nil {
@@ -577,7 +638,9 @@ func checkUnix(t *testing.T, what string, tc unixCase, err error) {
 
 // TestUnixPinnedRows covers P4 (ADR 0014 §11): every pinned row of §5's Unix
 // table, allowing and refusing, with err == the vfs.Status itself, and, for
-// the refusal U6 pins as a refusal only, err non-nil.
+// the refusals U6 and U3's refusing half pin as refusals only, err non-nil.
+// Since ADR 0025 §6 its table also holds A2's rows, which pin U1 and U2 for a
+// regular file as allowed.
 func TestUnixPinnedRows(t *testing.T) {
 	u := policy.Unix()
 	for _, tc := range unixCases() {

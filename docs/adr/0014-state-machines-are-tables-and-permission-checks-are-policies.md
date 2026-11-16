@@ -88,6 +88,16 @@ and `trace.tsv` is unchanged (Assumption 49). §11's W2 paragraph answers
 test-author's question: its `FS.changes` and `FS.dirty` check is meant for
 every row, the two allowed `Read`s included, as a restatement of ADR 0005
 §2's holds (Assumption 52). No test changes, and nothing else moves.
+**Revised:** 2026-11-13 — cross-reference only, for ADR 0025, which decides
+#93 and replaces two parts of this ADR: §5's bullets for the `OpRead` row and
+for the `OpWrite` and `OpTruncate` row, which since ADR 0025 §1 and §2 also
+allow the owner of a regular file whatever its mode, and allow `OpRead` on a
+regular file to a caller with execute permission; and §11's U1 and U2, which
+ADR 0025 §6 pins for a regular file, with the refusing half of U3 pinned as a
+refusal only. §5 and §11 each gain a sentence saying so. `Permits`,
+`AccessBits`, every other row, the stages and §6's request lists are
+unchanged, the text of both parts stays as the record, and every test this
+ADR pins stands.
 **Issue:** #114
 
 ## Context
@@ -521,7 +531,11 @@ Every rule below is normative:
   `Object` always; `UID` for `OpChown`; `GID` for `OpChgrp`; `Dst` for
   `OpRename`. The other fields change nothing. For every `Op`, and every
   request `blobfs` makes today, this is exactly the inline check it replaces,
-  the rows §11 leaves unpinned included.
+  the rows §11 leaves unpinned included. Since ADR 0025 the `OpRead` row and
+  the `OpWrite` and `OpTruncate` row are that ADR's §1, which also allows
+  the owner of a regular file all three, and `OpRead` on a regular file to a
+  caller for whom `Permits(Caller, Object, PermExec)`; `Permits` and
+  `AccessBits` are as this section has them.
 - `Unix` is a function, not an exported variable, so there is no package-level
   authority anyone can reassign. It returns a value that holds no state, and
   two calls decide alike. `policy` exports no variable at all.
@@ -1074,7 +1088,9 @@ Every name is spelled as in Go.
   `OpChgrp` and `Dst` for `OpRename`.
 
 **Unpinned rows.** Tests must not rely on these. Each is today's behaviour,
-which a filed defect will change:
+which a filed defect will change. Since ADR 0025 §6, U1 and U2 are pinned
+for a regular file, as allowed, and U3 is pinned as a refusal only where
+`Permits` refuses; U4 to U6, and the rest of U3, stay unpinned:
 
 - **U1.** `OpRead`, `OpWrite` or `OpTruncate` by an owner who is not root,
   whose owner bits lack the permission (#93; RFC 1813 §4.4's owner override).
