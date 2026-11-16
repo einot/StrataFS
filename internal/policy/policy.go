@@ -6,7 +6,8 @@
 // filesystem may evaluate a policy inside whatever lock it holds. A refusal is
 // a bare vfs.Status, which the NFS layer passes to the client unchanged.
 //
-// Spec: docs/adr/0014-state-machines-are-tables-and-permission-checks-are-policies.md §4, §5
+// Spec: docs/adr/0014-state-machines-are-tables-and-permission-checks-are-policies.md §4, §5;
+// docs/adr/0025-a-files-owner-may-read-and-write-it-whatever-its-mode.md §1, §2, §3
 package policy
 
 import "strata/internal/vfs"
@@ -172,6 +173,10 @@ func Unix() Policy {
 // needs. An Op with no row fails closed with vfs.ErrServerFault, for every
 // caller, since it is a fault in the code that built the request rather than
 // a judgement of the caller.
+//
+// The three file rows, OpRead, OpWrite and OpTruncate, are ADR 0025 §1's, not
+// ADR 0014 §5's: they allow a regular file's owner, and OpRead a caller whom
+// the mode gives execute, past what Permits gives.
 func (unixRules) Check(r Request) error {
 	c, o := r.Caller, r.Object
 	switch r.Op {
@@ -224,15 +229,38 @@ func (unixRules) Check(r Request) error {
 	return vfs.ErrServerFault
 }
 
-// fileAccess is the row of an operation on a file's contents.
+// fileAccess is the row of an operation on a file's contents: want is PermRead
+// for OpRead, and PermWrite for OpWrite and OpTruncate. The first line that
+// holds decides (ADR 0025 §1):
+//
+//  1. vfs.ErrIsDir, if o is a directory, before any permission is looked at;
+//  2. nil, if Permits(c, o, want);
+//  3. nil, if o is a regular file and c is its owner, c.UID == o.UID. A
+//     stateless server cannot see that the owner already holds the file open,
+//     so it lets the owner past the mode (RFC 1813 §4.4);
+//  4. for a read alone, nil, if o is a regular file and
+//     Permits(c, o, PermExec), since a server cannot tell a page-in from a
+//     read (§2);
+//  5. vfs.ErrAcces otherwise.
+//
+// Lines 3 and 4 live here rather than in Permits so that AccessBits, and every
+// other row, still answer from the mode alone (§3).
 func fileAccess(c vfs.Caller, o Object, want Perm) error {
 	if o.Type == vfs.TypeDir {
 		return vfs.ErrIsDir
 	}
-	if !Permits(c, o, want) {
-		return vfs.ErrAcces
+	if Permits(c, o, want) {
+		return nil
 	}
-	return nil
+	if o.Type == vfs.TypeReg {
+		if c.UID == o.UID {
+			return nil
+		}
+		if want == PermRead && Permits(c, o, PermExec) {
+			return nil
+		}
+	}
+	return vfs.ErrAcces
 }
 
 // dirAccess is the row of an operation on a directory's entries.
@@ -254,6 +282,10 @@ func rootOrOwner(c vfs.Caller, o Object) bool {
 // AccessBits is the ACCESS answer the mode bits give c for o, as the six
 // vfs.Access bits. It carries no mount mask: masking a read-only mount's
 // write bits is the mount's business, and so is the caller's want.
+//
+// It reports the mode's permissions alone, with neither the owner override
+// nor the read that execute permission gives, which the file rows of Check
+// allow and ACCESS must not report (ADR 0025 §3; RFC 1813 §4.4).
 func AccessBits(c vfs.Caller, o Object) uint32 {
 	dir := o.Type == vfs.TypeDir
 	read := Permits(c, o, PermRead)
