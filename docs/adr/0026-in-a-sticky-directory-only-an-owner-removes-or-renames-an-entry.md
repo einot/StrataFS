@@ -2,22 +2,48 @@
 
 **Status:** Accepted
 **Date:** 2026-11-16
+**Revised:** 2026-11-20 — before merge, after coder's commit `afbda93`, read
+and not run, and to record the owner's decision on two of this ADR's
+judgement calls. §9's `Checked against` pass is made: `trace.tsv`'s rows for
+`FS.unlink` and `FS.Rename` were read against `afbda93` and hold, so the
+module's `Checked against` line, `docs/tla/README.md`'s statement of it and
+vocabulary V3's now read `afbda93`, and `trace.tsv` is unchanged
+(Assumption 25, which is new and says how far the pass went). §2 records
+what coder chose where the pins left room: the helper `stickyTakeOut`, which
+is lines 3 and 4 of both rows, and that `Rename`'s stage E uses the two
+inodes it looked up before the request. By the session's report, the owner
+decided on 2026-11-16 that a rename of a name onto itself describes no
+entry, and that the `CHANGES` line takes no `BREAKING:`; both were the
+architect's judgement until then, and *Context*, §2, §12 and Assumptions 1,
+11 and 21 now say so. Assumption 19 names the pass. The rows, the fields,
+the status, the stages and every test this ADR pins are unchanged. The
+module changed in one line of its header comment, so TLC's outcome cannot
+differ, and CLAUDE.md's merge bar still asks the session for `tla.sh full`
+on the PR.
 **Issue:** #94, #148
 
 ## Context
 
 **The owner's decisions.** Two, as ADR 0014 and ADR 0024 record them in the
-owner's words. The brief this ADR was written from gave the second in
-substance and neither in words, and nothing here claims any approval beyond
-them.
+owner's words, and a third the session reported. The brief this ADR was
+written from gave the second in substance and neither in words, and nothing
+here claims any approval beyond the three.
 
 1. On 2026-10-10: "Otherwise, follow architect's and your own
    recommendations." So this ADR is Accepted on creation, as ADRs 0015 to
    0025 were, and its design is the architect's (Assumption 1).
 2. Also on 2026-10-10: "We don't have any clients yet so any breaking changes
    are allowed until release." By the brief, such a change is still marked.
-   Whether this one is breaking is Assumption 21's judgement, which is the
-   owner's to overrule.
+   Whether this one is breaking was Assumption 21's judgement, the owner's
+   to overrule, until decision 3.
+3. On 2026-11-16, by the session's report, which gave the owner's choice of
+   an option on each of two judgement calls and not the owner's words, in
+   answer to a question of the session's that the architect was not given:
+   a rename of a name onto itself describes no entry, so that it keeps the
+   answer it had at `273f010` (§2; Assumption 11); and the `CHANGES` line
+   takes no `BREAKING:` (§12; Assumption 21). Both were the architect's
+   judgement until then. The report says nothing of any other assumption
+   here, and each of those stays the architect's.
 
 **The defects.** Both as the session gave their texts (Assumption 2).
 
@@ -477,7 +503,9 @@ perform no other action", and Linux returns before either sticky check.
 Whether a rename is onto itself is a fact about what the request names
 against the namespace, which is stage E's kind of fact and not a judgement
 of the caller (ADR 0018 §2), so `blobfs` deciding it is no inline permission
-check; the judgement of the caller is still the row's.
+check; the judgement of the caller is still the row's. By the session's
+report, the owner decided on 2026-11-16 that such a rename describes no
+entry and so keeps its answer (*Context*, decision 3).
 
 **A name that names no object describes no entry** (Assumptions 12 and 13).
 There is no owner to compare. So:
@@ -524,6 +552,35 @@ So (Assumption 10):
   That is the stages' order, permission before preconditions, as a `Mkdir`
   of a name that exists in a directory the caller cannot write answers
   `vfs.ErrAcces` and not `vfs.ErrExist`.
+
+**What coder's commit chose**, recorded against `afbda93` where the pins
+above left room (Assumption 25):
+
+- In `internal/policy/policy.go`, lines 3 and 4 of both rows are one
+  unexported function,
+  `stickyTakeOut(c vfs.Caller, dir Object, entry *Object) error`. It returns
+  nil for a nil `entry`, and for a `dir` whose mode lacks `0o1000`; nil
+  where `rootOrOwner(c, dir)`, the function `OpChmod`, `OpChown`, `OpChgrp`
+  and `OpSetTimes` already use, or where `c.UID == entry.UID`; and the bare
+  `vfs.ErrPerm` otherwise. `OpRemoveEntry` returns `dirAccess`'s refusal,
+  or else `stickyTakeOut(c, o, r.Entry)`. `OpRename`, past its two
+  unchanged checks, returns the refusal of `stickyTakeOut(c, o, r.Entry)`,
+  or else `stickyTakeOut(c, r.Dst, r.Replaced)`. `OpAddEntry` has a case of
+  its own, which is `dirAccess` alone.
+- In `internal/blobfs/fs.go`, `unlink` builds its request in place and no
+  longer calls `checkPerm`, which is unchanged and keeps its other callers.
+  `unlink` and `Rename` index the inode table only for a name the entry map
+  has, and pass `objectOf` no inode the table lacks.
+- `Rename` keeps the two inodes it looked up before the request, the one it
+  moves and the one it replaces, and its stage E uses them and does not read
+  the inode table a second time, where at `273f010` stage E made the only
+  read. The lookup and stage E are in the one hold of `FS.mu` for writing,
+  and nothing between them writes the table: the request is pure, and
+  `isAncestor` only reads. So stage E sees what a second read would see, and
+  its statuses and their order are as they were. Whether the rename is onto
+  itself is one condition, that the target name is in its entry map with
+  the inode number the source name gave, asked once the source name is
+  known to name an object.
 
 ### 3. The refusal is `vfs.ErrPerm`
 
@@ -1224,8 +1281,37 @@ is the one the row names, and what decides the action is untouched, so
   `docs/tla/manifest.tsv`. The module changes in its header comment alone,
   so TLC's outcome cannot differ from the run that calibrated those rows.
 
-That pass is not made here, since there is no commit to read. Nothing under
-`docs/tla/` changes in this ADR's own commit.
+That pass was not made with this ADR's first commit, `8c4bc42`, which had no
+commit of coder's to read and changed nothing under `docs/tla/`.
+
+**The `Checked against` pass** was made on 2026-11-20 against coder's commit
+`afbda93`, read and not run (Assumption 25). Both rows hold:
+
+- `FS.unlink` is declared on `*FS` in `internal/blobfs/fs.go` and keeps its
+  `TLA+: docs/tla/CommitProtocol.tla Mutate` line. It calls `mutable()` and
+  `validName` before its lock, takes `FS.mu` for writing by `Lock` with a
+  deferred `Unlock`, and in that hold resolves the directory, looks the name
+  up, asks its one request, and only then makes its change: the entry's
+  removal, the directory's `touchM`, `relink`, and `markDirty`. Its branch
+  for an entry that names no inode still returns before any change, which
+  is what its row's `decided`, ADR 0024 section 3, pins.
+- `FS.Rename` is declared on `*FS` in the same file and keeps its
+  `TLA+: … Mutate` line. It calls `mutable()`, and `validName` twice, before
+  its lock, takes `FS.mu` for writing the same way, and in that hold
+  resolves both directories, looks both names up, asks its one request, and
+  only then makes its change and its `markDirty`. A refusal, and a rename
+  onto itself, return before any change.
+
+Nothing in either changed but the lookups, which now precede the request,
+and what the request carries, and both come before the action. So
+`trace.tsv` is unchanged, `decided` included. The module's
+`Checked against` line, `docs/tla/README.md`'s statement of it and
+`docs/vocabulary.md` V3's moved from `555fc64` to `afbda93`. The module
+changed in that one line of its header comment and nowhere else, and gained
+no `Revised:` line, as it gained none for the passes of ADR 0024 and of
+ADR 0014's wiring. So TLC's outcome cannot differ from the run that
+calibrated the forty-five rows, and CLAUDE.md's merge bar still asks the
+session for `tla.sh full` on the PR, as above.
 
 `docs/vocabulary.md` does not otherwise change. V7 lists `Permits`,
 `UnixAllows`, `AccessBits` and the `Op` and `Perm` names, none of which is
@@ -1298,7 +1384,9 @@ lists. `docs/DESIGN.md`'s table of ADRs gains this ADR's row, and
 `docs/adr/README.md`'s index does.
 
 One `CHANGES` line, proposed for the session to record, without
-`BREAKING:` (Assumption 21):
+`BREAKING:` (Assumption 21). The session recorded it as proposed, in
+`afbda93`, and by its report the owner decided on 2026-11-16 that it takes
+no `BREAKING:` (*Context*, decision 3):
 
 > A directory's sticky bit is honoured: in a directory whose mode has 01000
 > set, REMOVE, RMDIR and RENAME of an entry, and RENAME onto an existing
@@ -1320,7 +1408,9 @@ Each is mine unless it says otherwise.
    The rest is mine: the interface (§2), the code (§3), what a rename onto
    itself and a name that names nothing ask (§2), that `ACCESS` stays as it
    is (§5), and the `CHANGES` judgement. The two an owner is most likely to
-   weigh differently are Assumptions 11 and 21.
+   weigh differently are Assumptions 11 and 21. By the session's report the
+   owner decided both, as this ADR has them, on 2026-11-16 (*Context*,
+   decision 3).
 2. **Read, not run, at `273f010`.** Every statement about the code was
    checked by reading it there; nothing was run. #94's and #148's texts are
    as the session gave them. The titles of #69, #97, #98, #100 and #101 are
@@ -1392,7 +1482,10 @@ Each is mine unless it says otherwise.
     than the RFC's sentence; whether they should be is not decided here.
     Kernel clients are not expected to send the call at all, since Linux's
     VFS returns before it reaches the filesystem; that is read from
-    `vfs_rename`, not observed.
+    `vfs_rename`, not observed. This was mine until 2026-11-16, when, by the
+    session's report, the owner decided that a rename onto itself describes
+    no entry and keeps its answer at `273f010` (*Context*, decision 3). The
+    reasoning above is kept as the reasoning; the decision is the owner's.
 12. **A name whose entry names no inode is absent** (§2), as ADR 0024 §3
     has it for `unlink` and ADR 0017 §2 for `Rename`. Such an entry has no
     owner to compare, and only a snapshot another build or a corruption
@@ -1459,7 +1552,8 @@ Each is mine unless it says otherwise.
     `tla.sh full` then** (§9). The rows are functions of one request, which
     K1 enumerates. The pass follows ADR 0014's Assumption 49: the line
     names the commit at which the trace was last checked against the code,
-    so it moves when traced code is edited, even where no row changes.
+    so it moves when traced code is edited, even where no row changes. The
+    pass was made on 2026-11-20, against `afbda93` (§9; Assumption 25).
 20. **No state, no link, no exemption** (§10). That a mode is a value and
     not a machine is ADR 0018 §2's reading of "named states", applied to an
     attribute a caller sets whole. If a later ADR gave the server a reason
@@ -1478,7 +1572,11 @@ Each is mine unless it says otherwise.
     cleanup job that ran as neither root nor the directory's owner, will
     be refused until the bit is cleared, and that is an action. If the
     owner reads it so, the same line takes the prefix. It is one line
-    because it is one change a client can tell.
+    because it is one change a client can tell. By the session's report the
+    owner decided on 2026-11-16, in answer to a question of the session's,
+    that the line takes no `BREAKING:` (*Context*, decision 3), and the
+    session recorded it without one in `afbda93`. So the judgement above is
+    no longer mine alone.
 22. **Scope** (§11). The brief named the issues that stay out, and I agree
     for each. None blocks this PR, and this PR makes none of them worse:
     it allows nothing that was refused.
@@ -1494,6 +1592,32 @@ Each is mine unless it says otherwise.
     permission "may be required". This server keeps no `..` entry, asks
     nothing, and still asks nothing: the rule here is the sticky one, for
     every type alike.
+25. **The `Checked against` pass was read, not run, and how far it went**
+    (§2, §9). At `afbda93` I read `internal/policy/policy.go` whole, and in
+    `internal/blobfs/fs.go` `unlink` and `Rename` whole, with `objectOf`,
+    `checkPerm`, `mutable`, `markDirty` and `createEntry`, which are as they
+    were at `273f010`. Nothing was run, and I cannot run git: that coder's
+    commit changes no other code `trace.tsv` names is the session's account
+    of its diff, not a comparison of mine. Every row but those two stands on
+    the pass that last read it (ADR 0023 Assumption 23; ADR 0024 §5; ADR
+    0014 Assumption 49). Two changes reached `main` between `555fc64` and
+    this branch without moving the line. ADR 0025's is in
+    `internal/policy/policy.go` alone, which the trace does not name (its
+    §7). The fix for #105 is, by `loadChunk`'s own comment and by the header
+    of `unverified_known_test.go`, in `loadChunk`, which the trace does not
+    name either; I know of no pass made for it, and none was due if that is
+    all it touched. Because `loadChunk` sits beside `putChunk`, I read the
+    rows for `FS.putChunk` and `FS.flushOpen` against `afbda93` as well, and
+    they hold: `flushOpen` takes the file's `openFile.mu` by `Lock` with a
+    deferred `Unlock`, and `FS.mu` for writing for the repoint, and
+    `putChunk` is called from it, and from `applyTrim` under it, in that
+    hold. So "for every action", which `docs/tla/README.md`'s and
+    vocabulary V3's statements of the line say, rests on this reading and
+    on those earlier passes. A `git diff` of the files `trace.tsv` names,
+    from the merge of ADR 0014's wiring to `afbda93`, would confirm it, and
+    is the session's to run if it wants more than a reading. That coder's
+    helper is named `stickyTakeOut`, and what §2 says of `Rename`'s stage
+    E, are read from the same commit.
 
 ## Alternatives considered
 
