@@ -15,7 +15,15 @@ package policy_test
 // owner override (ADR 0025 §1, line 3) and read with execute (§2, line 4).
 // Both are asked by A2's rows in unixCases() and p5Cases() below, and by A1,
 // A3 and A4 in owner_access_test.go. U3 is pinned only as a refusal, where
-// Permits refuses the row's permission, by A2's symlink rows and A1. U4, U5,
+// Permits refuses the row's permission, by A2's symlink rows and A1.
+//
+// Since ADR 0026 §8, U4 is pinned whole: a request that sets neither
+// Request.Entry nor Request.Replaced is answered by the OpRemoveEntry and
+// OpRename rows' lines 1 and 2 alone, whatever bits the directories' modes
+// have, and one that sets either by ADR 0026 §1's rows, which also refuse with
+// vfs.ErrPerm in a directory whose mode has 0o1000 set. It is asked by K2's
+// rows in unixCases() and p5Cases() below, by K3's two loops in
+// TestUnreadFieldsChangeNothing, and by K1, K3 and K4 in sticky_test.go. U5,
 // U6 and the rest of U3 stay unpinned, and no test here relies on them.
 //
 // The oracles here, oracleInGroup and oraclePermits, are written from §5's
@@ -135,6 +143,24 @@ func mkChgrp(c vfs.Caller, o policy.Object, gid uint32) policy.Request {
 
 func mkRename(c vfs.Caller, src, dst policy.Object) policy.Request {
 	return policy.Request{Op: policy.OpRename, Caller: c, Object: src, Dst: dst}
+}
+
+// stkOwned is ADR 0026 §8's "an entry of uid u": a pointer to a regular file
+// of mode 0o644 owned by uid, in fileGID. Each call returns a new Object.
+func stkOwned(uid uint32) *policy.Object {
+	return &policy.Object{Type: vfs.TypeReg, Mode: 0o644, UID: uid, GID: fileGID}
+}
+
+// stkRemove is an OpRemoveEntry request in dir that takes out entry, nil for
+// none (ADR 0026 §2).
+func stkRemove(c vfs.Caller, dir policy.Object, entry *policy.Object) policy.Request {
+	return policy.Request{Op: policy.OpRemoveEntry, Caller: c, Object: dir, Entry: entry}
+}
+
+// stkRename is an OpRename request from src to dst that moves entry and
+// replaces replaced, each nil for none (ADR 0026 §2).
+func stkRename(c vfs.Caller, src, dst policy.Object, entry, replaced *policy.Object) policy.Request {
+	return policy.Request{Op: policy.OpRename, Caller: c, Object: src, Dst: dst, Entry: entry, Replaced: replaced}
 }
 
 // opName is the Go name of a pinned Op, for failure messages.
@@ -382,13 +408,16 @@ const oaU3Rule = "a symlink is neither a regular file nor a directory, so neithe
 // §6 it also holds A2's rows: U1 and U2, pinned for a regular file as allowed
 // by ADR 0025 §1's lines 3 and 4, asked in the OpRead row and in the OpWrite
 // and OpTruncate row; and U3's refusing half, asked of symlinks as refusedOnly.
-// It avoids every row that stays unpinned (§11; ADR 0025 §6):
+// Since ADR 0026 §8 it also holds K2's rows, which pin U4: OpRemoveEntry and
+// OpRename requests that set Request.Entry or Request.Replaced, in directories
+// with and without 0o1000 set, answered by ADR 0026 §1's rows. It avoids every
+// row that stays unpinned (§11; ADR 0025 §6; ADR 0026 §8):
 //
 // U3: OpRead, OpWrite and OpTruncate are asked of a symlink only where Permits
-// refuses the row's permission, and then the case is refusedOnly; U4: no
-// directory has 0o1000 set; U5 is AccessBits', not these; U6: no OpSetTimes
-// asks for a caller who is neither root nor the owner but may write, and where
-// such a caller may not write the case is refusedOnly.
+// refuses the row's permission, and then the case is refusedOnly; U5 is
+// AccessBits', not these; U6: no OpSetTimes asks for a caller who is neither
+// root nor the owner but may write, and where such a caller may not write the
+// case is refusedOnly.
 func unixCases() []unixCase {
 	reg, dir, lnk := vfs.TypeReg, vfs.TypeDir, vfs.TypeLnk
 	var cs []unixCase
@@ -535,8 +564,11 @@ func unixCases() []unixCase {
 	add("OpReadDir: other, of a directory 0o773", mkReq(policy.OpReadDir, callerOther(), mkObj(dir, 0o773)), vfs.ErrAcces)
 
 	// OpAddEntry and OpRemoveEntry: ErrNotDir unless Object is a directory;
-	// ErrAcces unless Permits(Caller, Object, PermWrite|PermExec). No mode
-	// has 0o1000 set (U4).
+	// ErrAcces unless Permits(Caller, Object, PermWrite|PermExec). These
+	// requests set neither Entry nor Replaced and no mode has 0o1000 set, so
+	// lines 1 and 2 of ADR 0026 §1's OpRemoveEntry row answer them as they
+	// did before (ADR 0026 §2, Growth). U4 is pinned since ADR 0026 §8, by
+	// K2's rows after the OpRename rows below.
 	for _, op := range []policy.Op{policy.OpAddEntry, policy.OpRemoveEntry} {
 		n := opName(op)
 		add(n+": the owner, of a directory 0o300", mkReq(op, callerOwner(), mkObj(dir, 0o300)), nil)
@@ -555,7 +587,10 @@ func unixCases() []unixCase {
 
 	// OpRename: ErrNotDir unless Object and Dst are both directories; ErrAcces
 	// unless both Permits(Caller, Object, PermWrite|PermExec) and
-	// Permits(Caller, Dst, PermWrite|PermExec). No mode has 0o1000 set (U4).
+	// Permits(Caller, Dst, PermWrite|PermExec). These requests set neither
+	// Entry nor Replaced and no mode has 0o1000 set, so lines 1 and 2 of ADR
+	// 0026 §1's OpRename row answer them as they did before (ADR 0026 §2,
+	// Growth). U4 is pinned since ADR 0026 §8, by K2's rows below.
 	add("OpRename: the owner, of both 0o300", mkRename(callerOwner(), mkObj(dir, 0o300), mkObj(dir, 0o300)), nil)
 	add("OpRename: root, of both 0o000", mkRename(callerRoot(), mkObj(dir, 0), mkObj(dir, 0)), nil)
 	add("OpRename: other, of both 0o003", mkRename(callerOther(), mkObj(dir, 0o003), mkObj(dir, 0o003)), nil)
@@ -571,6 +606,86 @@ func unixCases() []unixCase {
 	add("OpRename: other of a foreign source 0o001, the owner of the target 0o300", mkRename(callerOwner(), foreignDir(0o001), mkObj(dir, 0o300)), vfs.ErrAcces)
 	add("OpRename: a primary-group member, of both 0o050", mkRename(callerGroup(), mkObj(dir, 0o050), mkObj(dir, 0o050)), vfs.ErrAcces)
 
+	// ADR 0026 §8, K2: the OpRemoveEntry row of ADR 0026 §1. (1) ErrNotDir
+	// unless Object is a directory; (2) ErrAcces unless Permits(Caller,
+	// Object, PermWrite|PermExec); (3) ErrPerm if Entry is not nil, Object
+	// has 0o1000 set, and the caller is not root, does not own Object and
+	// does not own *Entry; (4) nil. An entry "of uid u" is stkOwned(u).
+	// foreignDir is owned by 9999:999, mkObj by 1000:100; callerOther is uid
+	// 4000, callerGroup 2000 in group 100, callerSupp 3000 in group 100
+	// through GIDs, callerOwner 1000.
+	k2 := " (ADR 0026 §1)"
+	add("OpRemoveEntry: other, of a foreign 0o1777, its own entry"+k2,
+		stkRemove(callerOther(), foreignDir(0o1777), stkOwned(4000)), nil)
+	add("OpRemoveEntry: the owner of a directory 0o1700, another's entry"+k2,
+		stkRemove(callerOwner(), mkObj(dir, 0o1700), stkOwned(4000)), nil)
+	add("OpRemoveEntry: root, of a foreign 0o1000, another's entry"+k2,
+		stkRemove(callerRoot(), foreignDir(0o1000), stkOwned(9999)), nil)
+	add("OpRemoveEntry: other, of a foreign 0o777 without the bit, another's entry"+k2,
+		stkRemove(callerOther(), foreignDir(0o777), stkOwned(9999)), nil)
+	add("OpRemoveEntry: other, of a foreign 0o1777, no entry"+k2,
+		stkRemove(callerOther(), foreignDir(0o1777), nil), nil)
+	add("OpRemoveEntry: a primary-group member, of a directory 0o1770, its own entry"+k2,
+		stkRemove(callerGroup(), mkObj(dir, 0o1770), stkOwned(2000)), nil)
+	add("OpRemoveEntry: other, of a foreign 0o6777, another's entry: set-ID bits are not the bit"+k2,
+		stkRemove(callerOther(), foreignDir(0o6777), stkOwned(9999)), nil)
+	add("OpRemoveEntry: other, of a foreign 0o1777, another's entry"+k2,
+		stkRemove(callerOther(), foreignDir(0o1777), stkOwned(9999)), vfs.ErrPerm)
+	add("OpRemoveEntry: other, of a directory 0o1777, the directory owner's entry"+k2,
+		stkRemove(callerOther(), mkObj(dir, 0o1777), stkOwned(fileUID)), vfs.ErrPerm)
+	add("OpRemoveEntry: a primary-group member, of a directory 0o1770, the directory owner's entry"+k2,
+		stkRemove(callerGroup(), mkObj(dir, 0o1770), stkOwned(fileUID)), vfs.ErrPerm)
+	add("OpRemoveEntry: a supplementary-group member, of a directory 0o1770, another member's entry"+k2,
+		stkRemove(callerSupp(), mkObj(dir, 0o1770), stkOwned(2000)), vfs.ErrPerm)
+	add("OpRemoveEntry: other, of a foreign 0o1777, root's entry"+k2,
+		stkRemove(callerOther(), foreignDir(0o1777), stkOwned(0)), vfs.ErrPerm)
+	add("OpRemoveEntry: other, of a foreign 0o7777, another's entry"+k2,
+		stkRemove(callerOther(), foreignDir(0o7777), stkOwned(9999)), vfs.ErrPerm)
+	add("OpRemoveEntry: other, of a directory 0o1770, the mode before the rule"+k2,
+		stkRemove(callerOther(), mkObj(dir, 0o1770), stkOwned(fileUID)), vfs.ErrAcces)
+	add("OpRemoveEntry: other, of a foreign 0o1775, its own entry: owning the entry gives no write"+k2,
+		stkRemove(callerOther(), foreignDir(0o1775), stkOwned(4000)), vfs.ErrAcces)
+	add("OpRemoveEntry: the owner of a directory 0o1577, its own entry: the directory's owner is held to its mode"+k2,
+		stkRemove(callerOwner(), mkObj(dir, 0o1577), stkOwned(fileUID)), vfs.ErrAcces)
+
+	// ADR 0026 §8, K2: the OpRename row of ADR 0026 §1. (1) ErrNotDir unless
+	// Object and Dst are both directories; (2) ErrAcces unless Permits gives
+	// write and search on both; (3) ErrPerm if Entry is not nil, Object has
+	// 0o1000 set, and the caller is not root, does not own Object and does
+	// not own *Entry; (4) ErrPerm if Replaced is not nil, Dst has 0o1000 set,
+	// and the caller is not root, does not own Dst and does not own
+	// *Replaced; (5) nil. The source, the target, the entry and the replaced
+	// entry are given in that order.
+	add("OpRename: other, from a foreign 0o1777 to a foreign 0o777, its own entry, nothing replaced"+k2,
+		stkRename(callerOther(), foreignDir(0o1777), foreignDir(0o777), stkOwned(4000), nil), nil)
+	add("OpRename: other, from a foreign 0o777 to a foreign 0o1777, another's entry, nothing replaced"+k2,
+		stkRename(callerOther(), foreignDir(0o777), foreignDir(0o1777), stkOwned(9999), nil), nil)
+	add("OpRename: other, within a foreign 0o1777, its own entry onto its own"+k2,
+		stkRename(callerOther(), foreignDir(0o1777), foreignDir(0o1777), stkOwned(4000), stkOwned(4000)), nil)
+	add("OpRename: the owner of the target 0o1700, from a foreign 0o777, onto another's entry"+k2,
+		stkRename(callerOwner(), foreignDir(0o777), mkObj(dir, 0o1700), stkOwned(fileUID), stkOwned(4000)), nil)
+	add("OpRename: root, within a foreign 0o1000, another's entry onto another's"+k2,
+		stkRename(callerRoot(), foreignDir(0o1000), foreignDir(0o1000), stkOwned(9999), stkOwned(9999)), nil)
+	add("OpRename: other, within a foreign 0o777 without the bit, its own entry onto another's"+k2,
+		stkRename(callerOther(), foreignDir(0o777), foreignDir(0o777), stkOwned(4000), stkOwned(9999)), nil)
+	add("OpRename: other, within a foreign 0o1777, no entry and nothing replaced"+k2,
+		stkRename(callerOther(), foreignDir(0o1777), foreignDir(0o1777), nil, nil), nil)
+	add("OpRename: other, from a foreign 0o1777 to a foreign 0o777, another's entry, nothing replaced: the "+
+		"second allowed row with its directories exchanged"+k2,
+		stkRename(callerOther(), foreignDir(0o1777), foreignDir(0o777), stkOwned(9999), nil), vfs.ErrPerm)
+	add("OpRename: other, from a foreign 0o777 to a foreign 0o1777, its own entry onto another's"+k2,
+		stkRename(callerOther(), foreignDir(0o777), foreignDir(0o1777), stkOwned(4000), stkOwned(9999)), vfs.ErrPerm)
+	add("OpRename: other, within a foreign 0o1777, another's entry, nothing replaced"+k2,
+		stkRename(callerOther(), foreignDir(0o1777), foreignDir(0o1777), stkOwned(9999), nil), vfs.ErrPerm)
+	add("OpRename: a primary-group member, within a directory 0o1770, its own entry onto the owner's"+k2,
+		stkRename(callerGroup(), mkObj(dir, 0o1770), mkObj(dir, 0o1770), stkOwned(2000), stkOwned(fileUID)), vfs.ErrPerm)
+	add("OpRename: other, within a foreign 0o1777, another's entry onto another's"+k2,
+		stkRename(callerOther(), foreignDir(0o1777), foreignDir(0o1777), stkOwned(9999), stkOwned(9999)), vfs.ErrPerm)
+	add("OpRename: other, from a foreign 0o1777 to a foreign 0o755, the mode before the rule"+k2,
+		stkRename(callerOther(), foreignDir(0o1777), foreignDir(0o755), stkOwned(9999), nil), vfs.ErrAcces)
+	add("OpRename: other, from a foreign 0o777 to a foreign 0o1775, the mode before the rule"+k2,
+		stkRename(callerOther(), foreignDir(0o777), foreignDir(0o1775), stkOwned(4000), stkOwned(9999)), vfs.ErrAcces)
+
 	return cs
 }
 
@@ -580,7 +695,11 @@ func unixCases() []unixCase {
 // §6, where U1 and U2 are pinned for a regular file, they are also asked of a
 // directory's owner whose owner bits are empty, and OpRead of a directory
 // whose other bits have execute alone (A2): line 1 refuses a directory before
-// the owner override or read with execute is looked at (ADR 0025 §1).
+// the owner override or read with execute is looked at (ADR 0025 §1). Since
+// ADR 0026 §8 it also holds K2's three: OpRemoveEntry and OpRename where a
+// non-directory stands for a directory whose mode has 0o1000 set and whose
+// entry the sticky rule would refuse, which line 1 refuses before the bit is
+// looked at (ADR 0026 §1).
 func p5Cases() []unixCase {
 	reg, dir, lnk := vfs.TypeReg, vfs.TypeDir, vfs.TypeLnk
 	return []unixCase{
@@ -602,6 +721,9 @@ func p5Cases() []unixCase {
 		{name: "OpRename: the owner, an unsearchable source directory 0o000 and a regular-file target", req: mkRename(callerOwner(), mkObj(dir, 0), mkObj(reg, 0o777)), want: vfs.ErrNotDir},
 		{name: "OpRename: the owner, a regular-file source and an unsearchable target directory 0o666", req: mkRename(callerOwner(), mkObj(reg, 0o777), mkObj(dir, 0o666)), want: vfs.ErrNotDir},
 		{name: "OpRename: other, an unsearchable source directory 0o000 and a symlink target 0o000", req: mkRename(callerOther(), mkObj(dir, 0), mkObj(lnk, 0)), want: vfs.ErrNotDir},
+		{name: "OpRemoveEntry: other, of a regular file 0o1777, with another's entry (ADR 0026 §1)", req: stkRemove(callerOther(), mkObj(reg, 0o1777), stkOwned(9999)), want: vfs.ErrNotDir},
+		{name: "OpRename: other, from a foreign 0o1777 with another's entry to a regular file 0o777 (ADR 0026 §1)", req: stkRename(callerOther(), foreignDir(0o1777), mkObj(reg, 0o777), stkOwned(9999), nil), want: vfs.ErrNotDir},
+		{name: "OpRename: other, from a regular file 0o777 to a foreign 0o1777 with another's replaced entry (ADR 0026 §1)", req: stkRename(callerOther(), mkObj(reg, 0o777), foreignDir(0o1777), nil, stkOwned(9999)), want: vfs.ErrNotDir},
 	}
 }
 
@@ -715,15 +837,18 @@ type refusal struct{ why string }
 
 func (r *refusal) Error() string { return r.why }
 
-// sampleRequest is a request with every field set.
+// sampleRequest is a request with every field set, Entry and Replaced (ADR
+// 0026 §2) included, each pointing to an Object of its own.
 func sampleRequest() policy.Request {
 	return policy.Request{
-		Op:     policy.OpRename,
-		Caller: vfs.Caller{UID: 4000, GID: 400, GIDs: []uint32{402, fileGID, 401}},
-		Object: mkObj(vfs.TypeDir, 0o755),
-		Dst:    foreignDir(0o3),
-		UID:    1234,
-		GID:    5678,
+		Op:       policy.OpRename,
+		Caller:   vfs.Caller{UID: 4000, GID: 400, GIDs: []uint32{402, fileGID, 401}},
+		Object:   mkObj(vfs.TypeDir, 0o755),
+		Dst:      foreignDir(0o3),
+		UID:      1234,
+		GID:      5678,
+		Entry:    &policy.Object{Type: vfs.TypeReg, Mode: 0o640, UID: 4321, GID: 8765},
+		Replaced: &policy.Object{Type: vfs.TypeLnk, Mode: 0o777, UID: 2468, GID: 1357},
 	}
 }
 
@@ -880,19 +1005,42 @@ func TestAllPanicsOnANilPolicy(t *testing.T) {
 	}
 }
 
-// cloneRequest is a deep copy of r.
+// cloneRequest is a deep copy of r: GIDs, and what Entry and Replaced point
+// to, are copied into values of the copy's own.
 func cloneRequest(r policy.Request) policy.Request {
 	c := r
 	c.Caller.GIDs = slices.Clone(r.Caller.GIDs)
+	c.Entry = stkCloneObject(r.Entry)
+	c.Replaced = stkCloneObject(r.Replaced)
 	return c
 }
 
+// stkCloneObject returns a pointer to a copy of what o points to, or nil for
+// nil.
+func stkCloneObject(o *policy.Object) *policy.Object {
+	if o == nil {
+		return nil
+	}
+	c := *o
+	return &c
+}
+
+// stkSameObject reports whether a and b are both nil, or both point to equal
+// Objects.
+func stkSameObject(a, b *policy.Object) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 // sameRequest reports whether a and b have the same fields, comparing GIDs by
-// content.
+// content, and Entry and Replaced by what they point to.
 func sameRequest(a, b policy.Request) bool {
 	return a.Op == b.Op && a.Caller.UID == b.Caller.UID && a.Caller.GID == b.Caller.GID &&
 		slices.Equal(a.Caller.GIDs, b.Caller.GIDs) && a.Object == b.Object && a.Dst == b.Dst &&
-		a.UID == b.UID && a.GID == b.GID
+		a.UID == b.UID && a.GID == b.GID && stkSameObject(a.Entry, b.Entry) &&
+		stkSameObject(a.Replaced, b.Replaced)
 }
 
 // TestFuncCallsItsFunctionOnce covers P8 (ADR 0014 §11): Func(f).Check(r)
@@ -1152,7 +1300,12 @@ func TestNoCallModifiesCallerGIDs(t *testing.T) {
 // TestUnreadFieldsChangeNothing covers P13 (ADR 0014 §11): Dst, UID and GID
 // may be set to anything, except UID for OpChown, GID for OpChgrp and Dst for
 // OpRename, without changing Unix()'s answer (§5: Check reads only the fields
-// its row names). It asks every P4 and P5 request.
+// its row names). It asks every P4 and P5 request. Since ADR 0026 §8 it also
+// holds K3's two loops: Entry may be set to nil or to a pointer to any of
+// several Objects, except for OpRemoveEntry and OpRename, and Replaced
+// likewise, except for OpRename, without changing the answer (ADR 0026 §1,
+// "What the rows read": OpRemoveEntry does not read Replaced, and no other
+// row reads either field).
 func TestUnreadFieldsChangeNothing(t *testing.T) {
 	u := policy.Unix()
 	dsts := []policy.Object{
@@ -1195,5 +1348,43 @@ func TestUnreadFieldsChangeNothing(t *testing.T) {
 				}
 			}
 		}
+		if op != policy.OpRemoveEntry && op != policy.OpRename {
+			for _, o := range stkUnreadObjects() {
+				r := tc.req
+				r.Entry = o
+				if err := u.Check(r); err != base {
+					t.Errorf("%s: with Entry %s, Unix().Check = %v, want %v as without it: %s does not read Entry (ADR 0026 §1 and §8, K3)", tc.name, stkPtr(o), err, base, opName(op))
+				}
+			}
+		}
+		if op != policy.OpRename {
+			for _, o := range stkUnreadObjects() {
+				r := tc.req
+				r.Replaced = o
+				if err := u.Check(r); err != base {
+					t.Errorf("%s: with Replaced %s, Unix().Check = %v, want %v as without it: %s does not read Replaced (ADR 0026 §1 and §8, K3)", tc.name, stkPtr(o), err, base, opName(op))
+				}
+			}
+		}
+	}
+}
+
+// stkUnreadObjects are the values K3's loops give Entry and Replaced: nil, and
+// pointers to Objects of their own: the zero Object; regular files owned by
+// root and by each fixture caller's uid; a directory with 0o1000 set; a
+// symlink with every mode bit of 0o7777; and an Object with every field at its
+// largest (ADR 0026 §8, K3).
+func stkUnreadObjects() []*policy.Object {
+	return []*policy.Object{
+		nil,
+		{},
+		stkOwned(0),
+		stkOwned(fileUID),
+		stkOwned(2000),
+		stkOwned(3000),
+		stkOwned(4000),
+		{Type: vfs.TypeDir, Mode: 0o1777, UID: 9999, GID: 999},
+		{Type: vfs.TypeLnk, Mode: 0o7777, UID: fileUID, GID: fileGID},
+		{Type: vfs.FileType(99), Mode: ^uint32(0), UID: ^uint32(0), GID: ^uint32(0)},
 	}
 }

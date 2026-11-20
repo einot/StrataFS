@@ -70,9 +70,11 @@ import (
 var sp24Root = vfs.Caller{UID: 0}
 
 // sp24Recorder is S4's recording policy. Its check appends each request, with
-// a copy of Caller.GIDs, to reqs under its own mutex, and returns vfs.ErrNXIO
-// for the request at index refuseAt, counting from 0 since the last reset, and
-// nil for every other; refuseAt -1 refuses nothing.
+// a copy of Caller.GIDs and of what Entry and Replaced point to (ADR 0026 §8),
+// to reqs under its own mutex, so that a recorded request is a value nothing
+// the FS does afterwards can change; and returns vfs.ErrNXIO for the request
+// at index refuseAt, counting from 0 since the last reset, and nil for every
+// other; refuseAt -1 refuses nothing.
 type sp24Recorder struct {
 	mu       sync.Mutex
 	reqs     []policy.Request
@@ -81,6 +83,14 @@ type sp24Recorder struct {
 
 func (r *sp24Recorder) check(req policy.Request) error {
 	req.Caller.GIDs = slices.Clone(req.Caller.GIDs)
+	if req.Entry != nil {
+		entry := *req.Entry
+		req.Entry = &entry
+	}
+	if req.Replaced != nil {
+		replaced := *req.Replaced
+		req.Replaced = &replaced
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	i := len(r.reqs)
