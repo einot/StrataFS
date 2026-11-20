@@ -857,7 +857,9 @@ func (f *FS) Symlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name, ta
 
 // unlink removes a name, requiring the target to be (or not be) a directory.
 // A name whose entry names no inode is reported absent and changes nothing
-// (ADR 0024 §3).
+// (ADR 0024 §3). The name is looked up before f.perm is asked, so that the
+// request's Entry says which object the call would take out, and vfs.ErrNoEnt
+// is still answered only after the request (ADR 0026 §2).
 //
 // TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) unlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name string, wantDir bool) error {
@@ -875,15 +877,26 @@ func (f *FS) unlink(ctx context.Context, c vfs.Caller, dir vfs.Handle, name stri
 	if err != nil {
 		return err
 	}
-	if err := f.checkPerm(policy.OpRemoveEntry, c, d); err != nil {
+
+	// A name that names no object describes no entry, and so leaves the row
+	// to judge the directory alone (ADR 0026 §2).
+	id, ok := d.Entries[name]
+	var n *inode
+	if ok {
+		n = f.inodes[id]
+	}
+	r := policy.Request{Op: policy.OpRemoveEntry, Caller: c, Object: objectOf(d)}
+	if n != nil {
+		entry := objectOf(n)
+		r.Entry = &entry
+	}
+	if err := f.perm.Check(r); err != nil {
 		return err
 	}
 
-	id, ok := d.Entries[name]
 	if !ok {
 		return vfs.ErrNoEnt
 	}
-	n := f.inodes[id]
 	if n == nil {
 		// The entry names an inode the table lacks. It is reported absent and
 		// left as it is, as Rename leaves one, so that an error changes
@@ -962,6 +975,12 @@ func (f *FS) Rmdir(ctx context.Context, c vfs.Caller, dir vfs.Handle, name strin
 	return f.unlink(ctx, c, dir, name, true)
 }
 
+// Rename moves fromName in fromDir to toName in toDir, replacing what toName
+// names. Both names are looked up before f.perm is asked, so that the
+// request's Entry and Replaced say which objects the call would take out of
+// each directory; a rename onto itself, and a source name that names no
+// object, take out none (ADR 0026 §2).
+//
 // TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) Rename(ctx context.Context, c vfs.Caller, fromDir vfs.Handle, fromName string, toDir vfs.Handle, toName string) error {
 	if err := f.mutable(); err != nil {
@@ -985,16 +1004,36 @@ func (f *FS) Rename(ctx context.Context, c vfs.Caller, fromDir vfs.Handle, fromN
 	if err != nil {
 		return err
 	}
+
+	id, ok := src.Entries[fromName]
+	var moving *inode
+	if ok {
+		moving = f.inodes[id]
+	}
+	victimID, exists := dst.Entries[toName]
+	var victim *inode
+	if exists {
+		victim = f.inodes[victimID]
+	}
 	r := policy.Request{Op: policy.OpRename, Caller: c, Object: objectOf(src), Dst: objectOf(dst)}
+	// Whether the call takes a name out, and which, is a fact about what the
+	// names name, not a judgement of the caller, which stays the row's (ADR
+	// 0026 §2; ADR 0018 §2).
+	if moving != nil && !(exists && victimID == id) {
+		entry := objectOf(moving)
+		r.Entry = &entry
+		if victim != nil {
+			replaced := objectOf(victim)
+			r.Replaced = &replaced
+		}
+	}
 	if err := f.perm.Check(r); err != nil {
 		return err
 	}
 
-	id, ok := src.Entries[fromName]
 	if !ok {
 		return vfs.ErrNoEnt
 	}
-	moving := f.inodes[id]
 	if moving == nil {
 		return vfs.ErrNoEnt
 	}
@@ -1005,11 +1044,10 @@ func (f *FS) Rename(ctx context.Context, c vfs.Caller, fromDir vfs.Handle, fromN
 		return vfs.ErrInval
 	}
 
-	if victimID, exists := dst.Entries[toName]; exists {
+	if exists {
 		if victimID == id {
 			return nil // renaming a name to itself
 		}
-		victim := f.inodes[victimID]
 		if victim != nil {
 			switch {
 			case victim.isDir() && !moving.isDir():

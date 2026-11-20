@@ -7,7 +7,8 @@
 // a bare vfs.Status, which the NFS layer passes to the client unchanged.
 //
 // Spec: docs/adr/0014-state-machines-are-tables-and-permission-checks-are-policies.md §4, §5;
-// docs/adr/0025-a-files-owner-may-read-and-write-it-whatever-its-mode.md §1, §2, §3
+// docs/adr/0025-a-files-owner-may-read-and-write-it-whatever-its-mode.md §1, §2, §3;
+// docs/adr/0026-in-a-sticky-directory-only-an-owner-removes-or-renames-an-entry.md §1, §2
 package policy
 
 import "strata/internal/vfs"
@@ -109,6 +110,15 @@ type Request struct {
 
 	// GID is the group OpChgrp asks for.
 	GID uint32
+
+	// Entry is the object whose name the call takes out of Object: the one
+	// OpRemoveEntry removes, and the one OpRename moves. Nil when the call
+	// takes none out.
+	Entry *Object
+
+	// Replaced is the object whose name OpRename takes out of Dst, to put the
+	// object it moves in its place. Nil when it replaces none.
+	Replaced *Object
 }
 
 // Policy decides a Request: nil allows it, and any other error refuses it.
@@ -177,6 +187,13 @@ func Unix() Policy {
 // The three file rows, OpRead, OpWrite and OpTruncate, are ADR 0025 §1's, not
 // ADR 0014 §5's: they allow a regular file's owner, and OpRead a caller whom
 // the mode gives execute, past what Permits gives.
+//
+// The OpRemoveEntry and OpRename rows are ADR 0026 §1's: past ADR 0014 §5's
+// type and mode checks, which they keep as their first lines, they refuse with
+// vfs.ErrPerm a caller who would take an entry's name out of a sticky
+// directory and is neither root nor an owner. A request that sets neither
+// Entry nor Replaced is answered as before those fields existed. OpAddEntry's
+// row is still ADR 0014 §5's.
 func (unixRules) Check(r Request) error {
 	c, o := r.Caller, r.Object
 	switch r.Op {
@@ -215,8 +232,13 @@ func (unixRules) Check(r Request) error {
 		return dirAccess(c, o, PermExec)
 	case OpReadDir:
 		return dirAccess(c, o, PermRead)
-	case OpAddEntry, OpRemoveEntry:
+	case OpAddEntry:
 		return dirAccess(c, o, PermWrite|PermExec)
+	case OpRemoveEntry:
+		if err := dirAccess(c, o, PermWrite|PermExec); err != nil {
+			return err
+		}
+		return stickyTakeOut(c, o, r.Entry)
 	case OpRename:
 		if o.Type != vfs.TypeDir || r.Dst.Type != vfs.TypeDir {
 			return vfs.ErrNotDir
@@ -224,7 +246,13 @@ func (unixRules) Check(r Request) error {
 		if !Permits(c, o, PermWrite|PermExec) || !Permits(c, r.Dst, PermWrite|PermExec) {
 			return vfs.ErrAcces
 		}
-		return nil
+		// The source's bit guards the entry moved, then the target's the
+		// entry replaced, so a rename across directories is judged in each
+		// for what it takes out of that one.
+		if err := stickyTakeOut(c, o, r.Entry); err != nil {
+			return err
+		}
+		return stickyTakeOut(c, r.Dst, r.Replaced)
 	}
 	return vfs.ErrServerFault
 }
@@ -272,6 +300,22 @@ func dirAccess(c vfs.Caller, o Object, want Perm) error {
 		return vfs.ErrAcces
 	}
 	return nil
+}
+
+// stickyTakeOut is lines 3 and 4 of ADR 0026 §1's rows: in a directory whose
+// mode has 0o1000 set, only root, the directory's owner or the owner of the
+// object the entry names may take the entry's name out of it. A nil entry
+// takes nothing out. Of the entry it reads the UID alone, since the rule is
+// about owners: not its type, its mode or its group, and no group of c makes
+// c an owner. It neither writes through entry nor keeps it.
+func stickyTakeOut(c vfs.Caller, dir Object, entry *Object) error {
+	if entry == nil || dir.Mode&0o1000 == 0 {
+		return nil
+	}
+	if rootOrOwner(c, dir) || c.UID == entry.UID {
+		return nil
+	}
+	return vfs.ErrPerm
 }
 
 // rootOrOwner reports whether c is root or owns o.
