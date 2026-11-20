@@ -98,6 +98,21 @@ refusal only. §5 and §11 each gain a sentence saying so. `Permits`,
 `AccessBits`, every other row, the stages and §6's request lists are
 unchanged, the text of both parts stays as the record, and every test this
 ADR pins stands.
+**Revised:** 2026-11-16 — cross-reference only, for ADR 0026, which decides
+#94 and #148 and replaces three parts of this ADR: §5's `Request`, which
+gains the fields `Entry` and `Replaced`, with its bullets for the
+`OpRemoveEntry` row and for the `OpRename` row, which since ADR 0026 §1 also
+refuse, with `vfs.ErrPerm`, a caller who is neither root nor the owner of
+the directory or of the entry, where the directory's mode has `0o1000` set
+and the request describes the entry; §6's bullets for the requests `Remove`,
+`Rmdir` and `Rename` make, which since ADR 0026 §2 carry the entry removed
+or moved and the entry replaced, found by a lookup made before the request;
+and §11's U4, which ADR 0026 §8 pins, with W2's tree and its rows for those
+three methods, which ADR 0026 §7 replaces so that no two objects a row names
+are equal, and W4, which gains two rows there. §5, §6 and §11 each gain a
+sentence saying so. `Permits`, `AccessBits`, the `OpAddEntry` row and every
+other row, the stages and every other test this ADR pins are unchanged, and
+the text of the replaced parts stays as the record.
 **Issue:** #114
 
 ## Context
@@ -535,7 +550,12 @@ Every rule below is normative:
   the `OpWrite` and `OpTruncate` row are that ADR's §1, which also allows
   the owner of a regular file all three, and `OpRead` on a regular file to a
   caller for whom `Permits(Caller, Object, PermExec)`; `Permits` and
-  `AccessBits` are as this section has them.
+  `AccessBits` are as this section has them. Since ADR 0026 `Request` has
+  two more fields, `Entry` and `Replaced`, each a pointer to an `Object`,
+  and the `OpRemoveEntry` and `OpRename` rows are that ADR's §1: for a
+  request that leaves both nil they are the bullets above, and for one that
+  sets either they also refuse, with `vfs.ErrPerm`, in a directory whose
+  mode has `0o1000` set; the `OpAddEntry` row is as this section has it.
 - `Unix` is a function, not an exported variable, so there is no package-level
   authority anyone can reassign. It returns a value that holds no state, and
   two calls decide alike. `policy` exports no variable at all.
@@ -653,7 +673,10 @@ This is for the PR that wires the policy. It changes no behaviour.
     - A requested gid is applied as now, with no check, until #98's fix.
   - `Remove`, `Rmdir`: `OpRemoveEntry` on the directory.
   - `Rename`: `OpRename`, with `Object` the source directory and `Dst` the
-    target.
+    target. Since ADR 0026 §2 the `OpRemoveEntry` of `Remove` and `Rmdir`
+    carries the object the name names in `Entry`, and `Rename`'s `OpRename`
+    the object it moves in `Entry` and one it replaces in `Replaced`, each
+    found by a lookup made before the request, which is still one request.
   - `Access`: `AccessBits(c, objectOf(n))`; then, only when the mount mode is
     `ReadOnly` (`f.readOnly` until §7 is done), minus `vfs.AccessModify`,
     `vfs.AccessExtend` and `vfs.AccessDelete`; then `& want`. It does not go
@@ -1114,6 +1137,10 @@ for a regular file, as allowed, and U3 is pinned as a refusal only where
 
   POSIX `futimens` gives [EACCES] for a time set to now without write access,
   and [EPERM] for any other time.
+
+Since ADR 0026, U4 is pinned, by that ADR's §1 and §8; W2's tree and its
+rows for `Remove`, `Rmdir` and `Rename`, below, are that ADR's §7, in which
+no two objects a row names are equal (#148); and W4 gains two rows there.
 
 **`blobfs`, for the PR that does §7** (package `blobfs`, in one new file,
 `internal/blobfs/mount_mode_test.go`; Assumption 42). The harness is
