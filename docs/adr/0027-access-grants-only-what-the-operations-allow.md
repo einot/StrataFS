@@ -2,29 +2,70 @@
 
 **Status:** Accepted
 **Date:** 2026-11-23
+**Revised:** 2026-11-23 — the same day, before merge, after test-author's
+commit `e2d1423` and coder's commit `729360f`, read and not run. One rule
+moved. §2's first law, that an advisory request only narrows, is claimed for
+a regular file and a directory, where §8's S2 rests on it, and no longer for
+every request: claimed for every request it pinned, through X6's advisory
+row for a symlink, the same request unmarked, which is ADR 0014 §11's U3 and
+which §6 and §10 leave unpinned for #69. §2, §6, §10 in what it says is
+pinned and in X4 and X7, Assumptions 12 and 24, the second new, and a new
+entry under *Alternatives considered* say so, and the committed tests
+already ask the law that way. The rest is record. By the session's report
+the owner decided on 2026-11-23 the first four of the five calls this ADR
+put to the owner, each as recommended, and the session decided the fifth,
+that the `CHANGES` line takes no `BREAKING:`; *Context*, the section that
+was *For the owner* and is now *Put to the owner, and decided*, and
+Assumptions 1, 3, 11, 12, 19 and 22 say so. §2 records what coder chose
+where the pins left room (Assumption 27, which is new), and §10's list of
+what only review can show gains one item from it. §10 settles the four
+other points test-author's report raised, in X1, X2, X8 and X9, each as the
+committed test has it (Assumption 26, which is new). §11 records that no
+function `docs/tla/trace.tsv` names changed, so that no row and no
+`Checked against` line moves, nothing under `docs/tla/` changes and no
+`tla.sh full` is due (Assumption 16, and Assumption 25, which is new and
+says how far the pass went), and `docs/vocabulary.md` V7 marks `OpExecute`
+as existing. §14's `CHANGES` line is reworded in its last sentence, and was
+not yet recorded. §1's tables, the `policy` API, the rows, `Access`'s form,
+the stages and what a client sees are unchanged, and no test changes.
 **Issue:** #97
 
 ## Context
 
 **The owner's decisions.** Three, as ADR 0014 and ADR 0018 record them: the
 first two in the owner's words, and the third in the wording the owner
-approved. The brief this ADR was written from gave the second and the third
-in substance, and nothing here claims any approval beyond the three.
+approved; and a fourth the session reported. The brief this ADR was written
+from gave the second and the third in substance, and nothing here claims any
+approval beyond the four.
 
 1. On 2026-10-10: "Otherwise, follow architect's and your own
    recommendations." So this ADR is Accepted on creation, as ADRs 0015 to
-   0026 were, and its design is the architect's (Assumption 1). *For the
-   owner* lists the judgement calls an owner is most likely to weigh
-   differently, each with its alternatives.
+   0026 were, and its design is the architect's (Assumption 1). *Put to the
+   owner, and decided* lists the judgement calls an owner is most likely to
+   weigh differently, each with its alternatives and with who decided it.
 2. Also on 2026-10-10: "We don't have any clients yet so any breaking changes
    are allowed until release." By the brief, a change a client can see still
    gets a `CHANGES` line, prefixed `BREAKING:` only where a running
-   deployment must act. Whether this one is breaking is Assumption 19's
-   judgement.
+   deployment must act. Whether this one is breaking was Assumption 19's
+   judgement, until the session decided it (decision 4).
 3. On 2026-10-22, the rules CLAUDE.md carries under "State machines and
    policies", which ADR 0018 records: a decision about whether a caller may
    do something is a pure policy in `internal/policy`, "an access mask" and
    "a gate on an operation" included, and only an ADR exempts code from that.
+4. On 2026-11-23, by the session's report, which gave each answer as the
+   option this ADR recommended and not in the owner's words: the owner
+   answered the first four of the five calls this ADR put to the owner, each
+   as recommended. A diverged mount grants no MODIFY, EXTEND or DELETE (§4).
+   In a sticky directory DELETE and MODIFY are granted by the directory's
+   mode (§5). A regular file's `ACCESS` answer stays the mode's verdict, and
+   reports neither the owner override nor READ for execute (§3). And an
+   object that is neither a regular file nor a directory keeps the bits it
+   has until #69 (§6). The fifth call, that the `CHANGES` line takes no
+   `BREAKING:`, the session decided, since no running deployment must act
+   (§14; Assumption 19); the report gives that one as the session's own and
+   not as the owner's. All five were the architect's judgement until then.
+   The report says nothing of any other assumption here, and each of those
+   stays the architect's.
 
 **The defect.** #97, "ACCESS grants what the operations then refuse", as the
 session gave its text (Assumption 2). `Access` "disagrees with the operations
@@ -404,10 +445,24 @@ answered as it was.
 
 **Two laws**, which hold for `Unix()` and which X3, X4 and X7 (§10) test:
 
-- *An advisory request only narrows.* For every request `r`, if `Unix()`
-  allows `r` with `Advisory` set, it allows `r` with it unset. The two
-  answers differ only when the `Op` is `OpRead`, `OpWrite` or `OpTruncate`
-  and `Object` is a regular file.
+- *An advisory request only narrows.* For every request `r` whose `Object`
+  is a regular file or a directory, if `Unix()` allows `r` with `Advisory`
+  set, it allows `r` with it unset, and the two answers differ only when
+  the `Op` is `OpRead`, `OpWrite` or `OpTruncate` and `Object` is a regular
+  file. For every request whose `Op` is none of those three, whatever its
+  `Object`, the two answers are the same.
+
+  The law stops there (Assumption 24). It is not claimed for `OpRead`,
+  `OpWrite` or `OpTruncate` on an `Object` that is neither a regular file
+  nor a directory. The rows above give such a request one answer, marked or
+  not, since lines 3 and 4 never reach it; but that is what the rows do
+  today, and no test asks it. Unmarked, such a request is ADR 0014 §11's
+  U3, which stays unpinned where `Permits` allows and is #69's to decide,
+  while marked it is pinned as allowed there (§6; X1, X4 and X6). Claimed
+  for every request, as this section had it until the pass of 2026-11-23,
+  the law pinned the unmarked answer through the marked one, against §6
+  and §10. Of the two, the law gives way: it is claimed where §8's S2 rests
+  on it, and no further.
 - *Execution is backed by a read.* For a regular file, if `Unix()` allows
   `OpExecute`, it allows `OpRead` unmarked, by line 2 or by line 4. That is
   ADR 0025 §3's fourth item, which stays closed.
@@ -445,6 +500,48 @@ pinned.
 old, given a `p` that keeps it: it takes no lock, makes no store call, logs
 nothing, modifies nothing it is given, `Caller.GIDs` included, keeps nothing
 after it returns, and allocates nothing when `p` does not.
+
+**What coder's commit chose**, recorded against `729360f` where the pins
+above left room (Assumption 25):
+
+- In `internal/policy/policy.go`, §1's two tables are data. An unexported
+  `type accessRow struct { bit uint32; change bool; ops [2]Op }` is one bit
+  of a table: the requests the bit names, in order, and whether it names a
+  change. A zero `Op` ends the list, so a row whose first `Op` is zero has
+  no request. `var accessDir` and `var accessOther` are arrays of six rows
+  each, in ascending order of their bits, for a directory and for every
+  other type. The three rows with no request, the directory's EXECUTE and
+  the other table's LOOKUP and DELETE, have `change` false, which decides
+  nothing, since a row with no request is passed over first.
+- The two tables are package variables, since Go has no constant array.
+  They are unexported, and nothing names them but their declarations and
+  `AccessBits`, which takes a pointer to one, reads it, and writes neither.
+  They hold nothing that moves and name no state, so ADR 0018 §2's state
+  rule does not reach them (Assumption 27); that nothing writes them is
+  review's to keep (§10).
+- `AccessBits` takes the directory's table for `vfs.TypeDir` and the other
+  for every other type, and walks it. One condition passes a row over,
+  asking nothing: the bit is not in `want`, or the row has no request, or
+  it names a change and `mutable` is false, tried in that order. For a row
+  it asks, it builds each request as
+  `Request{Op: op, Caller: c, Object: o, Advisory: true}`, sets `Dst` to
+  `o` where the `Op` is `OpRename`, and leaves the row at the first `Check`
+  that does not return nil. It ORs in the rows' own bits and no other,
+  which is why a bit outside the six is never granted.
+- `fileAccess`, the helper behind the three file rows, gains a fourth
+  parameter, `advisory bool`, which `Check` fills from `r.Advisory`. Lines
+  3 and 4 sit under one condition, `!advisory && o.Type == vfs.TypeReg`,
+  and lines 1, 2 and the last are as they were. `Check`'s cases for
+  `OpRead` and for `OpWrite` and `OpTruncate` are the only code that reads
+  the field, and `AccessBits` is the only code that sets it.
+- The `OpExecute` row is a case of `Check`'s own, of the three lines above,
+  and does not go through `fileAccess`. The constant follows `OpRename` in
+  the same `iota` block, so its value is 13. The package comment's `Spec:`
+  line gains this ADR's §1, §2 and §3.
+- In `internal/blobfs/fs.go`, `Access` is §7's sketch, statement for
+  statement, and it and `FS.perm` carry the doc comments §7 asks for. The
+  file names no `vfs.Access` bit, and within it `f.mode` is read by `Run`
+  and by `mutable()` alone. No other line of the file changed (§11).
 
 ### 3. `ACCESS` still reports the mode's permissions on a file
 
@@ -620,12 +717,17 @@ it too (Assumption 12).
 **Pinned as it is, not as it should be.** X1 pins these bits, as ADR 0014
 §11's P9 did. §8's property is not claimed for such an object: what a
 `Read`, a `Write` or a size change of a symlink should answer is #69's, and
-ADR 0014 §11's U3 stays unpinned for the calls where `Permits` allows. Two
-things bind #69's ADR when it comes:
+ADR 0014 §11's U3 stays unpinned for the calls where `Permits` allows. Nor
+is §2's first law claimed for such an object: the rows answer an advisory
+request of one as they answer the same request unmarked, and no test holds
+them to that (§2; Assumption 24). Two things bind #69's ADR when it comes:
 
 - Its change to the three file rows reaches `ACCESS`, which asks them. If a
   symlink is refused `OpRead`, `ACCESS` stops granting it READ unless that
-  ADR says otherwise, and X1 fails until it decides.
+  ADR says otherwise, and X1 fails until it decides. That ADR may instead
+  refuse the call alone and leave the advisory answer as it is: §2's first
+  law does not reach such an object, so nothing here stands against it,
+  and no test here fails for it.
 - A symlink's READ is not idle. XNU's `readlink` asks
   `KAUTH_VNODE_READ_DATA` of the symlink, which Apple's NFS client turns
   into an `ACCESS` for READ and answers `EACCES` when it is not granted
@@ -778,7 +880,12 @@ The bits are written R, L, M, E, D and X below for `vfs.AccessRead`,
 **What becomes pinned.** ADR 0014 §11's U5, whole. P9 is replaced by X1,
 which pins every bit for every type. U3 stays unpinned for a call, a request
 that is not advisory, where `Permits` allows, and U6 stays as it is; no test
-here relies on either.
+here relies on either. U3 was written of the requests a call makes, before
+the mark existed, and by the *Growth* rule it speaks of those alone: an
+advisory request of such an object is no part of it, and X1, X4 and X6 pin
+it. So no test asks §2's first law of an object that is neither a regular
+file nor a directory: asked there, beside those advisory answers, it would
+pin U3 where `Permits` allows (§2).
 
 **`internal/policy`** (package `policy_test`). A new file,
 `internal/policy/access_test.go`, with helpers of its own prefixed `ac`, and
@@ -800,7 +907,10 @@ refusal a test pins is compared with `==` against the bare `vfs.Status`.
   - *nothing widens*: with `mutable` true, the mask has no bit outside what
     ADR 0014 §5's rule gave, written as a second oracle: R with read; L for
     a directory with read or execute; M and E with write; D for a directory
-    with write; X for a non-directory with execute;
+    with write; X for a non-directory with execute and
+    `o.Mode & 0o111 != 0`, as ADR 0014 §5 writes it, a condition `Permits`
+    already implies for a non-directory, so that the oracle is the old rule
+    word for word;
   - *the mask asked for*: over a smaller grid, at least the modes 0,
     `0o111`, `0o222`, `0o444`, `0o333`, `0o555`, `0o666`, `0o700`, `0o070`,
     `0o007`, `0o644`, `0o755`, `0o777`, `0o1777`, `0o4711` and `0o7000`, the
@@ -828,12 +938,17 @@ refusal a test pins is compared with `==` against the bare `vfs.Status`.
   - `mutable` false, every bit asked: a directory is answered R and L,
     asked `OpReadDir` and `OpLookup` alone; a file R and X, asked `OpRead`
     and `OpExecute` alone;
-  - one `Op` refused at a time, with each of `vfs.ErrNXIO`, `vfs.ErrAcces`,
-    an `errors.New` value, a wrapped error and a pointer error: the answer
-    lacks exactly the bits whose requests hold that `Op`. Refusing
-    `OpTruncate` takes M from a file and leaves E. Refusing `OpWrite` takes
-    M and E, and the requests are then `OpRead`, `OpWrite`, `OpWrite`,
-    `OpExecute`, since M stops at its first refusal;
+  - one `Op` refused at a time, each `Op` from `OpRead` to `OpExecute`, 1
+    to 13, of each of the four objects, with each of `vfs.ErrNXIO`,
+    `vfs.ErrAcces`, an `errors.New` value, a wrapped error and a pointer
+    error: the answer lacks exactly the bits whose requests hold that `Op`,
+    which for an `Op` the object's table never asks is none, and the
+    requests are the ones §2's procedure gives, which the test writes out
+    as an oracle of its own. Two cases are given in so many words, of each
+    object that is not a directory. Refusing `OpTruncate` takes M and
+    leaves E. Refusing `OpWrite` takes M and E, and the requests are then
+    `OpRead`, `OpWrite`, `OpWrite`, `OpExecute`, since M stops at its first
+    refusal;
   - `want` 0, and a `want` with no bit of the six: the answer is 0 and
     nothing is asked.
 - **X3. The direction** (`TestWhatAccessBitsGrantsTheRowsAllow`; §8's S2 and
@@ -858,7 +973,10 @@ refusal a test pins is compared with `==` against the bare `vfs.Status`.
   is `vfs.ErrIsDir`; a regular file is nil exactly when `oraclePermits`
   gives the row's permission, and `vfs.ErrAcces` otherwise; any other type
   is nil exactly when `oraclePermits` gives it, and otherwise a refusal
-  whose error is not pinned.
+  whose error is not pinned. It also asks §2's first law, of a regular file
+  and of a directory alone: where the marked request is allowed, the same
+  request unmarked is allowed. It does not ask it of another type, where
+  the unmarked request is U3.
 - **X5. The `OpExecute` row, exhaustively**
   (`TestTheExecuteRowExhaustively`). Over the same grid, with `Advisory`
   unset and set: a directory is `vfs.ErrIsDir`; anything else is nil exactly
@@ -900,8 +1018,11 @@ refusal a test pins is compared with `==` against the bare `vfs.Status`.
     called `AccessBits(c, o)`; P12 asks every `Op` from 0 to 14.
   - P13, `TestUnreadFieldsChangeNothing`, gains a loop over every P4 and P5
     request: with `Advisory` flipped, the answer is the same unless the `Op`
-    is `OpRead`, `OpWrite` or `OpTruncate`; and for those three, a request
-    that is refused unmarked is refused marked.
+    is `OpRead`, `OpWrite` or `OpTruncate`; and for those three, of a
+    regular file or a directory, a request that is refused unmarked is
+    refused marked. A request for one of the three of any other type is
+    passed over, X6's two symlink rows among them, since unmarked it is U3
+    (§2).
   - `sampleRequest()` sets `Advisory`, and `sameRequest` compares it, so
     that P8 still shows a `Func` given the request unchanged.
   - The header, which says that U5 is unpinned, says that it is pinned
@@ -972,7 +1093,9 @@ name the code lacks at `4ded55e` and no helper this PR adds to another file.
   | `f000` | 0 | nothing | nothing | nothing | R M E |
   | `f070` | `0o070` | nothing | R M E X | nothing | R M E X |
 
-  And for each row the operations agree:
+  And for each cell the operations agree. What a cell grants is read from
+  the tables above and not from the mask `Access` returned, so that a wrong
+  mask fails once, as a mask, and the operations are judged apart from it:
   - a directory's R granted: the caller's `ReadDir` returns nil; not
     granted, `vfs.ErrAcces`. Its L: `Lookup` of `k` returns nil, or
     `vfs.ErrAcces`;
@@ -1003,12 +1126,15 @@ name the code lacks at `4ded55e` and no helper this PR adds to another file.
   - *Read-only.* A second mount of the same bucket is made with
     `Config.ReadOnly` set, and the first is not used again. On it, for each
     of the three callers, `Access` with every bit gives R L on `d`, R on `f`
-    and R X on `x`, and asked for M, E and D alone gives 0. `Create` in
-    `d`, `Remove` of `k` and `Write` of `f` return `vfs.ErrROFS`, and
-    `Lookup` of `k`, `ReadDir` of `d` and `Read` of `f` return nil.
+    and R X on `x`, and asked for M, E and D alone gives 0. Each of the
+    three callers also makes the calls: its `Create` in `d`, `Remove` of
+    `k` and `Write` of `f` return `vfs.ErrROFS`, since the gate refuses
+    whoever asks, and its `Lookup` of `k`, `ReadDir` of `d` and `Read` of
+    `f` return nil.
   - *Diverged.* As ADR 0025 §6's A9 diverges a mount. Then the same masks,
-    and `Create` in `d`, `Remove` of `k` and `Write` of `f` return
-    `vfs.ErrStale`, with the three reads returning nil.
+    and for each of the three callers `Create` in `d`, `Remove` of `k` and
+    `Write` of `f` return `vfs.ErrStale`, with its three reads returning
+    nil.
 - **X10. No check of `Access`'s is outside the policy**
   (`TestNoAccessCheckRemainsOutsideThePolicy`; §7). `sp24Mount` with a
   policy of the test's own that allows everything until it is switched,
@@ -1110,6 +1236,31 @@ or the new `AccessBits`, so their packages do not build there and have no
 red run: X1 to X7, X11 and A4's revised calls are checked first against
 coder's change. After the change every test passes.
 
+**What test-author's commit settled**, recorded against `e2d1423`, read on
+2026-11-23 (Assumptions 24 to 26). Its report raised five points where the
+text above left room or was at odds with itself. Each is decided in the
+text it bears on, and the committed tests match every one, so no test
+changes:
+
+1. *§2's first law, against U3 staying unpinned.* The law gives way: it is
+   claimed for a regular file and a directory alone (§2), and U3 stays
+   unpinned where `Permits` allows. X4's check of the law, and P13's, pass
+   over every other type, as committed.
+2. *Who makes X9's calls.* Each of the three callers makes the three
+   changes and the three reads, on both mounts, as committed.
+3. *What drives X8's operations.* The tables' cells, not the mask `Access`
+   returned, as committed. That is what lets the red run fail on six masks
+   and pass every operation.
+4. *Which `Op`s X2 refuses.* Every `Op` from 1 to 13 of each of the four
+   objects, with what is expected taken from an oracle of §2's procedure
+   beside the two cases given in so many words, as committed.
+5. *X1's old rule for X.* ADR 0014 §5's bullet word for word, its
+   `o.Mode & 0o111 != 0` included, as committed.
+
+One thing the commit does beyond the text, which stands: X5 also asks §2's
+second law of a regular file, directly, where X3 and ADR 0025 §6's A4 ask
+it through `AccessBits`.
+
 **What only review can show:**
 
 - that `internal/policy/policy.go` and `internal/blobfs/fs.go` are the only
@@ -1124,10 +1275,13 @@ coder's change. After the change every test passes.
   row does;
 - that `AccessBits` and the rows still take no lock, log nothing and
   allocate nothing when they allow;
+- that nothing writes `accessDir` or `accessOther`, the two tables coder's
+  commit holds §1 in, which are package variables (§2);
 - that nothing is exported beyond §2, and that `internal/vfs` and
   `internal/nfs` are unchanged;
 - that no function `docs/tla/trace.tsv` names was edited, `mutable()` above
-  all (§11);
+  all (§11), which the architect's pass of 2026-11-23 read and found so,
+  and which review still judges;
 - how a kernel client behaves, which needs a mount and a human
   (Assumption 18).
 
@@ -1157,6 +1311,38 @@ its entry, which gives no signature. `Request`'s fields are not entries
 (ADR 0026 §9). `UnixAllows(r)` is still `policy.Unix().Check(r) == nil`,
 and `EffectAuthorized`, which is stated through it for a call's request,
 reads as it did.
+
+**The pass after coder's commit** was made on 2026-11-23 against `729360f`,
+read and not run (Assumption 25). No function `docs/tla/trace.tsv` names
+changed:
+
+- The session's `git diff --stat 4ded55e..729360f`, over `internal` less
+  its test files, lists two files: `internal/policy/policy.go`, which the
+  trace does not name, and `internal/blobfs/fs.go`, with 28 lines changed.
+  So `internal/blobfs/commit.go` and the three files of `internal/store`
+  that the trace names are untouched, by the session's account.
+- In `fs.go` the change is in two places, which are the 28 lines:
+  `FS.perm`'s doc comment, five lines for five, and `Access` with its doc
+  comment, nine lines for nine. Neither is a traced function.
+- The thirteen functions of `fs.go` that the trace names, `New`,
+  `FS.mutable`, `FS.markDirty`, `FS.SetAttr`, `FS.createEntry`,
+  `FS.unlink`, `FS.Rename`, `FS.bufferWrite`, `FS.truncate`, `FS.flushAll`,
+  `FS.settleAll`, `FS.flushOpen` and `FS.putChunk`, were each read whole at
+  `729360f` beside the file as it stood before the change, and each is the
+  same line for line, its `TLA+:` line and its doc comment included.
+  `mutable()` gained a caller, `Access`, and no line.
+
+So no row of `trace.tsv` changes, `locks` and `decided` included. The
+module's `Checked against` line, `docs/tla/README.md`'s statement of it and
+`docs/vocabulary.md` V3's stay at `afbda93`. Nothing under `docs/tla/`
+changes in this PR, and CLAUDE.md's merge bar asks no `tla.sh full` of it.
+`Access` now reads the mode through `mutable()`, in its hold of `FS.mu` for
+reading; it fires nothing and changes nothing, so it is still no `Mutate`.
+
+`OpExecute` is in the code as of `729360f`: `internal/policy/policy.go`
+declares it after `OpRename`, in the same `iota` block, so its value is 13.
+`docs/vocabulary.md` V7 now marks it as existing, as of that commit, where
+it had it reserved. Nothing else in the vocabulary changes.
 
 ### 12. State, the link and exemptions
 
@@ -1219,7 +1405,14 @@ true, word for word. `docs/DESIGN.md`'s table of ADRs gains this ADR's row,
 and `docs/adr/README.md`'s index does.
 
 One `CHANGES` line, proposed for the session to record, without `BREAKING:`
-(Assumption 19):
+(Assumption 19). The session decided on 2026-11-23 that it takes none
+(*Context*, decision 4), and at `729360f` had not yet recorded the line. The
+pass of that day reworded its last sentence in two places, against what was
+committed, and changed nothing before it. "A file's answer is unchanged"
+said too much: on a diverged mount a file loses MODIFY and EXTEND, as the
+line itself says just before. And the sticky clause named DELETE alone,
+where §5 and the owner's decision have MODIFY beside it. The line as it now
+stands:
 
 > ACCESS grants only what the operations then allow: on a directory it
 > grants LOOKUP only with search permission, and MODIFY, EXTEND and DELETE
@@ -1229,16 +1422,21 @@ One `CHANGES` line, proposed for the session to record, without `BREAKING:`
 > it grants none of MODIFY, EXTEND and DELETE, as on a read-only mount, so a
 > client that asks before it opens now refuses to open a file there for
 > writing, where before the open succeeded and the first WRITE failed with
-> NFS3ERR_STALE. A file's answer is unchanged: ACCESS still reports only
-> what the mode bits give, and on a sticky directory it still grants DELETE
-> by the directory's mode alone.
+> NFS3ERR_STALE. Nothing else changes: on a file ACCESS still reports only
+> what the mode bits give, and in a sticky directory it still grants MODIFY
+> and DELETE by the directory's mode, whoever owns the entries.
 
-## For the owner
+## Put to the owner, and decided
 
-Each of these is decided above, as the architect's recommendation. They are
-the ones with a trade-off a client can see, so the session can put them to
-the owner. None blocks the tests or the code, and a different answer to any
-of them changes a table here and its pins, not the mechanism.
+This section was headed *For the owner* until the pass of 2026-11-23. It
+listed five judgement calls, each decided above as the architect's
+recommendation: the ones with a trade-off a client can see, for the session
+to put to the owner. None is open now. By the session's report the owner
+decided the first four on 2026-11-23, each as recommended, and the session
+decided the fifth (*Context*, decision 4). Each item is kept as it was put,
+with the alternatives that were weighed, and ends with who decided it. A
+different answer to any of them would have changed a table here and its
+pins, not the mechanism.
 
 1. **A diverged mount grants no MODIFY, EXTEND or DELETE** (§4). The issue's
    done-when asks for it. What a user sees changes: an open for writing is
@@ -1251,6 +1449,7 @@ of them changes a table here and its pins, not the mechanism.
    mismatch; or fail `ACCESS` itself with `NFS3ERR_STALE` on a diverged
    mount, which is louder and also stops the reads a diverged mount still
    serves.
+   *Decided* by the owner: mask.
 2. **In a sticky directory, DELETE and MODIFY are granted by the
    directory's mode** (§5), to a caller who may then remove or rename only
    its own entries. *Recommended:* grant, as Linux's server does.
@@ -1259,6 +1458,7 @@ of them changes a table here and its pins, not the mechanism.
    such a directory where it checks, since it needs all three bits for
    write, and a macOS client from removing its own file there, since it
    asks MODIFY first.
+   *Decided* by the owner: grant both by the directory's mode.
 3. **`ACCESS` still reports neither the owner override nor the read that
    execute gives** (§3), so #97's done-when is met one way: what `ACCESS`
    grants, the operations allow. ADR 0025 decided both, and this ADR keeps
@@ -1266,11 +1466,16 @@ of them changes a table here and its pins, not the mechanism.
    A client would then let an owner open its read-only file for writing,
    against RFC 1813 §4.4's own sentence, and let anyone who may run a
    program open it for reading.
+   *Decided* by the owner: a regular file's answer stays the mode's
+   verdict, and reports neither.
 4. **An object that is neither a file nor a directory keeps its bits**
    (§6), a symlink's READ above all, until #69 decides. *Alternative:*
    grant such an object nothing now, which as read stops `readlink(2)` on a
    macOS client.
+   *Decided* by the owner: such an object keeps today's bits until #69.
 5. **The `CHANGES` line takes no `BREAKING:`** (§14; Assumption 19).
+   *Decided* by the session, not the owner: no prefix, since no running
+   deployment must act.
 
 ## Assumptions
 
@@ -1280,7 +1485,10 @@ Each is mine unless it says otherwise.
    2026-10-10 words, as ADRs 0015 to 0026 were. The issue's done-when asks
    that `ACCESS` derive from the operations' rules, on a diverged mount too.
    The rest is mine: the mechanism (§1, §2), what the bits ask
-   (Assumption 5), and the five calls *For the owner* lists.
+   (Assumption 5), and the five calls *Put to the owner, and decided*
+   lists. Those five were mine until 2026-11-23, when by the session's
+   report the owner decided the first four, each as this ADR has it, and
+   the session the fifth (*Context*, decision 4).
 2. **Read, not run, at `4ded55e`.** Every statement about the code was
    checked by reading it there; nothing was run. #97's text and its comment
    are as the session gave them. The titles of #69, #98, #99, #100 and #101
@@ -1290,7 +1498,9 @@ Each is mine unless it says otherwise.
    contradicts ADR 0025 §3, which the issue predates, and RFC 1813 §4.4. I
    read "derives from the same rules" as: `ACCESS` asks the rows that
    decide the operations, and grants only what they allow. ADR 0025 §3 says
-   the same of the direction.
+   the same of the direction. By the session's report the owner decided on
+   2026-11-23 that a regular file's answer stays the mode's verdict
+   (*Context*, decision 4), which is this reading.
 4. **`ACCESS` goes through the installed policy, by a function over a
    `Policy`** (§2), rather than a row of its own or a direct use of
    `Permits`. A row of its own would let a policy answer `ACCESS` one way
@@ -1337,11 +1547,18 @@ Each is mine unless it says otherwise.
 11. **A sticky directory's DELETE and MODIFY** (§5) follow ADR 0026 §5,
     whose Assumption 14 gives the reason for DELETE. That MODIFY carries
     the same qualification is new here, and follows from what MODIFY asks.
+    By the session's report the owner decided on 2026-11-23 that both are
+    granted by the directory's mode (*Context*, decision 4).
 12. **An object that is neither keeps its bits, pinned as present
     behaviour** (§6). ADR 0025 §3 has them wait on #69. They are pinned
     exactly, as P9 pinned them, so that #69's change to the rows fails a
     test that names the decision instead of passing unseen. That a grant
-    of MODIFY on a symlink is right is not claimed.
+    of MODIFY on a symlink is right is not claimed. By the session's report
+    the owner decided on 2026-11-23 that such an object keeps today's bits
+    until #69 (*Context*, decision 4). What is pinned is the answer to an
+    advisory request, which is what `ACCESS` asks; the same request
+    unmarked is not, so a change of #69's that moves a call's answer alone
+    fails no test here (Assumption 24).
 13. **A grant is not recalled, and what a client shows a user** (§4). The
     errno is the client's: `EACCES` is read from Apple's kext, and for
     Linux's client is from recall of `nfs_do_access`, not fetched. How long
@@ -1362,7 +1579,9 @@ Each is mine unless it says otherwise.
     listed stand is from reading each against §1.
 16. **No TLA+, and no trace pass** (§11), provided coder edits no traced
     function. `mutable()`'s doc comment needs no word: it still reports
-    whether the mount accepts changes, from the mode alone.
+    whether the mount accepts changes, from the mode alone. Coder's commit
+    `729360f` edits none, as read on 2026-11-23, so none is due (§11;
+    Assumption 25).
 17. **Nothing in `internal/nfs` changes**, though its `access` handler
     pairs the mask with attributes read later (*What this does not
     decide*). Closing that needs `Access` to return the attributes, which
@@ -1381,7 +1600,13 @@ Each is mine unless it says otherwise.
     place a program that ran now stops, at an open for reading and writing
     that only read; a diverged mount already needs a remount, and a
     read-only mount has always answered so. If the owner reads that as an
-    action, the same line takes the prefix.
+    action, the same line takes the prefix. The session decided on
+    2026-11-23 that the line takes no `BREAKING:`, since no running
+    deployment must act (*Context*, decision 4). The reasoning above is
+    kept as the reasoning. The decision is the session's, and by its report
+    not the owner's, who may still read it the other way. The line's last
+    sentence was reworded in the pass of that day (§14), which changes
+    nothing in this judgement.
 20. **`internal/vfs` is untouched** (§2). `vfs.FS.Access` has no doc
     comment, and gains none: the rules are `internal/policy`'s, which the
     backend that replaces `blobfs` reuses (ADR 0025, Assumption 17).
@@ -1390,10 +1615,90 @@ Each is mine unless it says otherwise.
 22. **A second pass of the architect's, after coder's commit** (§11), to
     mark `OpExecute` as existing in the vocabulary, to record what coder
     chose where the pins leave room, and to confirm from the session's
-    diff that no traced function changed.
+    diff that no traced function changed. It was made on 2026-11-23,
+    against `729360f` (§2, §11; Assumption 25). By the session's brief it
+    also recorded the owner's and the session's decisions (*Context*,
+    decision 4), settled the five points test-author's report raised (§10;
+    Assumptions 24 and 26), and looked again at the `CHANGES` line (§14).
 23. **The costs are not measured.** One `ACCESS` asks at most five requests
     where it asked none, each a call through an interface with no
     allocation.
+24. **The first law is claimed for a regular file and a directory alone**
+    (§2, §6, §10). test-author's report found the law, claimed for every
+    request, at odds with U3 staying unpinned: beside X6's row that allows
+    an advisory `OpRead` of a symlink, it pinned the same request unmarked.
+    One of the two had to give way, and I chose the law. S2 is claimed for
+    a regular file and a directory, and the law is there to carry S2;
+    nothing else here rests on it. The other choice would have this ADR
+    decide what a `Read`, a `Write` or a size change of a symlink answers
+    where its mode allows, which §13 leaves to #69 and ADR 0014 §11 has
+    kept unpinned since it wrote U3. The cost is that #69's ADR may refuse
+    such a call and leave `ACCESS` granting the bit, and no test here fails
+    for it: X1 fails only if the advisory answer moves. I accept that,
+    since a symlink's READ already speaks for a `READLINK`, which asks no
+    policy, and not for a `Read` (§6). The rows are unchanged, and so is
+    every test: the committed X4 and P13 already pass over such an object,
+    which test-author's report says its brief asked for.
+25. **The pass after the two commits was read, not run, and how far it
+    went** (§2, §10, §11). Nothing was run by me, and I cannot run git. At
+    `729360f` I read `internal/policy/policy.go` whole. In
+    `internal/blobfs/fs.go` I read lines 1 to 1081 whole, which hold
+    `FS.perm`, `New`, `mutable`, `SetAttr`, `Access`, `markDirty`,
+    `createEntry`, `unlink` and `Rename`, and then `putChunk`,
+    `bufferWrite`, `truncate`, `flushOpen`, `flushAll` and `settleAll`
+    whole, each with its doc comment. I compared all of that, line by line,
+    with a copy of each file from before coder's change. The copy is not a
+    checkout of `4ded55e`: it is the working tree that ADR 0026's coder
+    dispatch left on the session's machine, which holds that ADR's change
+    and not this one. That it is `4ded55e`'s text is not proven, and rests
+    on the counts agreeing with the session's `git diff --stat`. `fs.go` is
+    2138 lines in both, and the two places where the copies differ are 14
+    lines for 14, the 28 the stat gives the file. `policy.go` is 354 lines
+    in the copy and 433 at `729360f`, the net of the 117 insertions and 38
+    deletions that the stat's totals, 131 and 52, leave it. Over the rest
+    of `fs.go` I compared every function declaration, and every line that
+    takes or releases a lock or the commit gate, calls `mutable()`,
+    `markDirty()`, `checkPerm` or `f.perm.Check`, reads `f.mode`, or
+    carries a `TLA+:` marker: each is at the same line with the same text
+    in both, outside `Access`. That `internal/blobfs/commit.go` and
+    `internal/store` did not change is the session's stat, not a reading
+    of mine. A `git diff 4ded55e..729360f` of the files `trace.tsv` names
+    is the session's to run if it wants more than this. Of the tests I read
+    `internal/policy/access_test.go`, `internal/blobfs/access_test.go` and
+    `internal/blobfs/access_wiring_test.go` whole, and of
+    `internal/policy/policy_test.go` the header, the fixtures,
+    `TestConstantsArePinned`, the file rows and X6's rows of `unixCases()`,
+    `p5Cases()`, P6, P10, P12 and P13. `owner_access_test.go`,
+    `policy_wiring_test.go` and `internal/nfs/access_test.go` I searched
+    and did not read whole. That the suite passes is the session's report
+    of its merge bar on `729360f`.
+26. **The four smaller points of the tests** (§10). Each was open in the
+    text, and each is settled as the committed test has it. X9's calls are
+    made by each of the three callers, because the gate judges the mount
+    and not the caller, which one caller would not show, and because `d`'s
+    and `f`'s modes let all three make the reads. X8's operations are
+    driven by the tables, because driven by the mask `Access` returned a
+    wrong mask would fail twice, and the red run's note could not hold.
+    X2 refuses every `Op`, the ones a table never asks included, which
+    costs nothing and shows that `AccessBits` asks nothing else. What X2
+    expects comes from an oracle the test writes from §2's procedure, which
+    could share a misreading with the code; the cases given in so many
+    words anchor it. X2 and X11 between them list every request of both
+    tables, and a refusal at four of a file's five places and at three of
+    a directory's five. And X1's second oracle keeps `o.Mode & 0o111 != 0`,
+    because that is ADR 0014 §5's text, and the grants are the same either
+    way.
+27. **The two tables are data, not state** (§2). `accessDir` and
+    `accessOther` are package variables only because Go has no constant
+    array. ADR 0018 §2 has the state rule reach state that has named
+    states; these have none, and nothing writes them, so I read them as
+    outside it, with no exemption to grant. A machine's table is a
+    package-level variable too (ADR 0014 §3). They are unexported, so no
+    importer can reassign them, which is the worry ADR 0014 §5 has about a
+    package-level authority. A switch inside `AccessBits` would have kept
+    them out of package scope; coder's form is within the pins and reads as
+    §1's tables do, and I leave it. A later change that wrote either would
+    make it state, and would need its own decision.
 
 ## Alternatives considered
 
@@ -1415,8 +1720,11 @@ Each is mine unless it says otherwise.
   bool, and an NFSv4 `OPEN` may not ask what `ACCESS` asks.
 - **Reporting the owner override, or READ for execute.** §3.
 - **Withholding DELETE and MODIFY in a sticky directory.** §5.
-- **Leaving a diverged mount unmasked, or failing its `ACCESS`.** *For the
-  owner*, 1.
+- **Leaving a diverged mount unmasked, or failing its `ACCESS`.** *Put to
+  the owner, and decided*, 1.
+- **Keeping §2's first law for every request**, and letting it pin U3 where
+  `Permits` allows. This ADR would then decide what a call on a symlink
+  answers, which is #69's (Assumption 24).
 - **Dropping the mount gate for an object that is neither**, as Linux does
   for device files. This server makes none, and ADR 0011 §4 pins the
   read-only answer (§6).
