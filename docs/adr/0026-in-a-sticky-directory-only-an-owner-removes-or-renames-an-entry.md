@@ -313,7 +313,8 @@ purity, `All` and `Func`. No function, type or constant is added to
 
 **What the rows read.** `Op`, `Caller`, `Object` and `Entry`, and for
 `OpRename` `Dst` and `Replaced` too. Of `Object` and `Dst` they read the
-type, the low nine mode bits through `Permits`, the bit `0o1000`, and the
+type, the low nine mode bits and the `GID` through `Permits`, the bit
+`0o1000`, and the
 `UID`. Of `*Entry` and `*Replaced` they read the `UID` and nothing else: not
 the type, the mode or the group. `OpRemoveEntry` does not read `Replaced`,
 and no other row reads either field.
@@ -733,8 +734,9 @@ fixed." This ADR was not given #6's text; ADR 0015 gives its subject as
 authenticating the peer (its Assumption 11). The sentence is right, and this
 ADR does not wait for #6: until the server can tell who is calling, the rule
 protects users from each other through honest clients only, which is what
-every permission of this server does today, and after #6 the same row
-protects them from each other outright.
+every permission of this server does today. After #6 the same row protects
+them from each other as far as #6 lets the server trust the uid it is sent:
+outright only if #6 authenticates the user, and not the peer host alone.
 
 **What the rule does not protect**, with or without #6:
 
