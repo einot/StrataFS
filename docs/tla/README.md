@@ -229,6 +229,16 @@ bash scripts/tla.sh show <config>   # one configuration, with TLC's whole output
   to its row's `default`. The runtime installed under
   `$HOME/.local/share/tla/` is not on `PATH`, which is why `$TLA_JAVA`
   exists.
+- The `java` row names the archive built for the machine the session runs
+  on, an Apple Silicon Mac: Temurin's build for aarch64 macOS (ADR 0013,
+  *The runtime since 2026-11-22*). The runner checks the `java` it starts
+  and never the archive (step 4 below), so whoever installs the runtime
+  checks the archive's size and SHA-256 against the row before unpacking it.
+  A `java` the machine cannot execute fails the version probe, and the run
+  with it. On another machine a Java 11 or later built for it passes, at
+  the row's `default` or named by `$TLA_JAVA`. ADR 0013 records the x64
+  macOS archive of the same release, which unpacked to the directory the
+  `default` names.
 - Nothing is downloaded. A tool that is missing fails the run.
 
 **What the runner checks and runs, in order.** `<root>` is the repository the
