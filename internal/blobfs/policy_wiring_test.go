@@ -12,13 +12,17 @@ package blobfs
 //   - W2, TestEveryMethodAsksThePolicyAndStopsAtItsRefusal: every method but
 //     SetAttr (whose W2 is ADR 0024 section 7's S4) asks f.perm for the
 //     requests listed, in order, and a refusal is returned bare and stops the
-//     call having changed nothing;
+//     call having changed nothing. Its tree and its rows for Remove, Rmdir and
+//     Rename are ADR 0026 section 7's, which replaces ADR 0014's for #148: no
+//     two objects a row names are equal, and each request's Entry and
+//     Replaced (ADR 0026 section 2) are checked;
 //   - W2 for the requested uid,
 //     TestARequestedUIDAtCreationGoesThroughOpChownAndARefusalIsIgnored;
 //   - W3, TestNoCheckRemainsOutsideThePolicy: with an allow-all policy no
 //     check of these methods remains to refuse a caller;
 //   - W4, TestTheUnixRowsAreUnchangedThroughTheFS: a characterisation of
-//     Unix() through the FS, which passes before and after the wiring;
+//     Unix() through the FS, which passes before and after the wiring, with
+//     ADR 0026 section 7's two Rmdir rows for #148;
 //   - W5, TestGetAttrReadLinkFSStatCommitAndAccessConsultNoPolicy.
 //
 // W1, the seam, is shown by how these tests install a policy and has no test
@@ -51,7 +55,11 @@ package blobfs
 // says no row reads. Of those rows, an owner lacking its own bits (U1) and
 // read through execute alone (U2) are pinned for a regular file since ADR
 // 0025 section 6, and are tested in owner_access_test.go; W4 still leaves
-// them out. U3 to U6 stay unpinned.
+// them out. The sticky bit (U4) is pinned since ADR 0026 section 8, and is
+// tested in sticky_test.go; W4 still has no sticky row. U3, U5 and U6 stay
+// unpinned. W2's tree gives d2 the mode 0o1770, but under the recorder,
+// which allows whatever it does not refuse, no mode bears on a verdict (ADR
+// 0026 section 7).
 
 import (
 	"bytes"
@@ -78,6 +86,18 @@ var (
 	pwDir = policy.Object{Type: vfs.TypeDir, Mode: 0o755, UID: 501, GID: 20}
 	pwReg = policy.Object{Type: vfs.TypeReg, Mode: 0o644, UID: 501, GID: 20}
 	pwLnk = policy.Object{Type: vfs.TypeLnk, Mode: 0o777, UID: 501, GID: 20}
+)
+
+// pwW2D, pwW2D2, pwW2E, pwW2DD, pwW2H and pwW2V are the Objects ADR 0026
+// section 7 gives W2's tree for #148: D, D2, E, DD, H and V. With pwDir as R,
+// the root, pwReg as F and pwLnk as LN, no two of the nine are equal.
+var (
+	pwW2D  = policy.Object{Type: vfs.TypeDir, Mode: 0o750, UID: 501, GID: 20}
+	pwW2D2 = policy.Object{Type: vfs.TypeDir, Mode: 0o1770, UID: 501, GID: 20}
+	pwW2E  = policy.Object{Type: vfs.TypeReg, Mode: 0o664, UID: 501, GID: 20}
+	pwW2DD = policy.Object{Type: vfs.TypeDir, Mode: 0o711, UID: 501, GID: 20}
+	pwW2H  = policy.Object{Type: vfs.TypeReg, Mode: 0o640, UID: 501, GID: 20}
+	pwW2V  = policy.Object{Type: vfs.TypeReg, Mode: 0o600, UID: 501, GID: 20}
 )
 
 // pwBytes returns n bytes that differ from one seed to another.
@@ -125,12 +145,31 @@ func pwObjString(o policy.Object) string {
 	return fmt.Sprintf("{Type %d, Mode %#o, UID %d, GID %d}", o.Type, o.Mode, o.UID, o.GID)
 }
 
+// pwObjPtrString spells an *Object for failure messages: nil, or what it
+// points to.
+func pwObjPtrString(o *policy.Object) string {
+	if o == nil {
+		return "nil"
+	}
+	return "&" + pwObjString(*o)
+}
+
+// pwSameObjPtr reports whether a and b are both nil, or both point to equal
+// Objects.
+func pwSameObjPtr(a, b *policy.Object) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 // pwDescribe spells a list of requests for failure messages.
 func pwDescribe(reqs []policy.Request) string {
 	parts := make([]string, len(reqs))
 	for i, r := range reqs {
-		parts[i] = fmt.Sprintf("%s{Caller uid %d gid %d gids %v, Object %s, Dst %s, UID %d, GID %d}", pwOpName(r.Op),
-			r.Caller.UID, r.Caller.GID, r.Caller.GIDs, pwObjString(r.Object), pwObjString(r.Dst), r.UID, r.GID)
+		parts[i] = fmt.Sprintf("%s{Caller uid %d gid %d gids %v, Object %s, Dst %s, UID %d, GID %d, Entry %s, "+
+			"Replaced %s}", pwOpName(r.Op), r.Caller.UID, r.Caller.GID, r.Caller.GIDs, pwObjString(r.Object),
+			pwObjString(r.Dst), r.UID, r.GID, pwObjPtrString(r.Entry), pwObjPtrString(r.Replaced))
 	}
 	return "[" + strings.Join(parts, ", ") + "]"
 }
@@ -196,12 +235,16 @@ func pwRefusing(i int) string {
 }
 
 // pwWant is one request a test expects: its Op and Object, its Dst if it is
-// an OpRename, and its UID if it is an OpChown.
+// an OpRename, and its UID if it is an OpChown; and, where the test checks
+// them (pwWantW2Requests), its Entry and Replaced, nil for none (ADR 0026
+// section 2).
 type pwWant struct {
-	op  policy.Op
-	obj policy.Object
-	dst policy.Object
-	uid uint32
+	op       policy.Op
+	obj      policy.Object
+	dst      policy.Object
+	uid      uint32
+	entry    *policy.Object
+	replaced *policy.Object
 }
 
 // pwDescribeWant spells a list of expected requests for failure messages.
@@ -210,8 +253,11 @@ func pwDescribeWant(want []pwWant) string {
 	for i, w := range want {
 		s := pwOpName(w.op) + " on " + pwObjString(w.obj)
 		switch w.op {
+		case policy.OpRemoveEntry:
+			s += " with Entry " + pwObjPtrString(w.entry)
 		case policy.OpRename:
-			s += " with Dst " + pwObjString(w.dst)
+			s += " with Dst " + pwObjString(w.dst) + ", Entry " + pwObjPtrString(w.entry) + ", Replaced " +
+				pwObjPtrString(w.replaced)
 		case policy.OpChown:
 			s += fmt.Sprintf(" with UID %d", w.uid)
 		}
@@ -226,6 +272,25 @@ func pwDescribeWant(want []pwWant) string {
 func pwWantRequests(t *testing.T, what string, got []policy.Request, want []pwWant, caller vfs.Caller, why,
 	where string) {
 	t.Helper()
+	pwCompareRequests(t, what, got, want, caller, false, why, where)
+}
+
+// pwWantW2Requests is pwWantRequests for W2's rows, which also checks Entry
+// and Replaced on every request: nil where want gives none, and otherwise
+// non-nil and pointing to an Object equal to the one want gives (ADR 0026
+// section 7). So a request of any Op that sets a field want leaves nil, an
+// OpAddEntry, OpLookup, OpReadDir, OpRead or OpWrite among them, fails.
+func pwWantW2Requests(t *testing.T, what string, got []policy.Request, want []pwWant, caller vfs.Caller, why,
+	where string) {
+	t.Helper()
+	pwCompareRequests(t, what, got, want, caller, true, why, where)
+}
+
+// pwCompareRequests is pwWantRequests and pwWantW2Requests; entries says
+// whether Entry and Replaced are checked.
+func pwCompareRequests(t *testing.T, what string, got []policy.Request, want []pwWant, caller vfs.Caller,
+	entries bool, why, where string) {
+	t.Helper()
 	ok := len(got) == len(want)
 	for i := 0; ok && i < len(want); i++ {
 		g, w := got[i], want[i]
@@ -238,13 +303,21 @@ func pwWantRequests(t *testing.T, what string, got []policy.Request, want []pwWa
 			ok = false
 		case g.Caller.UID != caller.UID || g.Caller.GID != caller.GID || len(g.Caller.GIDs) != len(caller.GIDs):
 			ok = false
+		case entries && !pwSameObjPtr(g.Entry, w.entry):
+			ok = false
+		case entries && !pwSameObjPtr(g.Replaced, w.replaced):
+			ok = false
 		}
 	}
 	if ok {
 		return
 	}
-	t.Errorf("%s asked the policy %s; want exactly %s, in that order, each with Caller uid %d gid %d: %s (%s)", what,
-		pwDescribe(got), pwDescribeWant(want), caller.UID, caller.GID, why, where)
+	fields := ""
+	if entries {
+		fields = ", and Entry and Replaced as given, nil where none is given (ADR 0026 section 7)"
+	}
+	t.Errorf("%s asked the policy %s; want exactly %s, in that order, each with Caller uid %d gid %d%s: %s (%s)",
+		what, pwDescribe(got), pwDescribeWant(want), caller.UID, caller.GID, fields, why, where)
 }
 
 // pwEntry is what one Create, Mkdir, Symlink or Lookup returned.
@@ -426,27 +499,50 @@ func pwWantNoEnt(e *uc43Env, fs *FS, dir vfs.Handle, path, name, after, why, whe
 	}
 }
 
-// pwTree is W2's tree (ADR 0014 section 11): the root; the directories d and
-// d2 in it; in d the file f, with payload written at 0, the file e, never
-// written, and the symlink ln, to "f"; all committed by a Sync.
+// pwTree is W2's tree, as ADR 0026 section 7 gives it for #148: the root; the
+// directories d, of mode 0o750, and d2, of mode 0o1770, in it; in d the file
+// f, with payload written at 0, the file e, of mode 0o664, never written, the
+// symlink ln, to "f", and the empty directory dd, of mode 0o711; in d2 the
+// files h, of mode 0o640, and v, of mode 0o600, never written; all committed
+// by a Sync.
 type pwTree struct {
-	root, d, d2, f, fe, ln vfs.Handle
-	fAttr, eAttr, d2Attr   vfs.Attr
-	payload                []byte
+	root, d, d2, f, fe, ln, dd, h, v vfs.Handle
+
+	// The attributes GetAttr reported in setup.
+	fAttr, eAttr, lnAttr, d2Attr, ddAttr, hAttr, vAttr vfs.Attr
+
+	payload []byte
 }
 
 // pwW2Tree makes W2's tree as testCaller, under whatever policy fs has, and
-// requires FS.dirty to be false after its Sync and every object to be as ADR
-// 0014 section 11's facts say.
+// requires FS.dirty to be false after its Sync and every object to be the
+// Object ADR 0026 section 7 gives it: R (pwDir), D (pwW2D), D2 (pwW2D2), F
+// (pwReg), E (pwW2E), LN (pwLnk), DD (pwW2DD), H (pwW2H) and V (pwW2V).
 func pwW2Tree(e *uc43Env, fs *FS, root vfs.Handle, where string) pwTree {
 	e.t.Helper()
 	s := pwTree{root: root, payload: pwBytes(100, 3)}
-	s.d = e.mkdir(fs, root, "d", where)
-	s.d2 = e.mkdir(fs, root, "d2", where)
+	tc := testCaller
+	mode := func(m uint32) vfs.SetAttr { return vfs.SetAttr{Mode: sa24U32(m)} }
+	mkdir := func(dir vfs.Handle, path, name string, m uint32) vfs.Handle {
+		e.t.Helper()
+		what := fmt.Sprintf("setup: testCaller's Mkdir(%q, {Mode %#o})", path, m)
+		return pwMust(e, pwMkdir(e, fs, tc, dir, name, mode(m), what, where), what, where)
+	}
+	create := func(dir vfs.Handle, path, name string, m uint32) vfs.Handle {
+		e.t.Helper()
+		what := fmt.Sprintf("setup: testCaller's Create(%q, {Mode %#o}, exclusive)", path, m)
+		return pwMust(e, pwCreate(e, fs, tc, dir, name, mode(m), true, what, where), what, where)
+	}
+
+	s.d = mkdir(root, "d", "d", 0o750)
+	s.d2 = mkdir(root, "d2", "d2", 0o1770)
 	s.f = e.create(fs, s.d, "f", where)
 	e.write(fs, s.f, 0, s.payload, `setup: Write of 100 bytes at 0 of "d/f", vfs.Unstable`, where)
-	s.fe = e.create(fs, s.d, "e", where)
+	s.fe = create(s.d, "d/e", "e", 0o664)
 	s.ln = e.symlink(fs, s.d, "ln", "f", where)
+	s.dd = mkdir(s.d, "d/dd", "dd", 0o711)
+	s.h = create(s.d2, "d2/h", "h", 0o640)
+	s.v = create(s.d2, "d2/v", "v", 0o600)
 	if err := e.sync(fs, "setup: the Sync that commits W2's tree", where); err != nil {
 		e.t.Fatalf("setup: the Sync that commits W2's tree = %v, want nil against a healthy store (%s)", err, where)
 	}
@@ -455,11 +551,14 @@ func pwW2Tree(e *uc43Env, fs *FS, root vfs.Handle, where string) pwTree {
 			"(ADR 0023 section 3; %s)", where)
 	}
 	pwSetupObject(e, fs, root, "the root", pwDir, -1, where)
-	pwSetupObject(e, fs, s.d, "d", pwDir, -1, where)
-	s.d2Attr = pwSetupObject(e, fs, s.d2, "d2", pwDir, -1, where)
+	pwSetupObject(e, fs, s.d, "d", pwW2D, -1, where)
+	s.d2Attr = pwSetupObject(e, fs, s.d2, "d2", pwW2D2, -1, where)
 	s.fAttr = pwSetupObject(e, fs, s.f, "d/f", pwReg, 100, where)
-	s.eAttr = pwSetupObject(e, fs, s.fe, "d/e", pwReg, 0, where)
-	pwSetupObject(e, fs, s.ln, "d/ln", pwLnk, -1, where)
+	s.eAttr = pwSetupObject(e, fs, s.fe, "d/e", pwW2E, 0, where)
+	s.lnAttr = pwSetupObject(e, fs, s.ln, "d/ln", pwLnk, -1, where)
+	s.ddAttr = pwSetupObject(e, fs, s.dd, "d/dd", pwW2DD, -1, where)
+	s.hAttr = pwSetupObject(e, fs, s.h, "d2/h", pwW2H, 0, where)
+	s.vAttr = pwSetupObject(e, fs, s.v, "d2/v", pwW2V, 0, where)
 	return s
 }
 
@@ -478,35 +577,44 @@ type pwRow struct {
 }
 
 // TestEveryMethodAsksThePolicyAndStopsAtItsRefusal is W2 of ADR 0014 section
-// 11, for every method but SetAttr, whose W2 is ADR 0024 section 7's S4: each
-// asks f.perm for the requests section 6 lists, in order, each with Caller
-// the caller and Object the inode as it stood; returns the first refusal bare
-// (section 5) and asks nothing after it; and, refused, changes nothing, so
-// FS.changes is what it was and FS.dirty is still false.
+// 11, for every method but SetAttr, whose W2 is ADR 0024 section 7's S4, with
+// its tree and its rows for Remove, Rmdir and Rename as ADR 0026 section 7
+// revises them for #148: each method asks f.perm for the requests listed, in
+// order, each with Caller the caller, Object the inode as it stood, and Entry
+// and Replaced naming what the call would take out (ADR 0026 section 2);
+// returns the first refusal bare (ADR 0014 section 5) and asks nothing after
+// it; and, refused, changes nothing, so FS.changes is what it was and
+// FS.dirty is still false.
 //
 // sp24Mount installs an sp24Recorder; refusing nothing, testCaller makes W2's
-// tree (pwW2Tree). D, F and E are the Objects {TypeDir, 0o755, 501, 20},
-// {TypeReg, 0o644, 501, 20} and the same as F; d2's and the root's Object
-// equal D. Then, for each row: the recorder is reset to refuse the row's
-// index; FS.changes is read, c; testCaller makes the call; it returns
-// vfs.ErrNXIO, a status no row of Unix() returns, unless the row says
-// otherwise; the recorder holds exactly the row's requests; FS.changes is c
-// and FS.dirty is false; and the row's check that nothing changed holds,
-// made after reset(-1).
+// tree (pwW2Tree), whose nine Objects are R {TypeDir, 0o755}, D {TypeDir,
+// 0o750}, D2 {TypeDir, 0o1770}, F {TypeReg, 0o644}, E {TypeReg, 0o664}, LN
+// {TypeLnk, 0o777}, DD {TypeDir, 0o711}, H {TypeReg, 0o640} and V {TypeReg,
+// 0o600}, each owned by 501:20, no two equal. Then, for each row: the
+// recorder is reset to refuse the row's index; FS.changes is read, c;
+// testCaller makes the call; it returns vfs.ErrNXIO, a status no row of
+// Unix() returns, unless the row says otherwise; the recorder holds exactly
+// the row's requests, Entry and Replaced included, nil where the row gives
+// none; FS.changes is c and FS.dirty is false; and the row's check that
+// nothing changed holds, made after reset(-1).
 //
-// The rows are ADR 0014 section 11's. They run in its order except that the
-// two Reads the policy allows whole come last, after every refused call, so
-// that a failure of either cannot make a later refused row's FS.dirty check
-// fail with it. Every call is on an object of the type its operation needs
-// (ADR 0014 section 11's safety rule).
+// The rows are ADR 0014 section 11's, but for Remove, Rmdir and Rename,
+// whose rows are ADR 0026 section 7's. Of those, the recorder allows three: a
+// rename onto itself and two calls that stage E answers vfs.ErrNoEnt, none of
+// which changes the tree. They run in that order except that the two Reads
+// the policy allows whole come last, after every refused call, so that a
+// failure of either cannot make a later refused row's FS.dirty check fail
+// with it. Every call is on an object of the type its operation needs (ADR
+// 0014 section 11's safety rule): Rmdir is asked of dd and d2, directories,
+// and the Renames that name a directory move one onto another.
 func TestEveryMethodAsksThePolicyAndStopsAtItsRefusal(t *testing.T) {
-	const where = "W2, ADR 0014 sections 5, 6 and 11"
+	const where = "W2, ADR 0014 sections 5, 6 and 11; ADR 0026 sections 2 and 7"
 	e := uc43Setup(t)
 	rec := &sp24Recorder{refuseAt: -1}
 	fs, root := sp24Mount(e, policy.Func(rec.check), where)
 	s := pwW2Tree(e, fs, root, where)
 	tc := testCaller
-	D, F, E := pwDir, pwReg, pwReg
+	R, D, D2, F, E, LN, DD, H, V := pwDir, pwW2D, pwW2D2, pwReg, pwW2E, pwLnk, pwW2DD, pwW2H, pwW2V
 	ten := pwBytes(10, 151)
 
 	const refused = "the call is refused at its first request, which section 6 says it makes before anything else"
@@ -517,12 +625,37 @@ func TestEveryMethodAsksThePolicyAndStopsAtItsRefusal(t *testing.T) {
 		}
 	}
 
+	// found requires testCaller's Lookup of name in dir to find id;
+	// absent, to return vfs.ErrNoEnt; all runs several such checks.
+	const kept = "a call that is refused, that returns an error, or that renames a name onto itself takes no name " +
+		"away, moves nothing and replaces nothing (ADR 0026 sections 2 and 4; ADR 0024 section 1)"
+	found := func(dir vfs.Handle, path, name string, id uint64) func(string) {
+		return func(what string) { pwWantFound(e, fs, dir, path, name, id, what, kept, where) }
+	}
+	absent := func(dir vfs.Handle, path, name string) func(string) {
+		return func(what string) {
+			pwWantNoEnt(e, fs, dir, path, name, what, "a refused or failed Rename makes no name (ADR 0026 section 4)",
+				where)
+		}
+	}
+	all := func(checks ...func(string)) func(string) {
+		return func(what string) {
+			for _, c := range checks {
+				c(what)
+			}
+		}
+	}
+
 	nx := vfs.ErrNXIO
 	lookD := []pwWant{{op: policy.OpLookup, obj: D}}
 	listD := []pwWant{{op: policy.OpReadDir, obj: D}}
 	addD := []pwWant{{op: policy.OpAddEntry, obj: D}}
-	removeD := []pwWant{{op: policy.OpRemoveEntry, obj: D}}
-	renameDD := []pwWant{{op: policy.OpRename, obj: D, dst: D}}
+	remove := func(dir policy.Object, entry *policy.Object) []pwWant {
+		return []pwWant{{op: policy.OpRemoveEntry, obj: dir, entry: entry}}
+	}
+	rename := func(src, dst policy.Object, entry, replaced *policy.Object) []pwWant {
+		return []pwWant{{op: policy.OpRename, obj: src, dst: dst, entry: entry, replaced: replaced}}
+	}
 	readF := []pwWant{{op: policy.OpRead, obj: F}}
 	readFF := []pwWant{{op: policy.OpRead, obj: F}, {op: policy.OpRead, obj: F}}
 	readE := []pwWant{{op: policy.OpRead, obj: E}}
@@ -575,49 +708,127 @@ func TestEveryMethodAsksThePolicyAndStopsAtItsRefusal(t *testing.T) {
 		{
 			`testCaller's Remove(d, "f")`, 0,
 			func(what string) error { return pwRemove(e, fs, tc, s.d, "f", what, where) },
-			nx, removeD,
-			"Remove asks OpRemoveEntry on the directory, " + refused,
+			nx, remove(D, &F),
+			"Remove asks one OpRemoveEntry with Object the directory and Entry the object the name names (ADR " +
+				"0026 section 2), " + refused,
 			func(what string) {
 				if r := pwGetAttr(e, fs, s.f, `GetAttr of "d/f" after `+what, where); r.err != nil {
 					t.Errorf("after %s, GetAttr of \"d/f\"'s handle = %s, want nil: a refused Remove takes no name away "+
 						"(ADR 0014 section 6; %s)", what, pwStatus(r.err), where)
 				}
-				pwWantFound(e, fs, s.d, "d/f", "f", s.fAttr.FileID, what,
-					"a refused Remove takes no name away (ADR 0014 section 6)", where)
+				found(s.d, "d/f", "f", s.fAttr.FileID)(what)
 			},
+		},
+		{
+			`testCaller's Remove(d, "ln")`, 0,
+			func(what string) error { return pwRemove(e, fs, tc, s.d, "ln", what, where) },
+			nx, remove(D, &LN),
+			"Remove of a symlink asks one OpRemoveEntry with Entry the symlink (ADR 0026 section 2), " + refused,
+			found(s.d, "d/ln", "ln", s.lnAttr.FileID),
 		},
 		{
 			`testCaller's Rmdir(root, "d2")`, 0,
 			func(what string) error { return pwRmdir(e, fs, tc, s.root, "d2", what, where) },
-			nx, removeD,
-			"Rmdir asks OpRemoveEntry on the directory, the root, whose Object equals D, " + refused,
-			func(what string) {
-				pwWantFound(e, fs, s.root, "d2", "d2", s.d2Attr.FileID, what,
-					"a refused Rmdir takes no name away (ADR 0014 section 6)", where)
-			},
+			nx, remove(R, &D2),
+			"Rmdir asks one OpRemoveEntry with Object the parent, the root, and Entry the directory it removes, " +
+				"not the other way round (ADR 0026 sections 2 and 7), " + refused,
+			found(s.root, "d2", "d2", s.d2Attr.FileID),
+		},
+		{
+			`testCaller's Rmdir(d, "dd")`, 0,
+			func(what string) error { return pwRmdir(e, fs, tc, s.d, "dd", what, where) },
+			nx, remove(D, &DD),
+			"Rmdir asks one OpRemoveEntry with Object the parent and Entry the directory it removes (ADR 0026 " +
+				"sections 2 and 7), " + refused,
+			found(s.d, "d/dd", "dd", s.ddAttr.FileID),
+		},
+		{
+			`testCaller's Remove(d, "nope")`, 0,
+			func(what string) error { return pwRemove(e, fs, tc, s.d, "nope", what, where) },
+			nx, remove(D, nil),
+			"a name that names no object describes no entry, so Remove asks one OpRemoveEntry with no Entry (ADR " +
+				"0026 section 2), " + refused,
+			nil,
+		},
+		{
+			`testCaller's Remove(d, "nope")`, -1,
+			func(what string) error { return pwRemove(e, fs, tc, s.d, "nope", what, where) },
+			vfs.ErrNoEnt, remove(D, nil),
+			"a name that names no object describes no entry, so Remove asks one OpRemoveEntry with no Entry, and " +
+				"then stage E answers vfs.ErrNoEnt (ADR 0026 section 2)",
+			nil,
 		},
 		{
 			`testCaller's Rename(d, "f", d2, "g")`, 0,
 			func(what string) error { return pwRename(e, fs, tc, s.d, "f", s.d2, "g", what, where) },
-			nx, renameDD,
-			"Rename asks one OpRename, with Object the source directory and Dst the target directory, " + refused,
-			func(what string) {
-				pwWantFound(e, fs, s.d, "d/f", "f", s.fAttr.FileID, what,
-					"a refused Rename moves nothing (ADR 0014 section 6)", where)
-				pwWantNoEnt(e, fs, s.d2, "d2/g", "g", what, "a refused Rename makes no name (ADR 0014 section 6)",
-					where)
-			},
+			nx, rename(D, D2, &F, nil),
+			"Rename asks one OpRename, with Object the source directory, Dst the target directory, Entry the " +
+				"object it moves, and no Replaced, since g names nothing (ADR 0026 section 2), " + refused,
+			all(found(s.d, "d/f", "f", s.fAttr.FileID), absent(s.d2, "d2/g", "g")),
+		},
+		{
+			`testCaller's Rename(d2, "h", d, "i")`, 0,
+			func(what string) error { return pwRename(e, fs, tc, s.d2, "h", s.d, "i", what, where) },
+			nx, rename(D2, D, &H, nil),
+			"a cross-directory Rename in the other direction asks one OpRename with Object the source and Dst " +
+				"the target (ADR 0026 sections 2 and 7), " + refused,
+			all(found(s.d2, "d2/h", "h", s.hAttr.FileID), absent(s.d, "d/i", "i")),
+		},
+		{
+			`testCaller's Rename(d, "f", d2, "v")`, 0,
+			func(what string) error { return pwRename(e, fs, tc, s.d, "f", s.d2, "v", what, where) },
+			nx, rename(D, D2, &F, &V),
+			"a Rename onto a name that names an object asks one OpRename with Entry the object moved and " +
+				"Replaced the object replaced (ADR 0026 section 2), " + refused,
+			all(found(s.d2, "d2/v", "v", s.vAttr.FileID), found(s.d, "d/f", "f", s.fAttr.FileID)),
+		},
+		{
+			`testCaller's Rename(d2, "v", d, "e")`, 0,
+			func(what string) error { return pwRename(e, fs, tc, s.d2, "v", s.d, "e", what, where) },
+			nx, rename(D2, D, &V, &E),
+			"a Rename onto a name that names an object, in the other direction, asks one OpRename with Entry " +
+				"the object moved and Replaced the object replaced (ADR 0026 section 2), " + refused,
+			all(found(s.d2, "d2/v", "v", s.vAttr.FileID), found(s.d, "d/e", "e", s.eAttr.FileID)),
 		},
 		{
 			`testCaller's Rename(d, "f", d, "g")`, 0,
 			func(what string) error { return pwRename(e, fs, tc, s.d, "f", s.d, "g", what, where) },
-			nx, renameDD,
-			"Rename within one directory asks one OpRename with that directory as both Object and Dst, " + refused,
-			func(what string) {
-				pwWantFound(e, fs, s.d, "d/f", "f", s.fAttr.FileID, what,
-					"a refused Rename moves nothing (ADR 0014 section 6)", where)
-				pwWantNoEnt(e, fs, s.d, "d/g", "g", what, "a refused Rename makes no name (ADR 0014 section 6)", where)
-			},
+			nx, rename(D, D, &F, nil),
+			"Rename within one directory asks one OpRename with that directory as both Object and Dst (ADR 0026 " +
+				"section 2), " + refused,
+			all(found(s.d, "d/f", "f", s.fAttr.FileID), absent(s.d, "d/g", "g")),
+		},
+		{
+			`testCaller's Rename(root, "d2", d, "dd")`, 0,
+			func(what string) error { return pwRename(e, fs, tc, s.root, "d2", s.d, "dd", what, where) },
+			nx, rename(R, D, &D2, &DD),
+			"a directory moved onto an empty directory asks one OpRename with Entry the directory moved and " +
+				"Replaced the directory replaced (ADR 0026 sections 2 and 7), " + refused,
+			all(found(s.root, "d2", "d2", s.d2Attr.FileID), found(s.d, "d/dd", "dd", s.ddAttr.FileID)),
+		},
+		{
+			`testCaller's Rename(d, "f", d, "f")`, 0,
+			func(what string) error { return pwRename(e, fs, tc, s.d, "f", s.d, "f", what, where) },
+			nx, rename(D, D, nil, nil),
+			"a rename of a name onto itself takes no name out of any directory, so its request describes no " +
+				"entry (ADR 0026 section 2), " + refused,
+			found(s.d, "d/f", "f", s.fAttr.FileID),
+		},
+		{
+			`testCaller's Rename(d, "f", d, "f")`, -1,
+			func(what string) error { return pwRename(e, fs, tc, s.d, "f", s.d, "f", what, where) },
+			nil, rename(D, D, nil, nil),
+			"a rename of a name onto itself asks one OpRename that describes no entry, and returns nil having " +
+				"changed nothing (ADR 0026 section 2)",
+			found(s.d, "d/f", "f", s.fAttr.FileID),
+		},
+		{
+			`testCaller's Rename(d, "nope", d2, "v")`, -1,
+			func(what string) error { return pwRename(e, fs, tc, s.d, "nope", s.d2, "v", what, where) },
+			vfs.ErrNoEnt, rename(D, D2, nil, nil),
+			"a source that names no object describes no entry, and no replaced entry either, since the call " +
+				"will replace nothing; stage E then answers vfs.ErrNoEnt (ADR 0026 section 2)",
+			found(s.d2, "d2/v", "v", s.vAttr.FileID),
 		},
 		{
 			`testCaller's Read(f, 0, 10)`, 0,
@@ -699,14 +910,18 @@ func TestEveryMethodAsksThePolicyAndStopsAtItsRefusal(t *testing.T) {
 		err := r.call(what)
 		if err != r.wantErr {
 			why := "the policy allowed every request, so the call succeeds"
-			if r.wantErr != nil {
+			switch {
+			case r.wantErr != nil && r.refuse < 0:
+				why = "the policy allowed every request, and the call's own check of the namespace, at stage E, " +
+					"returns this bare vfs.Status (ADR 0026 section 2; ADR 0014 section 6)"
+			case r.wantErr != nil:
 				why = "the policy's refusal is returned as the bare vfs.Status, unwrapped, and no check of the FS's " +
 					"own returns anything else first (ADR 0014 sections 5 and 6)"
 			}
 			t.Errorf("%s = %s, want %s, compared with ==: %s (%s)", what, pwStatus(err), pwStatus(r.wantErr), why,
 				where)
 		}
-		pwWantRequests(t, what, rec.taken(), r.want, tc, r.why, where)
+		pwWantW2Requests(t, what, rec.taken(), r.want, tc, r.why, where)
 		f := sa24Read(e, fs, "reading FS.dirty and FS.changes after "+what, where)
 		if f.changes != c {
 			t.Errorf("after %s, FS.changes is %d, want %d, its value before the call: the call changes nothing (ADR "+
@@ -751,8 +966,9 @@ func pwWantOwner(e *uc43Env, fs *FS, r pwEntry, uid uint32, gid int64, what, why
 // made owned by the caller. A non-exclusive Create of a name that exists, and
 // an exclusive one, ask OpAddEntry alone.
 //
-// W2's mount, recorder and d (pwW2Tree). sp24Root's Create of r1 with {UID 7},
-// refusing index 1, returns nil, owned by 0:0, and asks [OpAddEntry on D,
+// W2's mount, recorder and d (pwW2Tree), whose Object D is, since ADR 0026
+// section 7, {TypeDir, 0o750, 501, 20} (pwW2D). sp24Root's Create of r1 with
+// {UID 7}, refusing index 1, returns nil, owned by 0:0, and asks [OpAddEntry on D,
 // OpChown with Object {TypeReg, 0o644, 0, 0} and UID 7]; sp24Root's of r2,
 // refusing nothing, gives uid 7 with the same two requests; testCaller's of
 // r3 gives uid 7 too, with Object {TypeReg, 0o644, 501, 20}, which shows the
@@ -769,7 +985,7 @@ func TestARequestedUIDAtCreationGoesThroughOpChownAndARefusalIsIgnored(t *testin
 	rec := &sp24Recorder{refuseAt: -1}
 	fs, root := sp24Mount(e, policy.Func(rec.check), where)
 	s := pwW2Tree(e, fs, root, where)
-	D := pwDir
+	D := pwW2D
 	uid7 := vfs.SetAttr{UID: sa24U32(7)}
 	chown := func(o policy.Object) []pwWant {
 		return []pwWant{{op: policy.OpAddEntry, obj: D}, {op: policy.OpChown, obj: o, uid: 7}}
@@ -1000,16 +1216,25 @@ type pwCheck struct {
 // bytes; and fo, a regular file 0o664. ro is made 0o755, k made in it, and ro
 // then set to 0o555 by its owner, so that no setup step relies on an owner
 // lacking its own bits: ro is a directory, whose owner is held to its mode
-// (ADR 0025 section 1). Each row is a call, its caller, and the status
-// it must return, compared with == against the bare vfs.Status. Then the
-// requested uid under Unix(), and Access with every bit asked for.
+// (ADR 0025 section 1). Since ADR 0026 section 7 the setup also makes wide, a
+// directory 0o777, in ro before ro is set to 0o555; and open, a directory
+// 0o777, holding shut, a directory 0o700. Each row is a call, its caller, and
+// the status it must return, compared with == against the bare vfs.Status.
+// Then the requested uid under Unix(), and Access with every bit asked for.
+//
+// ADR 0026 section 7's two rows, for #148, are sa24Other's Rmdir(ro, "wide"),
+// vfs.ErrAcces, and its Rmdir(open, "shut"), nil: the parent's mode decides,
+// where the entry's own would answer the other way. Both pass before and after
+// ADR 0026's change.
 //
 // Rows that would pin U1 to U6 are left out: no owner lacking its own bits, no
 // read through execute alone, no Read or Write of a symlink, no sticky bit, no
 // directory with read but not search, or write but not search, asked of
 // Access, and no times set by a non-owner. The first two, U1 and U2, are
 // pinned for a regular file since ADR 0025 section 6 and tested in
-// owner_access_test.go; W4 still leaves them out.
+// owner_access_test.go; W4 still leaves them out. The sticky bit, U4, is
+// pinned since ADR 0026 section 8 and tested in sticky_test.go; W4 still has
+// no sticky row.
 func TestTheUnixRowsAreUnchangedThroughTheFS(t *testing.T) {
 	const where = "W4, ADR 0014 sections 5, 6 and 11"
 	e := uc43Setup(t)
@@ -1042,6 +1267,7 @@ func TestTheUnixRowsAreUnchangedThroughTheFS(t *testing.T) {
 	priv := mkdir(root, "priv", 0o700)
 	ro := mkdir(root, "ro", 0o755)
 	create(ro, "k", 0o644, nil)
+	mkdir(ro, "wide", 0o777) // ADR 0026 section 7: made in ro before ro is set to 0o555
 	if r := sa24SetAttr(e, fs, testCaller, ro, mode(0o555), `setup: testCaller's SetAttr {Mode 0o555} of "ro"`,
 		where); r.err != nil || r.v.Mode != 0o555 {
 		t.Fatalf("setup: testCaller's SetAttr {Mode 0o555} of \"ro\", which it owns, = (mode %#o, %s), want (mode "+
@@ -1055,6 +1281,8 @@ func TestTheUnixRowsAreUnchangedThroughTheFS(t *testing.T) {
 	fg640 := create(root, "fg640", 0o640, pwBytes(20, 9))
 	fg604 := create(root, "fg604", 0o604, pwBytes(20, 13))
 	fo := create(root, "fo", 0o664, nil)
+	open := mkdir(root, "open", 0o777) // ADR 0026 section 7
+	mkdir(open, "shut", 0o700)
 
 	b := pwBytes(10, 77)
 	lookup := func(dir vfs.Handle, name string) func(vfs.Caller, string) error {
@@ -1140,6 +1368,13 @@ func TestTheUnixRowsAreUnchangedThroughTheFS(t *testing.T) {
 			"the owner may remove from d, and then Remove refuses a directory (E, after D allowed)"},
 		{tc, `Rmdir(d, "f")`, rmdir(d, "f"), vfs.ErrNotDir,
 			"the owner may remove from d, and then Rmdir refuses a non-directory (E, after D allowed)"},
+		// ADR 0026 section 7, #148: an entry whose own verdict differs from its
+		// parent's.
+		{o, `Rmdir(ro, "wide")`, rmdir(ro, "wide"), vfs.ErrAcces,
+			"the parent's mode decides: 0o555 gives no write, where wide's own 0o777 would allow (ADR 0026 section 7)"},
+		{o, `Rmdir(open, "shut")`, rmdir(open, "shut"), nil,
+			"the parent's mode decides: 0o777 gives write and search, where shut's own 0o700 would refuse (ADR 0026 " +
+				"section 7)"},
 
 		// OpRename.
 		{o, `Rename(ro, "k", d, "k2")`, rename(ro, "k", d, "k2"), vfs.ErrAcces,

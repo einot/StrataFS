@@ -108,3 +108,4 @@ URL, and what was taken from it.
 | [0023](0023-a-commit-seals-the-namespace-under-the-lock-and-uploads-outside-it.md) | A commit seals the namespace under the lock and runs its store calls outside it | Accepted |
 | [0024](0024-every-namespace-change-is-marked-dirty-and-a-refused-setattr-makes-none.md) | Every change to the namespace is marked dirty in the hold that makes it, and a refused SETATTR makes none | Accepted |
 | [0025](0025-a-files-owner-may-read-and-write-it-whatever-its-mode.md) | A regular file's owner may read, write and truncate it whatever its mode, execute permission is enough to read it, and ACCESS reports the mode alone | Accepted |
+| [0026](0026-in-a-sticky-directory-only-an-owner-removes-or-renames-an-entry.md) | In a sticky directory only root, the directory's owner or an entry's owner may remove, rename or replace that entry | Accepted |
