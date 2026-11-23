@@ -595,6 +595,14 @@ from its first access to the charge or to `of.bytes` until its last, and a
   method that every `Policy` has, reached through a function that returns an
   interface. So the name rule 4 would give it, `Check`, would name every
   policy at once. Rule 4 is not changed for any other name.
+- `OpExecute`: the `Op` that `ACCESS` asks for `vfs.AccessExecute`, 13,
+  after `OpRename`; reserved, ADR 0027, whose §2 pins it. It is not in the
+  code until that ADR's change lands, and the architect's pass after it
+  marks it as existing (ADR 0027, Assumption 22). Since that ADR
+  `AccessBits` is `policy.AccessBits(p, c, o, want, mutable)`, which asks a
+  policy the operations' own requests; the entry above gives no signature
+  and stands. `Request`'s fields, that ADR's `Advisory` among them, are not
+  entries (ADR 0026 §9).
 - `EffectAuthorized`: an optional FileData invariant; reserved, ADR 0014. It
   says that every change a call makes to a file's bytes or size is one that
   `UnixAllows` allows, for that call's caller, against the file's attributes
