@@ -104,11 +104,11 @@ type FS struct {
 	maxFileSize uint64
 
 	// perm decides what a caller may do (ADR 0014 §6). Every check of what a
-	// caller may do goes through it, at stage D in the hold each method has;
-	// Access alone reads policy.AccessBits and the mount's mask instead. New
-	// sets it to policy.Unix() and nothing else writes it, so it is read
-	// without a lock; a test may replace it after New returns and before first
-	// use (ADR 0014 §6, Assumption 22).
+	// caller may do goes through it, at stage D in the hold each method has,
+	// Access's included, which asks it through policy.AccessBits (ADR 0027
+	// §7). New sets it to policy.Unix() and nothing else writes it, so it is
+	// read without a lock; a test may replace it after New returns and before
+	// first use (ADR 0014 §6, Assumption 22).
 	perm policy.Policy
 
 	// commitMu serialises commits: Sync holds it from after its first pass until
@@ -630,9 +630,14 @@ func (f *FS) SetAttr(ctx context.Context, c vfs.Caller, h vfs.Handle, sa vfs.Set
 	return n.attr(f.fsid), nil
 }
 
-// Access answers from the mode bits, through policy.AccessBits, less a
-// read-only mount's write bits. It does not ask f.perm, and the mount's mask
-// stays here rather than in a policy (ADR 0014 §6; ADR 0018 §4, E12).
+// Access answers through policy.AccessBits, which asks f.perm the requests the
+// operations themselves make, and grants no bit that names a change unless
+// mutable() allows one. It compares no mode and names no bit: which bits are
+// changes is the policy's table, so a mount state added later is masked until
+// mutable() answers nil for it. The resolve, the gate and the policy's answer
+// are taken in one hold of mu for reading, which every Fire on the mode
+// excludes, so the mask is of one instant. It changes nothing (ADR 0027 §4,
+// §7).
 func (f *FS) Access(ctx context.Context, c vfs.Caller, h vfs.Handle, want uint32) (uint32, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -640,12 +645,7 @@ func (f *FS) Access(ctx context.Context, c vfs.Caller, h vfs.Handle, want uint32
 	if err != nil {
 		return 0, err
 	}
-
-	granted := policy.AccessBits(c, objectOf(n))
-	if f.mode.State() == mountReadOnly {
-		granted &^= vfs.AccessModify | vfs.AccessExtend | vfs.AccessDelete
-	}
-	return granted & want, nil
+	return policy.AccessBits(f.perm, c, objectOf(n), want, f.mutable() == nil), nil
 }
 
 func (f *FS) Lookup(ctx context.Context, c vfs.Caller, dir vfs.Handle, name string) (vfs.Handle, vfs.Attr, error) {

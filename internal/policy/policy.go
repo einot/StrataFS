@@ -8,7 +8,8 @@
 //
 // Spec: docs/adr/0014-state-machines-are-tables-and-permission-checks-are-policies.md §4, §5;
 // docs/adr/0025-a-files-owner-may-read-and-write-it-whatever-its-mode.md §1, §2, §3;
-// docs/adr/0026-in-a-sticky-directory-only-an-owner-removes-or-renames-an-entry.md §1, §2
+// docs/adr/0026-in-a-sticky-directory-only-an-owner-removes-or-renames-an-entry.md §1, §2;
+// docs/adr/0027-access-grants-only-what-the-operations-allow.md §1, §2, §3
 package policy
 
 import "strata/internal/vfs"
@@ -90,6 +91,11 @@ const (
 	OpAddEntry
 	OpRemoveEntry
 	OpRename
+
+	// OpExecute asks whether a caller may execute an object. No operation
+	// makes it, since a client executes a file by reading it; only ACCESS
+	// asks it, for its EXECUTE bit (ADR 0027 §1, §2).
+	OpExecute
 )
 
 // Request is one question to a Policy. A field added later must mean, when
@@ -119,6 +125,15 @@ type Request struct {
 	// Replaced is the object whose name OpRename takes out of Dst, to put the
 	// object it moves in its place. Nil when it replaces none.
 	Replaced *Object
+
+	// Advisory marks a request made for ACCESS: it asks what a client should
+	// let the caller open or attempt, ahead of any call, and nothing is done
+	// on its answer. A file row answers it by the mode alone, with neither the
+	// owner override nor the read that execute permission gives, which stand
+	// in for a descriptor a client already holds open. Every other row
+	// answers it as it answers the same request without the mark. It is false
+	// on every request a call makes (ADR 0027 §2, §3).
+	Advisory bool
 }
 
 // Policy decides a Request: nil allows it, and any other error refuses it.
@@ -186,7 +201,12 @@ func Unix() Policy {
 //
 // The three file rows, OpRead, OpWrite and OpTruncate, are ADR 0025 §1's, not
 // ADR 0014 §5's: they allow a regular file's owner, and OpRead a caller whom
-// the mode gives execute, past what Permits gives.
+// the mode gives execute, past what Permits gives. ADR 0027 §2 keeps both
+// departures from a request marked Advisory, which these rows alone read, so
+// ACCESS gets the mode's verdict from them.
+//
+// The OpExecute row is ADR 0027 §2's: vfs.ErrIsDir for a directory, else
+// Permits with PermExec. Only ACCESS asks it.
 //
 // The OpRemoveEntry and OpRename rows are ADR 0026 §1's: past ADR 0014 §5's
 // type and mode checks, which they keep as their first lines, they refuse with
@@ -198,9 +218,9 @@ func (unixRules) Check(r Request) error {
 	c, o := r.Caller, r.Object
 	switch r.Op {
 	case OpRead:
-		return fileAccess(c, o, PermRead)
+		return fileAccess(c, o, PermRead, r.Advisory)
 	case OpWrite, OpTruncate:
-		return fileAccess(c, o, PermWrite)
+		return fileAccess(c, o, PermWrite, r.Advisory)
 	case OpChmod:
 		if !rootOrOwner(c, o) {
 			return vfs.ErrPerm
@@ -253,6 +273,14 @@ func (unixRules) Check(r Request) error {
 			return err
 		}
 		return stickyTakeOut(c, r.Dst, r.Replaced)
+	case OpExecute:
+		if o.Type == vfs.TypeDir {
+			return vfs.ErrIsDir
+		}
+		if !Permits(c, o, PermExec) {
+			return vfs.ErrAcces
+		}
+		return nil
 	}
 	return vfs.ErrServerFault
 }
@@ -263,24 +291,27 @@ func (unixRules) Check(r Request) error {
 //
 //  1. vfs.ErrIsDir, if o is a directory, before any permission is looked at;
 //  2. nil, if Permits(c, o, want);
-//  3. nil, if o is a regular file and c is its owner, c.UID == o.UID. A
-//     stateless server cannot see that the owner already holds the file open,
-//     so it lets the owner past the mode (RFC 1813 §4.4);
-//  4. for a read alone, nil, if o is a regular file and
-//     Permits(c, o, PermExec), since a server cannot tell a page-in from a
-//     read (§2);
+//  3. nil, if the request is not advisory, o is a regular file and c is its
+//     owner, c.UID == o.UID. A stateless server cannot see that the owner
+//     already holds the file open, so it lets the owner past the mode (RFC
+//     1813 §4.4);
+//  4. for a read alone, nil, if the request is not advisory, o is a regular
+//     file and Permits(c, o, PermExec), since a server cannot tell a page-in
+//     from a read (§2);
 //  5. vfs.ErrAcces otherwise.
 //
-// Lines 3 and 4 live here rather than in Permits so that AccessBits, and every
-// other row, still answer from the mode alone (§3).
-func fileAccess(c vfs.Caller, o Object, want Perm) error {
+// Lines 3 and 4 live here rather than in Permits so that every other row
+// still answers from the mode alone. An advisory request skips them, since
+// ACCESS is a client's check at open, which neither departure speaks for, so
+// AccessBits gets the mode's verdict from this row (ADR 0027 §2, §3).
+func fileAccess(c vfs.Caller, o Object, want Perm, advisory bool) error {
 	if o.Type == vfs.TypeDir {
 		return vfs.ErrIsDir
 	}
 	if Permits(c, o, want) {
 		return nil
 	}
-	if o.Type == vfs.TypeReg {
+	if !advisory && o.Type == vfs.TypeReg {
 		if c.UID == o.UID {
 			return nil
 		}
@@ -323,32 +354,80 @@ func rootOrOwner(c vfs.Caller, o Object) bool {
 	return c.UID == 0 || c.UID == o.UID
 }
 
-// AccessBits is the ACCESS answer the mode bits give c for o, as the six
-// vfs.Access bits. It carries no mount mask: masking a read-only mount's
-// write bits is the mount's business, and so is the caller's want.
+// accessRow is one bit of an ACCESS table: the requests the bit names, asked
+// in order, and whether the bit names a change. A zero Op ends the list, so a
+// row whose first Op is zero has no requests and is never granted.
+type accessRow struct {
+	bit    uint32
+	change bool
+	ops    [2]Op
+}
+
+// accessDir is ADR 0027 §1's table for a directory, and accessOther its table
+// for every other type, valid or not. Each is in ascending order of its bits,
+// the order AccessBits asks in, and is a fixed array so that walking it
+// allocates nothing. Nothing writes either.
+var accessDir = [...]accessRow{
+	{bit: vfs.AccessRead, ops: [2]Op{OpReadDir}},
+	{bit: vfs.AccessLookup, ops: [2]Op{OpLookup}},
+	{bit: vfs.AccessModify, change: true, ops: [2]Op{OpRename}},
+	{bit: vfs.AccessExtend, change: true, ops: [2]Op{OpAddEntry}},
+	{bit: vfs.AccessDelete, change: true, ops: [2]Op{OpRemoveEntry}},
+	{bit: vfs.AccessExecute},
+}
+
+var accessOther = [...]accessRow{
+	{bit: vfs.AccessRead, ops: [2]Op{OpRead}},
+	{bit: vfs.AccessLookup},
+	{bit: vfs.AccessModify, change: true, ops: [2]Op{OpWrite, OpTruncate}},
+	{bit: vfs.AccessExtend, change: true, ops: [2]Op{OpWrite}},
+	{bit: vfs.AccessDelete},
+	{bit: vfs.AccessExecute, ops: [2]Op{OpExecute}},
+}
+
+// AccessBits is the ACCESS answer p gives c for o, as the bits of want among
+// the six vfs.Access bits. It grants a bit only if p allows every request the
+// operations the bit names would make, so ACCESS has no predicate of its own,
+// and only if the bit names no change or mutable is true. mutable is what the
+// caller knows of the mount, and its zero value grants no change (ADR 0027
+// §1, §2, §4).
 //
-// It reports the mode's permissions alone, with neither the owner override
-// nor the read that execute permission gives, which the file rows of Check
-// allow and ACCESS must not report (ADR 0025 §3; RFC 1813 §4.4).
-func AccessBits(c vfs.Caller, o Object) uint32 {
-	dir := o.Type == vfs.TypeDir
-	read := Permits(c, o, PermRead)
-	exec := Permits(c, o, PermExec)
-	var bits uint32
-	if read {
-		bits |= vfs.AccessRead
+// Every request it asks is marked Advisory, so the file rows answer by the
+// mode alone, with neither the owner override nor the read that execute
+// permission gives, which ACCESS must not report (ADR 0027 §3; RFC 1813 §4.4).
+// A bit that has no requests, is not wanted, or names a change on a mount that
+// takes none is not asked about at all, and a bit stops at its first refusal,
+// so one call asks p at most five requests. It returns no error: a refusal
+// withholds a bit and fails nothing.
+func AccessBits(p Policy, c vfs.Caller, o Object, want uint32, mutable bool) uint32 {
+	table := &accessOther
+	if o.Type == vfs.TypeDir {
+		table = &accessDir
 	}
-	if dir && (read || exec) {
-		bits |= vfs.AccessLookup
-	}
-	if Permits(c, o, PermWrite) {
-		bits |= vfs.AccessModify | vfs.AccessExtend
-		if dir {
-			bits |= vfs.AccessDelete
+	var granted uint32
+	for i := range table {
+		row := &table[i]
+		if want&row.bit == 0 || row.ops[0] == 0 || (row.change && !mutable) {
+			continue
+		}
+		allowed := true
+		for _, op := range row.ops {
+			if op == 0 {
+				break
+			}
+			r := Request{Op: op, Caller: c, Object: o, Advisory: true}
+			if op == OpRename {
+				// The one rename a directory's MODIFY names is within it.
+				r.Dst = o
+			}
+			if p.Check(r) != nil {
+				allowed = false
+				break
+			}
+		}
+		if allowed {
+			granted |= row.bit
 		}
 	}
-	if !dir && o.Mode&0o111 != 0 && exec {
-		bits |= vfs.AccessExecute
-	}
-	return bits
+	return granted
 }
