@@ -217,7 +217,9 @@ type oaAccessRow struct {
 // the three operations as given. Then, over every mode of p2Modes() and every
 // caller of p2Callers(), for a regular file: whenever AccessBits has
 // vfs.AccessExecute, Unix().Check of OpRead is nil (§3: what ACCESS grants,
-// the rows allow).
+// the rows allow). Since ADR 0027 §2 and §10, AccessBits is called as
+// AccessBits(Unix(), c, o, allAccess, true), and every assertion stands: it is
+// now the pin that Request.Advisory keeps the two departures out of ACCESS.
 func TestAccessBitsStayApartFromTheFileRows(t *testing.T) {
 	u := policy.Unix()
 	ae, ar := vfs.AccessExecute, vfs.AccessRead
@@ -237,7 +239,7 @@ func TestAccessBitsStayApartFromTheFileRows(t *testing.T) {
 	}
 	for _, r := range rows {
 		o := mkObj(vfs.TypeReg, r.mode)
-		if got := policy.AccessBits(r.c, o); got != r.bits {
+		if got := policy.AccessBits(policy.Unix(), r.c, o, allAccess, true); got != r.bits {
 			t.Errorf("AccessBits(%s, a regular file %#o) = %#x, want exactly %#x: ACCESS reports what the mode bits "+
 				"give the caller's class, with neither the owner override nor read with execute (ADR 0025 §3, §6 A4)",
 				r.name, r.mode, got, r.bits)
@@ -257,7 +259,7 @@ func TestAccessBitsStayApartFromTheFileRows(t *testing.T) {
 	for _, nc := range p2Callers() {
 		for _, mode := range p2Modes() {
 			o := mkObj(vfs.TypeReg, mode)
-			bits := policy.AccessBits(nc.c, o)
+			bits := policy.AccessBits(policy.Unix(), nc.c, o, allAccess, true)
 			if bits&vfs.AccessExecute == 0 {
 				continue
 			}
