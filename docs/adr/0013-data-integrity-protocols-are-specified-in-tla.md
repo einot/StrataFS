@@ -38,6 +38,21 @@ no later ADR argues it for itself. The rule's purpose, that what `main`
 recorded each fix as needed for is never lost, the flip, and the rest of §7
 are unchanged; nor does this let a landed fix join a configuration on
 `main`, the question ADR 0020 Assumption 10 leaves open.
+**Revised:** 2026-11-22 — in place, by the owner's choice as the session
+reported it: the Java runtime TLC runs on is the aarch64 macOS archive of
+Temurin 21.0.12.1+1, where it was the same release's x64 archive. The
+session runs on Apple Silicon without Rosetta 2, where the x64 `java` cannot
+start, so `bash scripts/tla.sh full` could not run and every PR that §10
+gates was blocked; of installing Rosetta 2 and pinning the native build, the
+owner chose the native build. *Context* keeps its record of 2026-10-10 as it
+was written and gains *The runtime since 2026-11-22* after it;
+`docs/tla/tools.tsv`'s `java` row changes in `bytes`, `sha256` and `source`;
+the opening of *Assumptions* gains a clause and Assumption 17 two sentences;
+Assumption 31 is new and holds the judgement calls; *Sources* gains that
+day's reads, and its opening their date; and `docs/tla/README.md`'s
+prerequisites say which machine the row is for. Unchanged: the release, the
+jar, the row's `default` path, the runner, the forty-five configurations and
+their recorded outcomes, and §1 to §11.
 **Issue:** #109
 
 ## Context
@@ -114,6 +129,52 @@ could not be checked here. The API gives the JRE archive the digest
 `sha256:6717ec641fd9ce0bb209ca083ee23b42202ac68cb6fcc5753496e0e4a0f41989`, as
 recorded. Nothing differed. That the install is in place and that the smoke
 test passed are the session's report, which nothing here could check.
+
+**The runtime since 2026-11-22.** The record above is of 2026-10-10 and
+stays as it was written. On 2026-11-22 the session reported three things, in
+these words, and this ADR was revised for them:
+
+> - The machine the session runs on is Apple Silicon (`uname -m` gives
+>   `arm64`, an Apple M5 Pro), and Rosetta 2 is not installed. So the pinned
+>   `java` fails with "bad CPU type in executable", and
+>   `bash scripts/tla.sh full` cannot run. That blocks every PR whose merge
+>   bar needs it.
+> - Nothing recorded says why x64 was chosen; the October install simply
+>   used it.
+> - The owner chose the native build over installing Rosetta.
+
+The session dates the owner's choice 2026-11-22. The last point is the
+session's report of which of two options the owner chose, installing
+Rosetta 2 or pinning Adoptium's native build, and not the owner's words.
+Of the first point, one thing could be checked here: the `release` file of
+the runtime at the row's `default` gives `OS_ARCH="x86_64"` (*Sources*). The
+machine's processor, the absence of Rosetta 2 and the error are the
+session's report. Of the second, nothing in the repository says why the x64
+archive was chosen, and what is recorded outside it could not be read. The
+last could not be checked here.
+
+So the `java` row of `docs/tla/tools.tsv` names the archive of the same
+release built for aarch64 macOS,
+`OpenJDK21U-jre_aarch64_mac_hotspot_21.0.12.1_1.tar.gz`: 48,144,965 bytes,
+SHA-256 `dec50fc6f9fcd4fe3ae8cabf5a5fa68f6afc48841f7698e468e9aa5d54beed84`.
+GitHub's release API and Adoptium's own API each gave that size and that
+digest while this revision was written (*Sources*). Until then the row named
+the x64 archive of the record above: 42,131,876 bytes, the SHA-256 given
+there, and the `source`
+<https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_x64_mac_hotspot_21.0.12.1_1.tar.gz>.
+The release, the jar and the row's `default` path are as they were. Why
+there is one row and not two, why the path stands, and why no row of
+`manifest.tsv` is recorded again are in Assumption 31.
+
+The session had not downloaded the archive when this revision was written.
+It downloads it from the row's `source`, and checks its size and its SHA-256
+against the row before unpacking it, since the runner checks neither
+(`docs/tla/README.md`, *Tables*). So nothing here records that the runtime
+is in place. §10 gates the PR that carries this revision, since it changes
+`docs/tla/`. A pass of `bash scripts/tla.sh full` there, on the runtime the
+session installed from this archive, is what shows the runtime in place, and
+is the first check that the forty-five rows' recorded outcomes hold on it
+(Assumption 31).
 
 **Who can run what.** The architect writes specs and has no shell. `coder` and
 `test-author` have none either, and `security-auditor`'s shell is fenced to
@@ -522,8 +583,9 @@ Each is a judgement call, not something the issue, the spec or an earlier ADR
 required, except where it says otherwise. Two record a decision the owner
 delegated to the architect's recommendation, and say so: Assumptions 1 and
 23. The owner's other decisions are recorded where they apply, in the words
-the session gave: the tooling state in *Context*, the dependency rule in §9,
-when TLC runs in §10, and the issue in *Context*.
+the session gave: the tooling state in *Context*, and after it the choice of
+2026-11-22, the dependency rule in §9, when TLC runs in §10, and the issue
+in *Context*.
 
 1. **§1's scope and order.** The owner delegated this to the architect's
    recommendation on 2026-10-10: CommitProtocol, FileData, NfsDurability and
@@ -759,6 +821,10 @@ when TLC runs in §10, and the issue in *Context*.
 17. **Pins in `docs/tla/tools.tsv`** (§9). Versions, sources, sizes and
     checksums live there, not here, so a new pin changes a data file and does
     not revise an ADR. The values in *Context* are a record of 2026-10-10.
+    The `java` row's archive changed on 2026-11-22, and this ADR was revised
+    then for what a data file cannot hold: the reason, whose choice it was,
+    and the sources read (*Context*, Assumption 31). A later pin still needs
+    no revision of this ADR.
     `tools.tsv` and `scripts/tla.sh` arrive with the first spec, since before
     it there is nothing for them to pin or run.
 18. **The session runs TLC** (§9). It is the only layer that runs commands.
@@ -866,6 +932,67 @@ when TLC runs in §10, and the issue in *Context*.
     can check the accounting and the wait apart. This widens Budget past the
     scope first written for it; the list and the order the owner delegated
     stand.
+31. **The re-pin of 2026-11-22** (*Context*). The session gave the facts and
+    named the asset. Of the machine, only the installed runtime's `release`
+    file could be read here, and nothing could be run; the asset's name,
+    size and digest were checked against two APIs (*Sources*), and the
+    digest of the file the session downloads is the session's to check. The
+    rest is mine:
+    - **One `java` row, for the machine the session runs TLC on.**
+      `tools.tsv` holds one `java` row, and the runner refuses a second
+      (`docs/tla/README.md`, *Tables*). Keeping the x64 archive as a second
+      row would take a field or a tool name that says which machine a row is
+      for, and code in `scripts/tla.sh` to choose by it: a change to the
+      runner, made so that it could choose between two archives of which it
+      checks neither. The row records what the one layer that runs TLC
+      installs (§9). The x64 archive's name, size and digest stay in
+      *Context* and *Sources*, as the record of what was pinned until now
+      and as the provenance for a machine that can run it. On any machine
+      the runner asks only for a `java` that starts and is Java 11 or later
+      (§9), at the row's `default` or named by `$TLA_JAVA`.
+    - **The `default` path stands.** Temurin's build scripts, at the commit
+      that built the x64 archive, name an archive's top directory after the
+      tag being built, with `-jre` added for a JRE, and on macOS the runtime
+      lies under `Contents/Home` in it; the processor takes no part in
+      either (*Sources*). The x64 archive of this release unpacked as
+      `jdk-21.0.12.1+1-jre` (*Context*), and lies at the row's `default`
+      today (*Sources*). That the aarch64 archive unpacks to the same
+      directory is an inference from those two. Nothing here could open the
+      archive, so the session confirms it from the archive's listing before
+      it unpacks it. With one path for both builds, only one of them can be
+      at the `default` at a time, and an Intel Mac that installs the x64
+      archive there needs no override. A path that named the processor would
+      let both sit side by side, but it is not where the archive unpacks,
+      and with one machine running TLC nothing needs both.
+    - **No row is recorded again.** A row of `manifest.tsv` records TLC's
+      exit status and one line of its log, and the runner judges those two
+      alone; it prints a run's count of distinct states and compares it with
+      nothing (`docs/tla/README.md`, *Running*). The runner also ties a
+      row's `log`, and a MustHold row's `exit`, to the row's `expect` and
+      `property` (*Tables*), so the one recorded value a run could change is
+      a MustFail row's exit status, which is 12 in all fifteen. Both the
+      status and the line come from TLC's own code, in the same jar, on the
+      same Java release. What differs is the processor the runtime was built
+      for, and a Java program's results are meant not to depend on that: the
+      Java Virtual Machine "is the component of the technology responsible
+      for its hardware- and operating system-independence" (*Sources*). Nor
+      does either depend on timing: a MustHold row's run explores every
+      state, in whatever order, and TLC runs with one worker, so a MustFail
+      row's run explores in the order TLC's own code sets. So the forty-five
+      rows stand as recorded. That is a judgement, untested when this was
+      written. The first `full` run on the new runtime tests it, and a row
+      that fails there is a finding to bring back, not a row to record
+      again. The rows were recorded before this revision; the session's
+      report does not say on which machine, or what changed on it since, and
+      the judgement does not rest on that. No count of states is pinned: the
+      manifest has no field for one, and the counts ADR 0020 and ADR 0021
+      quote are records of the single runs they describe.
+    - **§9's last rule.** Whether another build of the same runtime is
+      another tool, the adding of which §9 leaves to the owner, needs no
+      answer here: the owner made this choice.
+    - **No `CHANGES` entry**, on Assumption 22's ground: no code, flag,
+      format or behaviour changes, and nothing a user of the filesystem or a
+      running deployment sees.
 
 ## Alternatives considered
 
@@ -963,11 +1090,13 @@ when TLC runs in §10, and the issue in *Context*.
 
 ## Sources
 
-Fetched on 2026-10-10, or on 2026-10-12 where an entry says so, through a tool
-that summarises what it fetches, and quoted as it returned them when asked for
-verbatim text. It reads a long page 100,000 characters at a time, and for some
-files it declined to quote more than 125 characters at once. Each URL below
-was fetched while this ADR was written; none is cited from an earlier fetch.
+Fetched on 2026-10-10, or on 2026-10-12 or 2026-11-22 where an entry says so,
+through a tool that summarises what it fetches, and quoted as it returned
+them when asked for verbatim text. It reads a long page 100,000 characters at
+a time, and for some files it declined to quote more than 125 characters at
+once. Each URL below was fetched while this ADR was written, or, where an
+entry is dated 2026-11-22, while that day's revision was; none is cited from
+an earlier fetch.
 
 - The tlaplus README:
   <https://raw.githubusercontent.com/tlaplus/tlaplus/master/README.md>. Under
@@ -996,6 +1125,89 @@ was fetched while this ADR was written; none is cited from an earlier fetch.
   <https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_x64_mac_hotspot_21.0.12.1_1.tar.gz.sha256.txt>,
   answered with a redirect to another host that the tool could not follow, so
   only GitHub's digest was compared.
+- The same page, read again on 2026-11-22 for that day's revision. It was
+  538,393 characters long and was read in three parts, from characters 0,
+  100,000 and 200,000; both assets were in the third, and the rest was not
+  read. `tag_name` jdk-21.0.12.1+1, `published_at` 2026-08-19T12:10:19Z, not
+  a pre-release. The asset
+  `OpenJDK21U-jre_aarch64_mac_hotspot_21.0.12.1_1.tar.gz`: `size` 48144965,
+  `digest`
+  `sha256:dec50fc6f9fcd4fe3ae8cabf5a5fa68f6afc48841f7698e468e9aa5d54beed84`,
+  `state` uploaded, `created_at` 2026-08-19T12:10:21Z, `updated_at`
+  2026-08-19T12:10:24Z, `browser_download_url`
+  <https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_aarch64_mac_hotspot_21.0.12.1_1.tar.gz>.
+  The x64 asset read as it did on 2026-10-10: `size` 42131876 and the digest
+  above. (*Context*, *The runtime since 2026-11-22*; Assumption 31)
+- Adoptium's API for that asset, fetched on 2026-11-22:
+  <https://api.adoptium.net/v3/assets/release_name/eclipse/jdk-21.0.12.1%2B1?architecture=aarch64&os=mac&image_type=jre&project=jdk>.
+  `release_name` jdk-21.0.12.1+1, and one binary: `architecture` aarch64,
+  `os` mac, `image_type` jre, `jvm_impl` hotspot. Its `package`: `name`
+  `OpenJDK21U-jre_aarch64_mac_hotspot_21.0.12.1_1.tar.gz`, `size` 48144965,
+  `checksum`
+  `dec50fc6f9fcd4fe3ae8cabf5a5fa68f6afc48841f7698e468e9aa5d54beed84`, and a
+  `link` equal to the download URL above. (*Context*, *The runtime since
+  2026-11-22*) **Honesty note:** the tool gave the `link` in two pieces,
+  which join to that URL. Adoptium's checksum file,
+  <https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_aarch64_mac_hotspot_21.0.12.1_1.tar.gz.sha256.txt>,
+  answered as the x64 one had, with a redirect to another host that the tool
+  could not follow, so it was not read. Both digests are of the asset as
+  published, and neither is of a file anyone here downloaded.
+- The `release` file of the x64 runtime at the row's `default`,
+  `$HOME/.local/share/tla/jdk-21.0.12.1+1-jre/Contents/Home/release`, read
+  on 2026-11-22 from the disk of the machine the session runs on, and not
+  through the tool. Among its lines:
+  `IMPLEMENTOR_VERSION="Temurin-21.0.12.1+1"`,
+  `JAVA_RUNTIME_VERSION="21.0.12.1+1-LTS"`, `OS_ARCH="x86_64"`,
+  `OS_NAME="Darwin"`, `IMAGE_TYPE="JRE"`,
+  `BUILD_SOURCE="git:e6ba7dec3d07654074559310376a3ae89da5f4ac"` and
+  `BUILD_SOURCE_REPO="https://github.com/adoptium/temurin-build.git"`.
+  `bin/java` lies beside it, under the same `Contents/Home`. (*Context*,
+  *The runtime since 2026-11-22*; Assumption 31)
+- Temurin's build scripts at that commit, fetched on 2026-11-22, for what an
+  archive unpacks to. `sbin/build.sh`, at
+  <https://raw.githubusercontent.com/adoptium/temurin-build/e6ba7dec3d07654074559310376a3ae89da5f4ac/sbin/build.sh>:
+  - `getOpenJDKTag` echoes `"${BUILD_CONFIG[TAG]}"` where a tag was given;
+    otherwise `"${BUILD_CONFIG[BRANCH]}"` where that is a tag, or else a tag
+    it finds in the checked-out repository;
+  - `getOpenJdkVersion`, in its last branch, which a build takes that is no
+    other vendor's variant and has no local source archive, has
+    `version=$(getOpenJDKTag)`, `version=${version%_adopt}` and
+    `version=${version#aarch64-shenandoah-}`, and the function ends
+    `echo "${version}"`;
+  - `getJdkArchivePath` echoes what `getOpenJdkVersion` returns, and
+    `getJreArchivePath` ends `echo "${jdkArchivePath}-jre"`;
+  - `cleanAndMoveArchiveFiles` has
+    `mv "$(ls -d ${BUILD_CONFIG[JRE_PATH]})" "${jreTargetPath}"` and, in a
+    `case` on `BUILD_CONFIG[OS_KERNEL_NAME]`,
+    `"darwin") dirToRemove="${jreTargetPath}/Contents/Home" ;;`;
+  - `createOpenJDKTarArchive` calls
+    `createArchive "${jreTargetPath}" "${jreName}"`, and `createArchive`
+    calls `createOpenJDKArchive "${repoLocation}" "OpenJDK"`.
+
+  `sbin/common/common.sh`, at
+  <https://raw.githubusercontent.com/adoptium/temurin-build/e6ba7dec3d07654074559310376a3ae89da5f4ac/sbin/common/common.sh>:
+  where the archive is not a zip, `createOpenJDKArchive` runs
+  `time tar -cf - "${repoDir}"/ | GZIP=-9 $COMPRESS -c > "$fileName.tar.gz"`,
+  with `--owner=root --group=root` after `-cf -` where `tar` is GNU's.
+  (Assumption 31) **Honesty note:** `build.sh` is 133,319 characters long
+  and was read in parts, for these functions and no others. Of
+  `getOpenJDKTag`'s last branch, the two functions it calls,
+  `getFirstTagFromOpenJDKGitRepo` and `compareToOpenJDKFileVersion`, were
+  not read; by the tool's summary the first varies its search by processor
+  only for one other vendor's variant. This is the commit that built the
+  x64 archive. Whether the aarch64 archive was built at the same one is not
+  known until its own `release` file is read. The same two files at `master`
+  were read first, that day, and the lines quoted from the last three items
+  and from `common.sh` were the same there. That this release's tag is
+  `jdk-21.0.12.1+1` is the release API's `tag_name`, above.
+- *The Java® Virtual Machine Specification, Java SE 21 Edition*, §1.2, *The
+  Java Virtual Machine*:
+  <https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-1.html>, fetched
+  on 2026-11-22. "The Java Virtual Machine is the cornerstone of the Java
+  platform. It is the component of the technology responsible for its
+  hardware- and operating system-independence, the small size of its
+  compiled code, and its ability to protect users from malicious programs."
+  (Assumption 31)
 - The standard modules, from the tlaplus repository's
   `tlatools/org.lamport.tlatools/src/tla2sany/StandardModules/`, at the tag
   v1.7.4 and at `master`:
