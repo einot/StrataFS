@@ -144,10 +144,11 @@ name the verdicts those branches take (ADR 0022 §3), and are no events.
 
 ## V3. Commit protocol
 
-`docs/tla/CommitProtocol.tla`, checked against `afbda93`, coder's commit for
-the sticky rule of ADR 0026, for every action (ADR 0023 Assumption 23;
-ADR 0024 §5, Assumption 29; ADR 0014 Assumption 49; ADR 0026 §9,
-Assumption 25). Its Go sites
+`docs/tla/CommitProtocol.tla`, checked against `de0a151`, coder's commit for
+ADR 0028's rule on a group asked for at creation, for every action (ADR 0023
+Assumption 23; ADR 0024 §5, Assumption 29; ADR 0014 Assumption 49; ADR 0026
+§9, Assumption 25; ADR 0027 §11, Assumption 25; ADR 0028 §9,
+Assumption 19). Its Go sites
 exist: `Sync`, `loadOrInit`, `initEmpty`, `decodeSnapshot`,
 `classifyRoot`, `resolveRoot`, `fallbackAllowed`, `schedulePrune` and
 `pruneSnapshots` in `internal/blobfs/commit.go`; `New`,

@@ -28,15 +28,25 @@ says how far the pass went), and `docs/vocabulary.md` V7 marks `OpExecute`
 as existing. §14's `CHANGES` line is reworded in its last sentence, and was
 not yet recorded. §1's tables, the `policy` API, the rows, `Access`'s form,
 the stages and what a client sees are unchanged, and no test changes.
+**Revised:** 2026-11-24 — record only. By the session's report the owner
+confirmed on 2026-11-24 the fifth of the five calls this ADR put to the
+owner, that the `CHANGES` line takes no `BREAKING:`. The session had
+decided it on 2026-11-23, and this ADR recorded it as the session's, which
+the owner might still read otherwise. So each of the five calls is now the
+owner's. *Context*, which gains decision 5, *Put to the owner, and
+decided*, 5, and Assumption 19 say so. What §14, the opening of *Put to the
+owner, and decided* and Assumptions 1 and 22 say of the session's decision
+stands as the record of 2026-11-23. No rule, no table, no row, no test and
+no word of the `CHANGES` line changes.
 **Issue:** #97
 
 ## Context
 
 **The owner's decisions.** Three, as ADR 0014 and ADR 0018 record them: the
 first two in the owner's words, and the third in the wording the owner
-approved; and a fourth the session reported. The brief this ADR was written
-from gave the second and the third in substance, and nothing here claims any
-approval beyond the four.
+approved; and a fourth and a fifth the session reported. The brief this ADR
+was written from gave the second and the third in substance, and nothing
+here claims any approval beyond the five.
 
 1. On 2026-10-10: "Otherwise, follow architect's and your own
    recommendations." So this ADR is Accepted on creation, as ADRs 0015 to
@@ -66,6 +76,10 @@ approval beyond the four.
    not as the owner's. All five were the architect's judgement until then.
    The report says nothing of any other assumption here, and each of those
    stays the architect's.
+5. On 2026-11-24, by the session's report, which again gave the answer and
+   not the owner's words: the owner confirmed the fifth call as the session
+   had decided it. The `CHANGES` line takes no `BREAKING:` (§14;
+   Assumption 19). So each of the five calls is now the owner's.
 
 **The defect.** #97, "ACCESS grants what the operations then refuse", as the
 session gave its text (Assumption 2). `Access` "disagrees with the operations
@@ -1474,7 +1488,8 @@ pins, not the mechanism.
    macOS client.
    *Decided* by the owner: such an object keeps today's bits until #69.
 5. **The `CHANGES` line takes no `BREAKING:`** (§14; Assumption 19).
-   *Decided* by the session, not the owner: no prefix, since no running
+   *Decided* by the session on 2026-11-23, and confirmed by the owner on
+   2026-11-24 (*Context*, decision 5): no prefix, since no running
    deployment must act.
 
 ## Assumptions
@@ -1603,9 +1618,11 @@ Each is mine unless it says otherwise.
     action, the same line takes the prefix. The session decided on
     2026-11-23 that the line takes no `BREAKING:`, since no running
     deployment must act (*Context*, decision 4). The reasoning above is
-    kept as the reasoning. The decision is the session's, and by its report
-    not the owner's, who may still read it the other way. The line's last
-    sentence was reworded in the pass of that day (§14), which changes
+    kept as the reasoning. The decision was the session's, and by its
+    report of that day not the owner's, who might still have read it the
+    other way. By the session's report the owner confirmed it on 2026-11-24
+    (*Context*, decision 5): the line takes no `BREAKING:`. The line's last
+    sentence was reworded in the pass of 2026-11-23 (§14), which changes
     nothing in this judgement.
 20. **`internal/vfs` is untouched** (§2). `vfs.FS.Access` has no doc
     comment, and gains none: the rules are `internal/policy`'s, which the

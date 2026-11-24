@@ -2,29 +2,66 @@
 
 **Status:** Accepted
 **Date:** 2026-11-24
+**Revised:** 2026-11-24 — the same day, before merge, after test-author's
+commit `32d4cee` and coder's commit `de0a151`, read and not run. No rule
+moved. One sentence of §8 was wrong and is corrected: G3's bullet on
+`FS.changes` spoke of a call that returned nil where it meant a call that
+made an object, against its own twelfth row and the facts above it. The
+rest is record. By the session's report the owner decided on 2026-11-24 the
+four calls this ADR put to the owner, each as recommended; *Context*, the
+section that was *For the owner* and is now *Put to the owner, and decided*,
+and Assumptions 1, 5, 10, 11 and 17 say so, §3 to §6, §12 and *Alternatives
+considered* name the section by its new heading, and §6 says who decided
+the question it left. §3 records what coder chose where the pins left room:
+`allocInode` takes the two ids. §8 settles the other points test-author's
+report raised, in G3 and G4, each as the committed test has it, lists the
+names its wire test uses beyond those given, and records the red run the
+session took (Assumption 20, which is new); its list of what only review
+can show gains one clause from coder's choice. §9's pass is made:
+`trace.tsv`'s row for `FS.createEntry` was read against `de0a151` and
+holds, its `decided` now reads `ADR 0028 section 3`, and the module's
+`Checked against` line, `docs/tla/README.md`'s statement of it and
+vocabulary V3's now read `de0a151` (Assumptions 15 and 19, the second new,
+which says how far the pass went). The module changed in one line of its
+header comment, so TLC's outcome cannot differ, and CLAUDE.md's merge bar
+asks the session for `tla.sh full` on the PR. §12's `CHANGES` line was read
+against `de0a151` and stands as proposed. §1's rule and table, §2's
+requests, §3's order, what §4 to §7 decide, G1's grid, the tables of G2 and
+G3, what each call of G4 expects and what a client sees are unchanged, and
+no test changes.
 **Issue:** #98
 
 ## Context
 
 **The owner's decisions.** Three, as ADR 0014 and ADR 0018 record them: the
 first two in the owner's words, and the third in the wording the owner
-approved. The brief this ADR was written from gave the second in substance.
-Nothing here claims any approval beyond them.
+approved; and a fourth the session reported. The brief this ADR was written
+from gave the second in substance. Nothing here claims any approval beyond
+the four.
 
 1. On 2026-10-10: "Otherwise, follow architect's and your own
    recommendations." So this ADR is Accepted on creation, as ADRs 0015 to
-   0027 were, and its design is the architect's (Assumption 1). *For the
-   owner* lists the judgement calls an owner is most likely to weigh
-   differently, each with its alternatives, for the session to put to the
-   owner. None of them has been put yet.
+   0027 were, and its design is the architect's (Assumption 1). *Put to the
+   owner, and decided* lists the judgement calls an owner is most likely to
+   weigh differently, each with its alternatives and with who decided it.
 2. Also on 2026-10-10: "We don't have any clients yet so any breaking changes
    are allowed until release." By the brief, a change a client can see still
    gets a `CHANGES` line, prefixed `BREAKING:` only where a running
-   deployment must act (§12; Assumption 17).
+   deployment must act (§12). Whether this one is breaking was
+   Assumption 17's judgement, until the owner decided it (decision 4).
 3. On 2026-10-22, the rules CLAUDE.md carries under "State machines and
    policies", which ADR 0018 records: a decision about whether a caller may
    do something is a pure policy in `internal/policy`, not an inline
    condition, and only an ADR exempts code from that.
+4. On 2026-11-24, by the session's report, which gave each answer as the
+   option this ADR recommended and not in the owner's words: the owner
+   answered the four calls this ADR put to the owner, each as recommended. A
+   group the caller may not set is left unapplied, and the creation succeeds
+   (§4). The default group stays the caller's own (§5). A mode asked for
+   keeps its set-ID bits (§6). And the `CHANGES` line takes no `BREAKING:`
+   (§12; Assumption 17). All four were the architect's judgement until then.
+   The report says nothing of any other assumption here, and each of those
+   stays the architect's.
 
 **The defect.** #98, "CREATE, MKDIR and SYMLINK apply a requested group from
 any caller", as the session gave its text (Assumption 2). "`createEntry`
@@ -387,9 +424,9 @@ depends on the move: a refusal of either request fails nothing, and the
 `Object` each carries has the values the inode will have. It is pinned so
 that the function has one shape, every verdict and then the change, and so
 that no answer a policy gives, and no later decision about what a refusal
-does (*For the owner*, 1), can leave an inode in the table with no entry
-that names it. G3 (§8) tests it, through `FS.changes` as the policy itself
-finds it.
+does (*Put to the owner, and decided*, 1), can leave an inode in the table
+with no entry that names it. G3 (§8) tests it, through `FS.changes` as the
+policy itself finds it.
 
 **The new object.** In the same hold, `createEntry` then makes the object
 with:
@@ -405,8 +442,40 @@ with:
 How the two ids reach the inode is coder's: `allocInode` may keep its
 signature, with the two fields set on the inode it returns, or may take
 them. Either is one hold of `FS.mu` for writing, in which nothing reads the
-inode between the two steps. The pass after coder's commit records which
-(§9).
+inode between the two steps. The pass after coder's commit (§9) records
+which, below.
+
+**What coder's commit chose**, recorded against `de0a151` where the pins
+above left room (Assumption 19):
+
+- `allocInode` takes the ids. Its signature is
+  `func (f *FS) allocInode(t vfs.FileType, mode, uid, gid uint32, parent uint64) *inode`,
+  with the two ids in place of the caller it took at `344a95b`, and it
+  makes the inode with `UID: uid` and `GID: gid`. It still masks the mode
+  to `0o7777`, puts the inode in the table, advances `nextIno` and calls
+  `markDirty`, and `createEntry` is still its one caller. Its doc comment
+  says why it takes the ids, and cites this section.
+- `createEntry` builds `N` once, after it has chosen the mode, as
+  `policy.Object{Type: t, Mode: mode & 0o7777, UID: c.UID, GID: c.GID}`,
+  which is §2's expression, and both requests carry that one value.
+- It keeps the two ids in two locals, which start as `c.UID` and `c.GID`.
+  Each is replaced by the id asked for only where that id's request
+  returned nil, and the two are then passed to `allocInode`. So the inode
+  enters the table with the owner and the group the call gives it, and
+  `createEntry` writes neither field after `allocInode` returns.
+- Each request is built in place, with `Op`, `Caller`, `Object` and its one
+  id, and asked by `f.perm.Check`. Neither goes through `checkPerm`, which
+  takes an inode, and none exists yet. `checkPerm` and `objectOf` are
+  unchanged, and the `OpAddEntry` is still asked through `checkPerm`. No
+  helper was added.
+- The mask is written twice, once for `N` in `createEntry` and once for the
+  inode in `allocInode`, each on the mode `createEntry` chose. So that
+  `N`'s mode is the inode's rests on the two expressions staying the same,
+  which is review's to keep (§8).
+- `createEntry`'s doc comment gives §2's requests and their order, cites
+  ADR 0014 §6 and this ADR's §2 and §3, and keeps its `TLA+:` line. No
+  other line of `internal/blobfs/fs.go` changed, and no other non-test file
+  did, by the session's diff (§9).
 
 **ADR 0024 §1's rule holds, with no exception.** A creating call that
 returns an error returns it from stages A to E, before any change. One that
@@ -418,7 +487,7 @@ neither can leave half of one.
 
 **The disposition.** A refused `OpChgrp` at creation is treated as a refused
 `OpChown` there has been since ADR 0014 §6: the attribute is not applied,
-and the call goes on (Assumption 5; *For the owner*, 1).
+and the call goes on (Assumption 5; *Put to the owner, and decided*, 1).
 
 **Why not refuse the call.**
 
@@ -476,9 +545,10 @@ of the group:
 ### 5. The default group stays the caller's
 
 A new object's group, when none is asked for or the one asked for is left
-unapplied, is the caller's `GID`, as at `344a95b` (Assumption 10; *For the
-owner*, 2). POSIX allows either the directory's group or the process's
-(*Context*). A caller is always in its own `GID`, which is what §6 rests on.
+unapplied, is the caller's `GID`, as at `344a95b` (Assumption 10; *Put to
+the owner, and decided*, 2). POSIX allows either the directory's group or
+the process's (*Context*). A caller is always in its own `GID`, which is
+what §6 rests on.
 
 **What it leaves undone.** POSIX also asks that an implementation "provide a
 way to initialize the file's group ID to the group ID of the parent
@@ -494,9 +564,9 @@ own (*What this does not decide*).
 
 ### 6. Set-ID bits in a mode asked for
 
-**No rule is added** (Assumption 11; *For the owner*, 3). A creating call
-stores the mode it is given, masked to `0o7777`, the set-user-ID,
-set-group-ID and sticky bits included, as at `344a95b`.
+**No rule is added** (Assumption 11; *Put to the owner, and decided*, 3). A
+creating call stores the mode it is given, masked to `0o7777`, the
+set-user-ID, set-group-ID and sticky bits included, as at `344a95b`.
 
 **Why none is needed to close the issue's case.** The issue names "setgid
 executables, owned by a group it is not in". By §1 and §5, under `Unix()`,
@@ -513,7 +583,8 @@ outside group 20 that asks for mode `0o2755` and group 20 gets a file of
 mode `0o2755` in its own group. That is not the file it asked for, and it
 is not an escalation: the caller could have asked for that file outright.
 Linux's server makes the same file from the same call. Whether such a call
-should lose the bit is *For the owner*, 3.
+should lose the bit was put to the owner, who decided that it keeps it
+(*Put to the owner, and decided*, 3).
 
 **What stays open, and where.**
 
@@ -740,7 +811,9 @@ new, `vfs.Caller{UID: 504, GID: 30, GIDs: []uint32{40, 41}}`; and `sp24Root`
   (`TestARequestedGroupAtCreationGoesThroughOpChgrpAndARefusalIsIgnored`).
   `sp24Mount` with a policy that, for each request, first notes `FS.changes`
   as it finds it and then calls an `sp24Recorder`'s `check`; `pwW2Tree`,
-  whose `d` has the `Object` `D`, `pwW2D`. Every call is on `d`, as ADR 0014
+  whose `d` has the `Object` `D`, `pwW2D`. The note is switched on once
+  `pwW2Tree` has returned: the setup's requests are recorded and not noted,
+  since nothing is asserted of them. Every call is on `d`, as ADR 0014
   §11's safety rule asks. For each row the recorder is reset to refuse the
   index given, −1 for none; `FS.changes` is read, c; the call is made, by
   `testCaller` unless the row says otherwise; and:
@@ -751,9 +824,12 @@ new, `vfs.Caller{UID: 504, GID: 30, GIDs: []uint32{40, 41}}`; and `sp24Root`
     `Replaced` nil, and `Advisory` false;
   - at every one of those requests the policy found `FS.changes` equal to c:
     the call had changed nothing when it asked (§3);
-  - after a call that returned nil, `FS.changes` is above c, and the
+  - after a call that made an object, `FS.changes` is above c, and the
     attributes returned and `GetAttr` report the owner and group given;
-    after one that returned an error, `FS.changes` is c.
+    after a call that made none, `FS.changes` is c. A call that made none
+    is one that returned an error, or the twelfth row's, which returns nil
+    with the object its name already names; where the name names an object,
+    that object is as it was.
 
   `N` is `{vfs.TypeReg, 0o644, 501, 20}`.
 
@@ -788,7 +864,12 @@ It drives the server over a TCP socket with `startServer`, as
 `skipWccData` and `skipPostOpAttr`; `stkMkdir` and `stkClient`; the `nmfs`
 helpers; and, of unexported non-test names, the procedure numbers
 `procGetAttr`, `procCreate`, `procMkdir` and `procSymlink`, `createUnchecked`
-and `createGuarded`, and `dontChange`.
+and `createGuarded`, and `dontChange`. Of `rpcClient`, which
+`integration_test.go` declares, it may use the fields `t`, `conn`, `xid`,
+`uid` and `gid` and the methods `call` and `readRecord`, which a helper
+that frames a call as `call` does needs. And it may name `ProgramNFS` and
+`VersionNFS`, the exported constants of `internal/nfs` that the package's
+wire tests pass to `call`.
 
 The encodings, as `internal/nfs` reads and writes them at `344a95b`:
 
@@ -829,11 +910,18 @@ The encodings, as `internal/nfs` reads and writes them at `344a95b`:
     gid 30, `502:30`;
   - from a client sending uid 504, gid 30 and the gids 40 and 41: a GUARDED
     CREATE of `pub/m` with mode `0o644` and gid 41, `504:41`; and one of
-    `pub/m2` with gid 20, `504:30`;
+    `pub/m2` with mode `0o644` and gid 20, `504:30`;
   - from a client sending `0:0`: a GUARDED CREATE of `pub/r` with mode
     `0o644` and gid 20, `0:20`;
   - from the client sending `502:30`: an UNCHECKED CREATE of `pub/r`, which
     exists, with gid 30, whose reply and whose GETATTR still report `0:20`.
+
+  Each `sattr3` sets the gid given, the mode where one is given, and nothing
+  else. Where no mode is given, `set_mode3` is FALSE, and the mode reported
+  is the one the object has without it: `0o777` for `pub/la`, by the facts
+  above, and for the second `pub/r` the `0o644` it was made with. A client
+  given as a uid and a gid alone sends that gid as its one gid, as
+  `rpcClient.call` does.
 
 **Existing tests.** No assertion of an existing test changes. Two comments
 of `internal/blobfs/policy_wiring_test.go` do: its header lists "how sa.GID
@@ -865,6 +953,46 @@ file of this PR, read from the code and not run:
 
 After coder's change every test passes.
 
+**The red run was taken**, and was as read. By the session's report,
+test-author's run and the session's own, each on `344a95b`'s tree with the
+three new files, gave the same:
+
+- G1 passes.
+- G2 fails on the third, fourth and seventh rows of its first table, for
+  each of the three calls; on the first, second and fourth rows of its
+  second; and on the remount's `Lookup`s of `c3` and `s1`, the two of its
+  four names whose caller is outside the group asked for.
+- G3 fails on its first to eighth, tenth and eleventh rows, the second
+  reporting group 8, and the sixth to eighth failing on the note of
+  `FS.changes` as well. Its ninth and its twelfth to fifteenth pass.
+- G4 fails on `pub/a`, `pub/da`, `pub/la` and `pub/m2`.
+
+And by the session's report of its merge bar on `de0a151`, with the four
+test files this PR adds or changes in place, every test passes.
+
+**What test-author's commit settled**, recorded against `32d4cee`, read on
+2026-11-24 (Assumption 20). Its report raised four points where the text
+above was at odds with itself or left room, and named what its wire test
+uses beyond the names given. Each is decided in the text it bears on, and
+the committed tests match every one, so no test changes:
+
+1. *G3's rule for `FS.changes`, against its twelfth row.* The bullet was
+   wrong, and is corrected. What raises `FS.changes` is making an object,
+   not returning nil: the twelfth row returns nil and makes none, so it
+   leaves `FS.changes` at c, as the facts and the sentence under the table
+   already said, and as committed.
+2. *`pub/m2`'s mode.* `0o644`, as `pub/m`'s, as committed.
+3. *A call G4 gives no mode.* It sends none, as committed: `pub/la`
+   reports `0o777`, and the second `pub/r` the `0o644` it has.
+4. *When G3's note is switched on.* Once the setup has returned, as
+   committed. The facts above would let it note the setup's requests too,
+   and G3 does not use that.
+5. *The names.* `ProgramNFS`, `VersionNFS`, and `rpcClient`'s fields and
+   its `readRecord`, which the file's own framing helper needs, are now in
+   the list above. Each of G4's three clients sends its credential through
+   that helper, the two that send one gid with the list `rpcClient.call`
+   would have sent, which G4's text now says.
+
 **What only review can show:**
 
 - that `internal/blobfs/fs.go` is the only non-test file changed, and in it
@@ -874,7 +1002,9 @@ After coder's change every test passes.
   policy's nil for it;
 - that both requests are made before `allocInode`, which G3 samples through
   `FS.changes`, in the hold of `FS.mu` for writing that makes the object,
-  and that `N` is built from the values the inode is then made with;
+  and that `N` is built from the values the inode is then made with, its
+  mode by the mask `allocInode` applies, which coder's commit writes once
+  for each (§3);
 - that a refusal of either is neither returned nor logged;
 - that `createEntry` still performs `Mutate` holding the lock its
   `trace.tsv` row gives (§9);
@@ -923,6 +1053,51 @@ and outside this ADR does this and no more:
   `tla.sh: N of N passed`, N being the rows of `docs/tla/manifest.tsv`. The
   module's actions do not change, so TLC's outcome cannot differ from the
   run that calibrated those rows.
+
+**The pass after coder's commit** was made on 2026-11-24 against `de0a151`,
+read and not run (Assumption 19). The row holds:
+
+- `FS.createEntry` is declared on `*FS` in `internal/blobfs/fs.go` and keeps
+  its `TLA+: docs/tla/CommitProtocol.tla Mutate` line. It calls `mutable()`,
+  then `validName` and the check of a regular file's size, before its lock.
+  It takes `FS.mu` for writing by `Lock` with a deferred `Unlock`, and in
+  that hold resolves the directory, asks the `OpAddEntry`, answers a name
+  the directory has, chooses the mode, and asks the `OpChown` and the
+  `OpChgrp`. Only then does it make its change: `allocInode`, a symlink's
+  target and size, the entry, the directory's link count for a new
+  directory, the directory's `touchM`, and `markDirty`. Every return before
+  `allocInode` leaves the namespace as it was.
+- So the row's `locks` stands, and its `decided` moved from `-` to
+  `ADR 0028 section 3`, which is the one change to `trace.tsv`.
+- `allocInode`'s new signature bears on no row. It has none and gains
+  none: it is a step of `createEntry`'s change, called from nowhere else,
+  in `createEntry`'s hold, as it was. `FS.markDirty`'s row stands: the
+  function is untouched, and each of its eight call sites, `allocInode`'s
+  among them, is in a hold of `FS.mu` for writing.
+- By the session's `git diff --stat 344a95b..de0a151`, over `internal` less
+  its test files, coder's commit changes `internal/blobfs/fs.go` alone, by
+  28 insertions and 11 deletions in three hunks. Read against the file,
+  the three are `allocInode` with its doc comment; `createEntry`'s doc
+  comment; and `createEntry` from the mode it chose to its call of
+  `allocInode`. The other eleven functions of `fs.go` that the trace
+  names, `New`, `FS.mutable`, `FS.SetAttr`, `FS.unlink`, `FS.Rename`,
+  `FS.bufferWrite`, `FS.truncate`, `FS.flushAll`, `FS.settleAll`,
+  `FS.flushOpen` and `FS.putChunk`, were each read whole at `de0a151`.
+  Each lies outside the three hunks, keeps its `TLA+:` line, and takes in
+  its own body the locks its rows give it; a lock a row gives as held by a
+  caller in `commit.go` was not read there (Assumption 19).
+- Between `afbda93` and `de0a151` the branch's history holds one other
+  change to `internal`, ADR 0027's, whose own pass found that it edits no
+  function the trace names (ADR 0027 §11). That nothing else lies between
+  them rests on that history as the session gave it (Assumption 19).
+
+The module's `Checked against` line, `docs/tla/README.md`'s statement of it
+and `docs/vocabulary.md` V3's moved from `afbda93` to `de0a151`. The module
+changed in that one line of its header comment and nowhere else, and gained
+no `Revised:` line. So TLC's outcome cannot differ from the run that
+calibrated the forty-five rows, and CLAUDE.md's merge bar asks the session
+for `tla.sh full` on the PR, as above. The manifest has 45 rows, so the
+run's last line must read `tla.sh: 45 of 45 passed`.
 
 `docs/vocabulary.md` does not otherwise change. V7 lists `OpChgrp`,
 `OpChown` and `InGroup` already, and `UnixAllows(r)` is still
@@ -982,7 +1157,12 @@ The others list #98 among what they leave, which stays true of them. `docs/DESIG
 gains this ADR's row, and `docs/adr/README.md`'s index does.
 
 One `CHANGES` line, proposed for the session to record, without `BREAKING:`
-(Assumption 17; *For the owner*, 4):
+(Assumption 17; *Put to the owner, and decided*, 4). By the session's
+report the owner decided on 2026-11-24 that it takes none (*Context*,
+decision 4). The pass of that day read the line against `de0a151` and
+changed nothing in it: what it says of the new behaviour is what
+`createEntry` does at that commit. At that commit the session had not yet
+recorded it:
 
 > CREATE, MKDIR and SYMLINK apply a group asked for in their attributes
 > only when the caller is root or a member of that group, the rule SETATTR
@@ -991,14 +1171,18 @@ One `CHANGES` line, proposed for the session to record, without `BREAKING:`
 > before any caller with write and search permission on the directory
 > could make an object in any group.
 
-## For the owner
+## Put to the owner, and decided
 
-Four judgement calls with a trade-off a client can see. Each is decided
-above as the architect's recommendation, and none has been put to the owner.
-A different answer to the first changes §4, G2 to G4 and the `CHANGES` line,
-so it is best asked before the tests are written. A different answer to any
-of them changes a table here and its pins, not the mechanism: §2's requests
-and §3's order stand under every alternative.
+This section was headed *For the owner* until the pass of 2026-11-24. It
+listed four judgement calls with a trade-off a client can see, each decided
+above as the architect's recommendation, for the session to put to the
+owner. None is open now. By the session's report the owner decided all four
+on 2026-11-24, each as recommended (*Context*, decision 4). Each item is
+kept as it was put, with the alternatives that were weighed, and ends with
+who decided it. A different answer to the first would have changed §4, G2
+to G4 and the `CHANGES` line. A different answer to any of them would have
+changed a table here and its pins, not the mechanism: §2's requests and
+§3's order stand under every alternative.
 
 1. **A group the caller may not set is left unapplied, and the creation
    succeeds** (§4). *Recommended:* leave it unapplied, as a uid the caller
@@ -1016,6 +1200,9 @@ and §3's order stand under every alternative.
      server does. The issue's done-when asks for root or a member, and
      `SETATTR` already gives a member the group, so this would refuse at
      creation what the next call allows.
+
+   *Decided* by the owner: the group is left unapplied, and the creation
+   succeeds.
 2. **The default group stays the caller's own** (§5). *Recommended:* no
    change in this PR, and an issue for a directory's set-group-ID bit.
    *Alternatives:*
@@ -1029,6 +1216,8 @@ and §3's order stand under every alternative.
      it.
    - always give the directory's group, as BSD does. That changes every
      creation.
+
+   *Decided* by the owner: the default group stays the caller's own.
 3. **A mode asked for keeps its set-ID bits at creation** (§6).
    *Recommended:* store the mode as asked, as now, since no creation puts
    an object in a group its creator is outside. *Alternative:* clear
@@ -1037,11 +1226,13 @@ and §3's order stand under every alternative.
    group never makes one in another. It guards a client's mistake, not an
    escalation, departs from Linux's server, and adds a rule about the mode
    to a path that has none.
+   *Decided* by the owner: a mode asked for keeps its set-ID bits.
 4. **The `CHANGES` line takes no `BREAKING:`** (§12; Assumption 17).
    *Recommended:* none, since no running deployment has to act to keep
    working. *Alternative:* prefix it, on the reading that a deployment
    whose client places objects by sending a group its users are outside
    has to add those users to the group to keep the placement.
+   *Decided* by the owner: no prefix.
 
 ## Assumptions
 
@@ -1052,8 +1243,10 @@ Each is mine unless it says otherwise.
    "root or a member" and leaves "ignored or refused" to be decided. The
    rest is mine: the request (§2), the order (§3), the disposition (§4),
    the default (§5), that no set-ID rule is added (§6), and the `CHANGES`
-   judgement. *For the owner* lists the four an owner is most likely to
-   weigh differently.
+   judgement. *Put to the owner, and decided* lists the four an owner is
+   most likely to weigh differently. Those four were mine until 2026-11-24,
+   when by the session's report the owner decided each as this ADR has it
+   (*Context*, decision 4).
 2. **Read, not run, at `344a95b`.** Every statement about the code was
    checked by reading it there; nothing was run. #98's text is as the
    session gave it, and so is what the audit of #94's fix noted. The titles
@@ -1073,7 +1266,9 @@ Each is mine unless it says otherwise.
 5. **Left unapplied** (§4). The done-when leaves the choice, and §4 gives
    the four reasons. It would be the wrong call if a client that asks for a
    group at creation, and does not read the reply, were common, and none
-   was found that does.
+   was found that does. By the session's report the owner decided on
+   2026-11-24 that the group is left unapplied and the creation succeeds
+   (*Context*, decision 4).
 6. **One `Object` for both requests, the caller's own** (§2). ADR 0014 §6
    gave the `OpChown` the new inode as `allocInode` made it, and said
    nothing of a second request. Giving the `OpChgrp` an object with the uid
@@ -1095,10 +1290,13 @@ Each is mine unless it says otherwise.
    returns only `vfs.ErrPerm` for either request.
 10. **The default group is unchanged** (§5). The brief asks whether it
     changes. Keeping it keeps this PR to the issue, and keeps §6's
-    argument, which rests on a caller being in its own gid.
+    argument, which rests on a caller being in its own gid. By the
+    session's report the owner decided on 2026-11-24 that the default group
+    stays the caller's own (*Context*, decision 4).
 11. **No rule for set-ID bits** (§6), for the reason §6 gives. It would be
     the wrong call under a default group that can be one the creator is
-    outside.
+    outside. By the session's report the owner decided on 2026-11-24 that a
+    mode asked for keeps its set-ID bits (*Context*, decision 4).
 12. **No request for the mode at creation** (§2). `OpChmod` on `N` would be
     allowed to every caller by construction, a request with no rule behind
     it. A policy that wants to judge a new object's mode has no request for
@@ -1121,7 +1319,8 @@ Each is mine unless it says otherwise.
     where ADR 0026 left `FS.unlink`'s and `FS.Rename`'s as they were,
     because here a request moves from inside the change to before it, and
     §3 is what keeps it there. `Checked against` moves and `tla.sh full` is
-    due, as for every edit of a traced function since ADR 0024.
+    due, as for every edit of a traced function since ADR 0024. The pass
+    was made on 2026-11-24, against `de0a151` (§9; Assumption 19).
 16. **What clients send is read, not run** (*Context*; §7). Linux's client
     at `v6.6` and Apple's at `main`, in the functions named, through a tool
     that summarises. Other clients, other versions and other paths through
@@ -1130,18 +1329,92 @@ Each is mine unless it says otherwise.
     calls succeed as before. Objects made by a caller outside the group it
     asks for land in another group than before, which a deployment that
     relied on it would see as files its group can no longer reach. As read,
-    neither kernel client relies on it in ordinary use.
+    neither kernel client relies on it in ordinary use. By the session's
+    report the owner decided on 2026-11-24 that the line takes no
+    `BREAKING:` (*Context*, decision 4), so the judgement above is no
+    longer mine alone. The pass of that day read the line against `de0a151`
+    and left it as proposed (§12).
 18. **Which ADRs are revised** (§12). ADR 0014, two of whose parts are
     replaced, and ADR 0010, one of whose statements about the code stops
     being true. An ADR that only lists #98 among what it leaves is not
     revised, as ADR 0025 was not when ADR 0026 decided #94, which it
     lists.
+19. **The pass after the two commits was read, not run, and how far it
+    went** (§3, §8, §9). Nothing was run by me, and I cannot run git. At
+    `de0a151` I read `internal/blobfs/fs.go` whole, 2155 lines. From it
+    come what §3 says coder chose, what §9 says of the row and of the other
+    functions the trace names there, and that every request any method
+    makes is asked in a hold of `FS.mu`, which §8's facts rest on. That
+    coder's commit changes that file alone, by 28 insertions and 11
+    deletions in three hunks, is the session's `git diff --stat` and its
+    list of the hunks. The length agrees: ADR 0027's Assumption 25 counted
+    2138 lines at `729360f`, and 2138 + 28 − 11 is 2155. What each hunk
+    holds is my reading of the file against the hunks' line numbers, not a
+    diff I saw. The session's account gave the second hunk as
+    `allocInode`'s body; by its lines it is `createEntry`'s doc comment,
+    and `allocInode`'s two changed fields are inside the first. I did not
+    read `internal/blobfs/commit.go` or the three files of `internal/store`
+    that the trace names, beyond a search that found their `TLA+:` lines.
+    Their rows stand on the passes that last read them (ADR 0023
+    Assumption 23; ADR 0024 §5; ADR 0014 Assumption 49; ADR 0026
+    Assumption 25) and on the session's stat. `344a95b` and `4ded55e` are
+    the merges of ADR 0027's and ADR 0026's PRs. That they hold the code of
+    `729360f` and of `afbda93`, and that nothing else lies between
+    `afbda93` and `de0a151`, I did not compare. A `git diff afbda93 de0a151`
+    of the five files `trace.tsv` names would confirm the whole stretch,
+    and is the session's to run if it wants more than this. Because the
+    line moves past the change ADR 0027's pass covered, and "for every
+    action" rests on that pass too, `docs/tla/README.md`'s and vocabulary
+    V3's statements of the line now cite it beside this one. Of the tests I
+    read the three `create_group_test.go` files whole; in
+    `internal/blobfs/policy_wiring_test.go` its two revised comments,
+    `pwW2Tree` and the helpers G3 calls after a row; in
+    `internal/blobfs/setattr_policy_test.go` `sp24Recorder` and
+    `sp24Mount`; in `internal/nfs/integration_test.go` `rpcClient`, `dial`,
+    `call`, `readRecord`, `startServer`, `mountRoot` and the skip helpers;
+    and in `internal/nfs/sticky_test.go` `stkMkdir` and `stkClient`. I also
+    read `InGroup` and the `OpChown` and `OpChgrp` rows of
+    `internal/policy/policy.go`, which are as *Context* has them, and
+    `internal/blobfs/tla_trace_test.go` whole: the tripwire asks of a row's
+    `decided` only that it is not empty. That the suite passes, and what
+    the red run gave, are the session's reports.
+    That `tla.sh full` must end `tla.sh: 45 of 45 passed` is from
+    `docs/tla/manifest.tsv`, which has 45 rows, none of them uncalibrated,
+    and from `run_suite` in `scripts/tla.sh`. By the session's brief the
+    pass also recorded the owner's decisions (*Context*, decision 4),
+    settled the points test-author's report raised (§8; Assumption 20), and
+    read the `CHANGES` line again (§12).
+20. **The points of the tests** (§8). Each was open in the text, or wrong
+    in it, and each is settled as the committed test has it. G3's bullet
+    was my error: it said "returned nil" where it meant "made an object",
+    against the twelfth row, the facts and the sentence under the table,
+    and test-author pinned the row by those. `pub/m2` takes `pub/m`'s mode
+    because "one of" stood for the same call with another name and group,
+    and the attributes expected are the same with a mode of `0o644` or with
+    none. A call that G4 gives no mode sends none, because a `sattr3` that
+    set what the text does not name would test something the text does not
+    say. G3's note is switched on after the setup because nothing is
+    asserted of the setup's requests: noting them would add the holds of
+    `Write` and of the other calls the setup makes to what the test rests
+    on, and a race reported from there would hide what G3 is for. While the
+    note is on, the policy is asked by the rows' own calls, in
+    `createEntry`'s hold for writing, and by the `Lookup` that checks the
+    ninth row, in a hold for reading. The fact that every method asks
+    holding `FS.mu` stands as written, and is true of every method at
+    `de0a151`, as read (Assumption 19); G3 uses less of it than it allows.
+    The names test-author found missing are ones a helper that frames a
+    call as `call` does cannot do without. The text asked for that helper
+    and did not list them. The fields and `readRecord` are in a test file,
+    and `ProgramNFS` and `VersionNFS` are exported. That a client given as
+    a uid and a gid sends that gid as its one gid is what `rpcClient.call`
+    does, and is now said, since the rule turns on the list.
 
 ## Alternatives considered
 
-- **Refusing the call**, with `NFS3ERR_PERM` or `NFS3ERR_ACCES` (§4; *For
-  the owner*, 1).
-- **Applying only root's**, as Linux's server does (*For the owner*, 1).
+- **Refusing the call**, with `NFS3ERR_PERM` or `NFS3ERR_ACCES` (§4; *Put
+  to the owner, and decided*, 1).
+- **Applying only root's**, as Linux's server does (*Put to the owner, and
+  decided*, 1).
 - **An inline condition in `createEntry`**,
   `c.UID == 0 || policy.InGroup(c, *sa.GID)`. It is the rule, stated a
   second time, in the place ADR 0018 §1 says a rule does not go. A policy a
@@ -1157,9 +1430,9 @@ Each is mine unless it says otherwise.
   (Assumption 6).
 - **Asking after `allocInode`**, where the `OpChown` was (Assumption 7).
 - **The directory's group as the default**, by its set-group-ID bit or
-  always (§5; *For the owner*, 2).
-- **Clearing `S_ISGID` where the group was left unapplied** (§6; *For the
-  owner*, 3).
+  always (§5; *Put to the owner, and decided*, 2).
+- **Clearing `S_ISGID` where the group was left unapplied** (§6; *Put to
+  the owner, and decided*, 3).
 - **All of `sa` or none at creation**, as ADR 0024 §2 has `SetAttr`. It is
   the refusal above under another name: a creation that applied none of
   `sa` would make an object with none of the attributes asked for, the
