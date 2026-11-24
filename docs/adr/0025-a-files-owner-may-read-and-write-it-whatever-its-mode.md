@@ -39,6 +39,21 @@ owner accepted §2 at the corrected cost, and confirmed that the reworded
 second `CHANGES` line takes no `BREAKING:` (*Context*, decision 3). §2's
 and §4's closing paragraphs and Assumptions 15 and 23 said that the cost
 awaited the owner, and now say what the owner chose. Nothing else changes.
+**Revised:** 2026-11-23 — cross-reference only, for ADR 0027, which decides
+#97. §3's decision stands: `ACCESS` reports neither the owner override nor
+the read that execute gives. What ADR 0027 replaces is how: §3's statements
+that `policy.AccessBits` is built on `Permits` alone and that
+`(*FS).Access` asks `f.perm` nothing, since `Access` now asks `f.perm` the
+operations' own requests, marked `Advisory`, a new field of `Request`; and
+the form of §6's A4, whose two calls of `AccessBits` take that function's
+new signature with every assertion unchanged. §1's rows gain a
+qualification for the new field: lines 3 and 4 hold for a request that
+leaves `Advisory` false, which is every request these three operations
+make, so no call's answer changes. §3's list of what #97 has to reconcile
+is answered by ADR 0027 §3 to §6. §1, §3 and §6 each gain a sentence saying
+so. The rows as a call meets them, §2, §4, `Permits` and every assertion of
+A1 to A10 are unchanged, and the text of the replaced parts stays as the
+record.
 **Issue:** #93
 
 ## Context
@@ -252,7 +267,11 @@ Line 3 of each row is the owner override. Everything else in ADR 0014 §5
 stands as written: `InGroup`, `Permits`, `AccessBits`, every other row, the
 bare `vfs.Status` of a refusal, the fields a row reads (these three read
 `Op`, `Caller` and `Object`, and nothing else), purity, `All` and `Func`. No
-name is added to `internal/policy` (Assumption 8).
+name is added to `internal/policy` (Assumption 8). Since ADR 0027 §2
+`Request` has the field `Advisory`, which these three rows read as well:
+line 3 of each, and line 4 of `OpRead`, hold only for a request that leaves
+it false, which is every request `Read`, `Write` and `SetAttr` make, and a
+request `ACCESS` makes sets it and is answered by the mode alone.
 
 For a regular file owned by `501:20`:
 
@@ -471,6 +490,15 @@ leaves it four things (Assumption 10):
 4. *What is no longer #97's.* On a regular file, `ACCESS3_EXECUTE` granted
    and the read that execution needs then refused. §2 closes it, and A4
    (§6) pins it.
+
+ADR 0027 decides #97 and answers the four: it keeps the direction (its §3
+and §8); it takes the second way of item 2, as a mark, `Advisory`, on the
+operation's own request, so that `Access` asks `f.perm` and `AccessBits` is
+no longer built on `Permits` alone (its §2 and §7), which replaces the
+first paragraph of this section in its mechanism and in nothing a client
+sees on a file; it settles the directory bits and the diverged mount, and
+keeps the bits of an object that is neither until #69 (its §4 to §6); and
+it leaves the fourth closed.
 
 ### 4. Security
 
@@ -765,7 +793,10 @@ go in one new file, `internal/policy/owner_access_test.go`, and reuse
 
   And, over every mode of `p2Modes()` and every caller of `p2Callers()`, for
   a regular file: whenever `AccessBits` has `vfs.AccessExecute`,
-  `Unix().Check` of `OpRead` is nil (§3).
+  `Unix().Check` of `OpRead` is nil (§3). Since ADR 0027 §2 `AccessBits`
+  takes the policy, the mask asked for and whether the mount takes changes,
+  so A4 calls `AccessBits(Unix(), c, o, every bit, true)`, and every
+  assertion above stands.
 - **P2, P3 and P9** do not change, and are the pins that `Permits` and
   `AccessBits` did not move: P3 still has the owner of `0o077` refused by
   `Permits`, and P9 still has `AccessBits` follow `Permits` exactly for

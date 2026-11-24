@@ -23,7 +23,13 @@ package blobfs
 //   - W4, TestTheUnixRowsAreUnchangedThroughTheFS: a characterisation of
 //     Unix() through the FS, which passes before and after the wiring, with
 //     ADR 0026 section 7's two Rmdir rows for #148;
-//   - W5, TestGetAttrReadLinkFSStatCommitAndAccessConsultNoPolicy.
+//   - W5, TestGetAttrReadLinkFSStatAndCommitConsultNoPolicy, which since ADR
+//     0027 section 10's X12 no longer names Access: access_test.go's X10 and
+//     access_wiring_test.go's X11 show that Access asks f.perm.
+//
+// Since ADR 0027 section 10's X12, the comparison W2's rows use,
+// pwCompareRequests, also requires every request's Advisory to be false, so
+// that W2 shows that no call marks its request (ADR 0027 section 2).
 //
 // W1, the seam, is shown by how these tests install a policy and has no test
 // of its own. FS.perm is the one FS field this file writes, and only as W1
@@ -56,10 +62,12 @@ package blobfs
 // read through execute alone (U2) are pinned for a regular file since ADR
 // 0025 section 6, and are tested in owner_access_test.go; W4 still leaves
 // them out. The sticky bit (U4) is pinned since ADR 0026 section 8, and is
-// tested in sticky_test.go; W4 still has no sticky row. U3, U5 and U6 stay
-// unpinned. W2's tree gives d2 the mode 0o1770, but under the recorder,
-// which allows whatever it does not refuse, no mode bears on a verdict (ADR
-// 0026 section 7).
+// tested in sticky_test.go; W4 still has no sticky row. AccessBits for a
+// directory with read but not search or write but not search (U5) is pinned
+// since ADR 0027 section 10, and is tested in access_test.go; W4 still has no
+// such row. U3 and U6 stay unpinned. W2's tree gives d2 the mode 0o1770, but
+// under the recorder, which allows whatever it does not refuse, no mode bears
+// on a verdict (ADR 0026 section 7).
 
 import (
 	"bytes"
@@ -168,8 +176,9 @@ func pwDescribe(reqs []policy.Request) string {
 	parts := make([]string, len(reqs))
 	for i, r := range reqs {
 		parts[i] = fmt.Sprintf("%s{Caller uid %d gid %d gids %v, Object %s, Dst %s, UID %d, GID %d, Entry %s, "+
-			"Replaced %s}", pwOpName(r.Op), r.Caller.UID, r.Caller.GID, r.Caller.GIDs, pwObjString(r.Object),
-			pwObjString(r.Dst), r.UID, r.GID, pwObjPtrString(r.Entry), pwObjPtrString(r.Replaced))
+			"Replaced %s, Advisory %v}", pwOpName(r.Op), r.Caller.UID, r.Caller.GID, r.Caller.GIDs,
+			pwObjString(r.Object), pwObjString(r.Dst), r.UID, r.GID, pwObjPtrString(r.Entry),
+			pwObjPtrString(r.Replaced), r.Advisory)
 	}
 	return "[" + strings.Join(parts, ", ") + "]"
 }
@@ -287,7 +296,9 @@ func pwWantW2Requests(t *testing.T, what string, got []policy.Request, want []pw
 }
 
 // pwCompareRequests is pwWantRequests and pwWantW2Requests; entries says
-// whether Entry and Replaced are checked.
+// whether Entry and Replaced are checked. Since ADR 0027 section 10's X12 it
+// also requires every request's Advisory to be false: only ACCESS marks a
+// request, and no call does (ADR 0027 section 2).
 func pwCompareRequests(t *testing.T, what string, got []policy.Request, want []pwWant, caller vfs.Caller,
 	entries bool, why, where string) {
 	t.Helper()
@@ -307,6 +318,8 @@ func pwCompareRequests(t *testing.T, what string, got []policy.Request, want []p
 			ok = false
 		case entries && !pwSameObjPtr(g.Replaced, w.replaced):
 			ok = false
+		case g.Advisory:
+			ok = false
 		}
 	}
 	if ok {
@@ -316,8 +329,9 @@ func pwCompareRequests(t *testing.T, what string, got []policy.Request, want []p
 	if entries {
 		fields = ", and Entry and Replaced as given, nil where none is given (ADR 0026 section 7)"
 	}
-	t.Errorf("%s asked the policy %s; want exactly %s, in that order, each with Caller uid %d gid %d%s: %s (%s)",
-		what, pwDescribe(got), pwDescribeWant(want), caller.UID, caller.GID, fields, why, where)
+	t.Errorf("%s asked the policy %s; want exactly %s, in that order, each with Caller uid %d gid %d%s, and "+
+		"Advisory false, since no call marks its request (ADR 0027 section 2): %s (%s)", what, pwDescribe(got),
+		pwDescribeWant(want), caller.UID, caller.GID, fields, why, where)
 }
 
 // pwEntry is what one Create, Mkdir, Symlink or Lookup returned.
@@ -1234,7 +1248,9 @@ type pwCheck struct {
 // pinned for a regular file since ADR 0025 section 6 and tested in
 // owner_access_test.go; W4 still leaves them out. The sticky bit, U4, is
 // pinned since ADR 0026 section 8 and tested in sticky_test.go; W4 still has
-// no sticky row.
+// no sticky row. Access for a directory with read but not search, or write but
+// not search, U5, is pinned since ADR 0027 section 10 and tested in
+// access_test.go; W4 still has no such row, and its ten Access rows stand.
 func TestTheUnixRowsAreUnchangedThroughTheFS(t *testing.T) {
 	const where = "W4, ADR 0014 sections 5, 6 and 11"
 	e := uc43Setup(t)
@@ -1457,21 +1473,19 @@ func TestTheUnixRowsAreUnchangedThroughTheFS(t *testing.T) {
 	}
 }
 
-// TestGetAttrReadLinkFSStatCommitAndAccessConsultNoPolicy is W5 of ADR 0014
-// section 11: GetAttr, ReadLink, FSStat, Commit and Access ask f.perm
-// nothing, and Access answers from the mode bits and the mount, not from
-// f.perm.
+// TestGetAttrReadLinkFSStatAndCommitConsultNoPolicy is W5 of ADR 0014
+// section 11, as ADR 0027 section 10's X12 revises it: GetAttr, ReadLink,
+// FSStat and Commit ask f.perm nothing. Access is no longer among them: it
+// asks f.perm the operations' own requests, which access_test.go's X10 and
+// access_wiring_test.go's X11 show (ADR 0027 section 7).
 //
 // W2's mount and recorder, with W2's tree (pwW2Tree); the recorder reset to
 // refuse index 0 before each call: GetAttr(f) returns f's attributes with
 // nil; ReadLink(ln) returns "f" with nil; FSStat(root) returns nil;
-// Commit(f, 0, 0) returns nil; testCaller's Access(f, every bit) returns
-// AccessRead|AccessModify|AccessExtend with nil; and after each the recorder
-// has recorded nothing. Then, on a second sp24Mount, over a bucket of its
-// own, with W3's allow-all policy, testCaller makes y, a regular file of mode
-// 0o600, and sa24Other's Access(y, every bit) returns 0.
-func TestGetAttrReadLinkFSStatCommitAndAccessConsultNoPolicy(t *testing.T) {
-	const where = "W5, ADR 0014 sections 6 and 11"
+// Commit(f, 0, 0) returns nil; and after each the recorder has recorded
+// nothing.
+func TestGetAttrReadLinkFSStatAndCommitConsultNoPolicy(t *testing.T) {
+	const where = "W5, ADR 0014 sections 6 and 11; ADR 0027 section 10, X12"
 	e := uc43Setup(t)
 	rec := &sp24Recorder{refuseAt: -1}
 	fs, root := sp24Mount(e, policy.Func(rec.check), where)
@@ -1526,26 +1540,4 @@ func TestGetAttrReadLinkFSStatCommitAndAccessConsultNoPolicy(t *testing.T) {
 			where)
 	}
 	asksNothing(what)
-
-	what = `testCaller's Access(f, every bit), ` + pwRefusing(0)
-	rec.reset(0)
-	a := pwAccess(e, fs, testCaller, s.f, pwAllAccess, what, where)
-	if want := vfs.AccessRead | vfs.AccessModify | vfs.AccessExtend; a.err != nil || a.v != want {
-		t.Errorf("%s = (%#x, %s), want (%#x, nil): Access consults no policy, and answers the owner of a 0o644 file "+
-			"read and write (ADR 0014 section 11, W5; %s)", what, a.v, pwStatus(a.err), want, where)
-	}
-	asksNothing(what)
-
-	// A second mount, over a bucket of its own, with the allow-all policy.
-	e2 := uc43Setup(t)
-	fs2, root2 := sp24Mount(e2, policy.Func(func(policy.Request) error { return nil }), where+", the second mount")
-	y := pwMust(e2, pwCreate(e2, fs2, testCaller, root2, "y", vfs.SetAttr{Mode: sa24U32(0o600)}, true,
-		`testCaller's Create "y" 0o600`, where), `testCaller's Create "y" 0o600`, where)
-	pwSetupObject(e2, fs2, y, "y", policy.Object{Type: vfs.TypeReg, Mode: 0o600, UID: 501, GID: 20}, 0, where)
-	what = `sa24Other's Access(y, every bit), the policy allowing everything`
-	a = pwAccess(e2, fs2, sa24Other, y, pwAllAccess, what, where)
-	if a.err != nil || a.v != 0 {
-		t.Errorf("%s = (%#x, %s), want (0, nil): Access answers from the mode bits and the mount, not from f.perm, "+
-			"and 0o600 gives the other class nothing (ADR 0014 section 11, W5; %s)", what, a.v, pwStatus(a.err), where)
-	}
 }

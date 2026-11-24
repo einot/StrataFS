@@ -595,6 +595,15 @@ from its first access to the charge or to `of.bytes` until its last, and a
   method that every `Policy` has, reached through a function that returns an
   interface. So the name rule 4 would give it, `Check`, would name every
   policy at once. Rule 4 is not changed for any other name.
+- `OpExecute` = `policy.OpExecute`: the `Op` that `ACCESS` asks for
+  `vfs.AccessExecute`, 13, after `OpRename`, which ADR 0027 §2 pins.
+  Exists, in `internal/policy/policy.go`, as of `729360f`, coder's commit
+  for ADR 0027; it was reserved here until that ADR's pass after the commit
+  confirmed it in the code (ADR 0027 §11). Since that ADR `AccessBits` is
+  `policy.AccessBits(p, c, o, want, mutable)`, which asks a policy the
+  operations' own requests; the entry above gives no signature and stands.
+  `Request`'s fields, that ADR's `Advisory` among them, are not entries
+  (ADR 0026 §9).
 - `EffectAuthorized`: an optional FileData invariant; reserved, ADR 0014. It
   says that every change a call makes to a file's bytes or size is one that
   `UnixAllows` allows, for that call's caller, against the file's attributes

@@ -113,6 +113,23 @@ are equal, and W4, which gains two rows there. §5, §6 and §11 each gain a
 sentence saying so. `Permits`, `AccessBits`, the `OpAddEntry` row and every
 other row, the stages and every other test this ADR pins are unchanged, and
 the text of the replaced parts stays as the record.
+**Revised:** 2026-11-23 — cross-reference only, for ADR 0027, which decides
+#97 and replaces four parts of this ADR: §5's `AccessBits`, which since ADR
+0027 §2 is `AccessBits(p Policy, c vfs.Caller, o Object, want uint32,
+mutable bool) uint32` and asks `p` the operations' own requests, with the
+`Op` list, which gains `OpExecute`, 13, and `Request`, which gains the field
+`Advisory`; §6's bullet for `Access`, which since ADR 0027 §7 asks `f.perm`
+through `AccessBits`, and what *The wiring at `a6cff50`* says of `Access`
+and of `FS.perm`'s doc comment, with E12, which ADR 0027 revokes; §7's
+bullet for `Access` among the mode's readers, which since ADR 0027 §4 reads
+the mode through `mutable()` alone, so that a diverged mount is masked as a
+read-only one is; and §11's P9 and U5, which ADR 0027 §10's X1 replaces and
+pins, P6, whose unknown `Op`s now begin at 14, and W5, which no longer names
+`Access`. §5, §6, §7 and §11 each gain a sentence saying so. `InGroup`,
+`Permits`, `All`, `Func`, every row as ADR 0025 and ADR 0026 left it for a
+request that is not advisory, the stages, the mode's table and every other
+test this ADR pins are unchanged, and the text of the replaced parts stays
+as the record.
 **Issue:** #114
 
 ## Context
@@ -582,7 +599,11 @@ Every rule below is normative:
     and `Permits(c, o, PermExec)`.
 
   No other bit is ever set. It is `(*FS).Access` without the read-only mask
-  and without `& want`.
+  and without `& want`. Since ADR 0027 §2 this bullet is the record only:
+  `AccessBits` takes the policy, the mask asked for and whether the mount
+  takes changes, and asks the policy the operations' own requests, each
+  marked with `Request`'s new field `Advisory`, with a new `Op`,
+  `OpExecute`, 13, for `vfs.AccessExecute`.
 - **Purity.** This covers `InGroup`, `Permits`, `AccessBits`, and the `Check`
   of `Unix()`, `All(...)` and `Func`:
   - each takes no lock, makes no store call and logs nothing;
@@ -682,7 +703,12 @@ This is for the PR that wires the policy. It changes no behaviour.
     `vfs.AccessExtend` and `vfs.AccessDelete`; then `& want`. It does not go
     through `f.perm` until #97's fix. §7 is done: at `a6cff50` the mask
     reads `f.mode.State() == mountReadOnly`, and the wiring below keeps it
-    in `Access`, under E12 (ADR 0018 §4).
+    in `Access`, under E12 (ADR 0018 §4). ADR 0027 §7 is #97's fix: since
+    it `Access` asks `f.perm`, through `policy.AccessBits`, the requests
+    that ADR's §1 lists, hands it whether `mutable()` answers nil in place
+    of the mask, and names no bit itself, so E12 is revoked and what the
+    wiring below says of `Access` and of `FS.perm`'s doc comment is the
+    record only.
   - `GetAttr`, `ReadLink`, `FSStat` and `Commit` consult no policy.
 - **What `blobfs` relies on** (Assumption 34). `Unix()`'s type rows guard more
   than permission. Past them, `createEntry` and `Rename` add a name to the
@@ -884,7 +910,11 @@ var mountModes = fsm.NewTable("mode",
     could reach it.
   - `Access` masks on `mountReadOnly` only, as now: `f.mode.State() !=
     mountReadOnly` where `!f.readOnly` stood, so a `Diverged` mount is not
-    masked, as now. Whether it should be is #97's to decide.
+    masked, as now. Whether it should be is #97's to decide. ADR 0027 §4
+    decided it: `Access` no longer reads the mode itself, and grants none
+    of `vfs.AccessModify`, `vfs.AccessExtend` and `vfs.AccessDelete` unless
+    `mutable()` answers nil, so a `Diverged` mount is masked as a
+    `ReadOnly` one is.
   - `Run` starts no committer when `f.mode.State()` is `mountReadOnly`.
   - `loadOrInit` refuses a bucket with no root pointer when `f.mode.State()`
     is `mountReadOnly` (ADR 0011 §2). Its refusal of a root pointer with no
@@ -1141,6 +1171,10 @@ for a regular file, as allowed, and U3 is pinned as a refusal only where
 Since ADR 0026, U4 is pinned, by that ADR's §1 and §8; W2's tree and its
 rows for `Remove`, `Rmdir` and `Rename`, below, are that ADR's §7, in which
 no two objects a row names are equal (#148); and W4 gains two rows there.
+Since ADR 0027, U5 is pinned, by that ADR's §1 and its X1, which replaces
+P9; P6's unknown `Op`s are 0 and 14 to 255; W5 no longer names `Access`,
+which that ADR's X10 and X11 show asks `f.perm`; and W4's `Access` rows
+stand.
 
 **`blobfs`, for the PR that does §7** (package `blobfs`, in one new file,
 `internal/blobfs/mount_mode_test.go`; Assumption 42). The harness is

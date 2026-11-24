@@ -20,6 +20,17 @@ the status, the stages and every test this ADR pins are unchanged. The
 module changed in one line of its header comment, so TLC's outcome cannot
 differ, and CLAUDE.md's merge bar still asks the session for `tla.sh full`
 on the PR.
+**Revised:** 2026-11-23 — cross-reference only, for ADR 0027, which decides
+#97 and replaces one part of §5: its statements that neither `AccessBits`
+nor `Access` changes and that `vfs.AccessDelete` is granted on a directory
+when `Permits(c, o, PermWrite)`. Since ADR 0027 `Access` asks `f.perm`,
+through `AccessBits`, an `OpRemoveEntry` that describes no entry, so the bit
+needs write and search. What §5 decides stands, and is ADR 0027 §5's: in a
+sticky directory `ACCESS` grants the bit by the directory alone, which is
+the first of the two readings §5 leaves #97. ADR 0027 says the same of
+`vfs.AccessModify`, which §5 did not name. §5 gains a sentence saying so.
+The rows, the fields, the status, the stages and every test this ADR pins
+are unchanged, and the text of the replaced part stays as the record.
 **Issue:** #94, #148
 
 ## Context
@@ -679,7 +690,11 @@ and `Rename` then refuse that caller, unless it is root or owns the
 directory, every entry that is not its own. That is not a defect for #97 to
 remove, since `ACCESS` cannot see the entry. So the property #97 states
 holds for `vfs.AccessDelete` only as "some entry", or excepts sticky
-directories.
+directories. ADR 0027 §5 takes the first: `Access` asks `f.perm` an
+`OpRemoveEntry` that describes no entry, which §2 has judged by the
+directory alone, so the bit is granted with write and search, where this
+section had it with write, and says that the caller may remove an entry it
+owns, as `vfs.AccessModify` now says of a rename within the directory.
 
 ### 6. Security
 
