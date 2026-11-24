@@ -65,9 +65,12 @@ package blobfs
 // tested in sticky_test.go; W4 still has no sticky row. AccessBits for a
 // directory with read but not search or write but not search (U5) is pinned
 // since ADR 0027 section 10, and is tested in access_test.go; W4 still has no
-// such row. U3 and U6 stay unpinned. W2's tree gives d2 the mode 0o1770, but
-// under the recorder, which allows whatever it does not refuse, no mode bears
-// on a verdict (ADR 0026 section 7).
+// such row. How sa.GID at creation is handled, a group asked for at creation
+// (#98), is pinned since ADR 0028 section 8, and is tested in
+// create_group_test.go; no test here asks for a group at creation. U3 and U6
+// stay unpinned. W2's tree gives d2 the mode 0o1770, but under the recorder,
+// which allows whatever it does not refuse, no mode bears on a verdict (ADR
+// 0026 section 7).
 
 import (
 	"bytes"
@@ -992,7 +995,9 @@ func pwWantOwner(e *uc43Env, fs *FS, r pwEntry, uid uint32, gid int64, what, why
 // OpChown on an Object of Mode 0o600. Then testCaller's non-exclusive Create
 // of r1 with {UID 7} returns r1, still uid 0, asking [OpAddEntry on D], and
 // its exclusive one vfs.ErrExist, asking the same. Every call is on the
-// directory d (ADR 0014 section 11's safety rule); none sets a GID (#98).
+// directory d (ADR 0014 section 11's safety rule); none sets a GID (#98): a
+// group asked for at creation is pinned since ADR 0028 section 8, and is
+// tested in create_group_test.go.
 func TestARequestedUIDAtCreationGoesThroughOpChownAndARefusalIsIgnored(t *testing.T) {
 	const where = "W2 for the requested uid, ADR 0014 sections 5, 6 and 11"
 	e := uc43Setup(t)
