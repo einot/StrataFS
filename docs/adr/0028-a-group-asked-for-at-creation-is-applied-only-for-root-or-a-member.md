@@ -29,15 +29,38 @@ against `de0a151` and stands as proposed. §1's rule and table, §2's
 requests, §3's order, what §4 to §7 decide, G1's grid, the tables of G2 and
 G3, what each call of G4 expects and what a client sees are unchanged, and
 no test changes.
+**Revised:** 2026-11-25 — after this ADR's PR was merged, to record one
+decision of the owner's and the one change it asks for. No rule moved, and
+nothing `blobfs` does. Assumption 13 and its entry under *What this does
+not decide* left to the session whether `vfs.FS`'s doc comments should say
+that a creation leaves unapplied an owner or group its caller may not
+give. By the session's brief the owner decided on 2026-11-25 that they
+should (*Context*, decision 5, which is new). So the doc comment above
+`Create` in `internal/vfs/vfs.go` gains one paragraph, for `Create`,
+`Mkdir` and `Symlink`, which Assumption 13 quotes and whose words are the
+architect's. No declaration, signature, type or exported name of
+`internal/vfs` changes. By the session's second brief of that day, the row
+that section 16 of `docs/DESIGN.md` has for this ADR now says that the ADR
+adds this to the `vfs.FS` contract, as the rows for ADR 0007, ADR 0017 and
+ADR 0024 say of theirs (Assumption 13). *Context* counts the decision, and
+its *What this constrains* names the comment; Assumption 13 is rewritten,
+and says what it said; and the entry under *What this does not decide*
+says the question is decided. §1 to §12, every test, every other
+assumption and what a client sees are unchanged, and no other ADR is
+revised: ADR 0014 and ADR 0024 need no cross-reference (Assumption 13).
+There is no `CHANGES` line, a doc comment and a row of that table being
+nothing a client or an operator can observe, and nothing under `docs/tla/`
+changes, since `trace.tsv` names no symbol of `internal/vfs`.
 **Issue:** #98
 
 ## Context
 
 **The owner's decisions.** Three, as ADR 0014 and ADR 0018 record them: the
 first two in the owner's words, and the third in the wording the owner
-approved; and a fourth the session reported. The brief this ADR was written
-from gave the second in substance. Nothing here claims any approval beyond
-the four.
+approved; a fourth the session reported; and a fifth, made after this ADR
+was merged, which the session's brief for the revision of 2026-11-25 gave.
+The brief this ADR was written from gave the second in substance. Nothing
+here claims any approval beyond the five.
 
 1. On 2026-10-10: "Otherwise, follow architect's and your own
    recommendations." So this ADR is Accepted on creation, as ADRs 0015 to
@@ -62,6 +85,14 @@ the four.
    (§12; Assumption 17). All four were the architect's judgement until then.
    The report says nothing of any other assumption here, and each of those
    stays the architect's.
+5. On 2026-11-25, by the session's brief for that day's revision, in the
+   brief's words and not the owner's: "On 2026-11-25 the owner decided: add
+   it." What is added is what Assumption 13 had left to the session to
+   raise: that `vfs.FS`'s doc comments say that a creation leaves unapplied
+   an owner or group its caller may not give. The brief also said what the
+   comment is to carry and what line it keeps, which Assumption 13 records
+   with the comment's words. Those words are the architect's, and the
+   brief says nothing of any other assumption here.
 
 **The defect.** #98, "CREATE, MKDIR and SYMLINK apply a requested group from
 any caller", as the session gave its text (Assumption 2). "`createEntry`
@@ -286,7 +317,10 @@ CommitProtocol module is checked against (§9). No non-test code of
 `internal/policy`, `internal/nfs` or `internal/vfs` changes, and nothing in
 the bucket, the flags or the wire formats. On the wire, three procedures
 answer `NFS3_OK` as before, and the new object's attributes can report
-another group than they did.
+another group than they did. Since the revision of 2026-11-25 this ADR also
+constrains the `vfs.FS` contract, through one paragraph of the doc comment
+above `Create` in `internal/vfs/vfs.go`, the one change to that package, in
+which no declaration moves (Assumption 13).
 
 ## Decision
 
@@ -1301,12 +1335,123 @@ Each is mine unless it says otherwise.
     allowed to every caller by construction, a request with no rule behind
     it. A policy that wants to judge a new object's mode has no request for
     it; none does.
-13. **Nothing in `internal/vfs` changes.** `vfs.FS`'s doc comments say
-    nothing of permission rules, which are `internal/policy`'s (ADR 0026,
-    Assumption 16), and no signature moves. That a creation leaves
-    unapplied an owner or group its caller may not give is `blobfs`'s
-    behaviour, pinned here and in ADR 0014 §6, and is not in the contract's
-    words. Whether it should be is the session's to raise.
+13. **Since 2026-11-25 `vfs.FS`'s doc comment says what a creation does
+    with an owner or group its caller may not give, and nothing else in
+    `internal/vfs` changes.** Until that day's revision this assumption
+    read that nothing in `internal/vfs` changes: that `vfs.FS`'s doc
+    comments say nothing of permission rules, which are `internal/policy`'s
+    (ADR 0026, Assumption 16), and no signature moves; that a creation's
+    leaving unapplied an owner or group its caller may not give is
+    `blobfs`'s behaviour, pinned here and in ADR 0014 §6, and is not in
+    the contract's words; and that whether it should be is the session's
+    to raise. So a backend that replaced `blobfs` would have found the
+    disposition in the ADRs, and in `docs/DESIGN.md`'s row for this one,
+    and not in the interface it implements. By the session's brief the
+    owner decided on 2026-11-25 that the contract says it (*Context*,
+    decision 5). The doc comment above `Create` in `internal/vfs/vfs.go`
+    gains a second paragraph, after its sentence on `ErrFBig`:
+
+    > Create, Mkdir and Symlink each leave unapplied an owner or group that
+    > sa sets and c may not give to the object they make, and do not fail for
+    > it. The object has the owner sa sets if c may give it that owner, and
+    > otherwise c.UID; it has the group sa sets if c may give it that group,
+    > and otherwise c.GID. The call does fail if c may not add name to dir.
+    > SetAttr differs: given an owner or group that c may not set, it fails
+    > and applies none of sa.
+
+    The file is the contract, and this is its restatement; `c`, `sa`,
+    `name` and `dir` are the three methods' parameters. The brief gave what
+    the paragraph must carry: that such an owner or group is left
+    unapplied, that the object is made with the caller's own uid or gid
+    instead, that the call does not fail for it, and where a refusal does
+    fail the call, which is the directory's own permission. It asked for
+    comments only; for what the contract is and not which policy row
+    decides it, the line ADR 0026 kept (its Assumption 16); and for a
+    contrast with `SetAttr` only if that helps a reader. The rest is mine:
+
+    - *One comment for the three*, which the brief allows where the file
+      groups methods so, and it does: one comment above `Remove` speaks
+      for `Remove`, `Rmdir` and `Rename` (ADR 0017). `Mkdir` and `Symlink`
+      gain none of their own. The paragraph follows the sentence on
+      `ErrFBig`, as ADR 0024's sentence does in `SetAttr`'s comment.
+    - *Both halves, and the default.* The paragraph's second sentence is
+      §3's *The new object* in the contract's words, with "c may give it"
+      where §3 has "asked and allowed". That is more than the brief's
+      list. It says that an owner or group the caller may give is applied,
+      whatever becomes of the other (§2), and that what stands in for one
+      left unapplied is what the object has when none is asked for (§1).
+      Without it "left unapplied" would not say what the object is left
+      with. So the default is in the contract's words too: the caller's
+      own uid and gid, as §3 pins them for `blobfs`. The group's is §5's,
+      which the owner decided to keep (*Context*, decision 4), and an ADR
+      that changes it (*What this does not decide*) revises the comment.
+    - *No rule.* The paragraph does not say who may give which owner or
+      group, or which request or row decides it. "c may give" is the
+      verdict of whatever rules a backend has, which for `blobfs` are §2's
+      requests to `f.perm`. So ADR 0025's Assumption 17, ADR 0026's
+      Assumption 16 and ADR 0027's Assumption 20 stand: `vfs.FS`'s doc
+      comments still state no permission rule.
+    - *The sentence on `dir`* says where a refusal does fail the call. It
+      names no status, which is the policy's (§3, stage D). It is true of
+      every `Create`, `Mkdir` and `Symlink` as `createEntry` stands, a
+      `Create` of a name that exists included, since stage D comes before
+      stage E.
+    - *The contrast with `SetAttr`* is kept, as one sentence. Both calls
+      take a `vfs.SetAttr`, and they treat an owner or group the caller
+      may not give in opposite ways (§4), which a backend that built its
+      creation on its `SetAttr` would get wrong. The sentence says nothing
+      of `SetAttr` that its own comment does not imply: a call that cannot
+      apply all of `sa` cannot return nil, and one that returns an error
+      has changed nothing (ADR 0024 §2).
+    - *What the paragraph leaves out*: the mode, the times and the size
+      asked for at creation, and what a `Create` of a name that exists
+      does with `sa`. The owner's decision covers none of them, and
+      `vfs.FS` says of them what it said.
+    - *§10 stands.* It says that `blobfs` decides for itself which group
+      an object has when none is asked for, and that a creation goes on
+      without an attribute its caller may not give. That is said against
+      the policy, which decides neither (ADR 0018 §2). Since this revision
+      the contract asks both of every backend.
+    - *No test, no `CHANGES` line, no other ADR.* G2 to G4 (§8), ADR 0014
+      §11's W2, its W2 for the requested uid and its W4, and ADR 0024 §7's
+      S1 pin for `blobfs` what the paragraph says, but for one case: no
+      test refuses an owner asked of `Mkdir` or of `Symlink`. `createEntry`
+      is one body for the three, so by reading that case holds as
+      `Create`'s does. No test is added or changed, the brief asking for
+      none, and whether one should be is the session's to raise. A doc
+      comment is nothing a client or an operator can observe. Nothing that
+      ADR 0014 §6 or ADR 0024 says becomes untrue, so neither gains a
+      cross-reference.
+    - *`docs/DESIGN.md`'s row says it too.* The first brief of 2026-11-25
+      had this revision change `internal/vfs/vfs.go` and this ADR, one
+      sentence of ADR 0014 §6 or of ADR 0024 at most, and nothing else. So
+      the first pass left the row that section 16 has for this ADR as it
+      was, and put it to the session. The row said that the ADR constrains
+      how `internal/blobfs` builds a new object, and that "the backend
+      replacing it asks the same requests and treats a refusal the same
+      way". It did not say, as the rows for ADR 0007, ADR 0017 and
+      ADR 0024 say of theirs, that the ADR adds to the `vfs.FS` contract.
+      By its second brief of that day the session had the row changed, in
+      the words the first pass's report proposed, unaltered. It now says
+      that the ADR "adds to the `vfs.FS` contract that a creation leaves
+      unapplied an owner or group its caller may not give and does not
+      fail for it, which the backend replacing `blobfs` implements too,
+      asking the same requests". The words are mine, in the form of
+      ADR 0017's and ADR 0024's rows, and keep the old row's clause on the
+      requests. That the row changes in this PR is the session's call, and
+      nothing here claims the owner's for it. Nothing else in
+      `docs/DESIGN.md` changes. Of it section 16 was read whole, and
+      nothing else but one line that a search for `internal/vfs` matched.
+    - *Read, not run.* `internal/vfs/vfs.go`, `createEntry` and
+      `docs/tla/trace.tsv` were read whole in the session's worktree,
+      which by its brief is clean at `3c35d70`, `main` just after this
+      ADR's PR was merged. That no test refuses an owner asked of `Mkdir`
+      or of `Symlink` is from a search of the test files under `internal/`
+      for a creation given a uid, and from reading the rows it found.
+      Nothing was run, and that the file is still gofmt-clean is by
+      reading, for the session's merge bar to show. No source outside this
+      repository was fetched for this revision, which says nothing new of
+      anything outside it.
 14. **The tests** (§8). Three new files, so that a red run exists; `cg` as
     the prefix; G1 as a characterisation of a row that does not change; the
     ids 504, 40 and 41 and the modes, which no requirement gives; and G3's
@@ -1479,7 +1624,11 @@ Each is mine unless it says otherwise.
 - **A set-ID bit set by `SETATTR`** on a file whose owner is outside its
   group, which ADR 0025 put to #155.
 - **What `vfs.FS` says of an owner or group a creation's caller may not
-  give** (Assumption 13).
+  give** (Assumption 13). Decided since: by the session's brief the owner
+  decided on 2026-11-25 that `vfs.FS` says it (*Context*, decision 5), and
+  the doc comment above `Create` does, for `Create`, `Mkdir` and
+  `Symlink`. What `vfs.FS`'s doc comments say of permission rules is as
+  ADR 0026 left it (its Assumption 16): they state none.
 - **Root squash and the AUTH_SYS trust boundary** (#6, #90, #95), and
   whether a member's group at creation should narrow under them.
 - **Whether a `CREATE` of a name that exists should be judged as the open
