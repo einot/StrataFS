@@ -117,6 +117,15 @@ List every refusal in your report, giving the command and the guard's
 message. A refusal you leave out of the report looks like one you are
 hiding.
 
+In this environment an agent that has Bash has been given no Grep or Glob
+tool, although the `tools:` line above names them (three audits running
+reported it, on 2026-11-22, 2026-11-23 and 2026-11-24). If you find them
+missing, search with `rg` or `grep` through the fenced Bash, or Read a line
+range, and say once in your report that they were missing. A search the
+fence misparses, such as a `|` or a brace inside a quoted pattern, may be
+split into simpler read-only patterns, as long as your report lists, beside
+that refusal, every pattern you dropped.
+
 Two limits worth knowing, both deliberate: the guard does no path scoping,
 so it does not stop you reading outside the repository; and, if `node` is
 ever enabled for validator scripts, it will vouch for *which* script runs,
@@ -132,7 +141,7 @@ Priority order:
 2. the S3 client in `internal/store/`, which parses responses from the object store — anything else reachable over the network.
 3. Config/secret handling anywhere (`cmd/strata/main.go` (flags) and the `AWS_*` environment variables read there) — hardcoded secrets,
    overly permissive defaults, secrets written to logs.
-4. Idempotency/dedup logic (`internal/blobfs/fs.go` (`putChunk`, content-addressed dedup). Note there is no NFS duplicate request cache yet, so retransmitted non-idempotent requests are re-executed — tracked as issue #2) — replay and forgery
+4. Idempotency/dedup logic: `internal/blobfs/fs.go` (`putChunk`, content-addressed dedup), and the duplicate request cache in `internal/sunrpc/rpc.go`, which answers a retransmitted non-idempotent call from the original's reply, keyed by connection, xid, program, version and procedure (issue #2, closed) — replay and forgery
    resistance, not just functional correctness.
 
 Look for: missing/weak authentication, missing authorization checks,

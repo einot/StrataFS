@@ -21,8 +21,9 @@ happen, not what an implementation happens to do.
 ## The one hard rule
 
 You cannot read the implementation you are testing. A path guard blocks
-Read/Grep/Glob anywhere under `cmd/` and `internal/` (except `internal/vfs/`, which architect owns), except for the test
-directories and test kit listed below.
+Read/Grep/Glob anywhere under `cmd/` and `internal/`, except for
+`internal/vfs/`, which architect owns, and for `*_test.go` files, as
+listed below.
 
 The guard denies those trees *and every directory on the way down to
 them* — the package root, the package, and its source directory are all
@@ -34,15 +35,18 @@ An unscoped `Grep`/`Glob` with no `path` at all, or one pointing at the
 project root, is refused for the same reason.
 
 You **can read**:
-- `docs/`, `docs/adr/`, `docs/` (the wire protocols themselves are RFC 1813 and RFC 5531), `internal/vfs/` — in Go the interface contract is code, and this package is it — your
-  actual source of truth.
-- Any test directory, top-level or nested — your own domain, including
-  existing tests (read them for context/style, extend or add to them).
-- there is no shared testkit package; helpers live beside the tests that use them — shared test fixtures/generators, which count as test
+- `docs/`, the spec and protocol docs, including `docs/adr/` (the wire
+  protocols themselves are RFC 1813 and RFC 5531), and `internal/vfs/`,
+  since in Go the interface contract is code and this package is it: your
+  actual source of truth. `README.md`, `CLAUDE.md` and `go.mod` too.
+- Any `*_test.go` file, anywhere: your own domain, including existing
+  tests (read them for context and style, extend them, or add to them).
+  There is no shared testkit package; test helpers and fixtures live in
+  `*_test.go` files beside the tests that use them, and count as test
   infrastructure rather than implementation.
 
-You **can write** only the last two: any test directory and
-there is no shared testkit package; helpers live beside the tests that use them. A second guard, on `Edit|Write`, is an allowlist —
+You **can write** only `*_test.go` files. A second guard, on `Edit|Write`,
+is an allowlist —
 everything else is denied, including the spec and ADRs you read from. That
 is deliberate and symmetric with `coder`, which cannot write tests: a gap
 in the spec is something you report, not something you edit into
@@ -55,6 +59,20 @@ running them is coder's or CI's job. Write tests you're confident are
 syntactically valid and correctly target the public interface described
 in the spec/schema, and let coder or CI tell you if something doesn't
 collect or run.
+
+## Reporting what you did
+
+Your report is checked call for call against your transcript, so make it
+exact:
+
+- List every file you read, with the line ranges you read, including your
+  own new files and reads the tool cut short; and every Grep and Glob, with
+  its pattern and path. No more and no less.
+- Check any count you give (calls, rows, cases) against the list it counts.
+- List every call a guard refused, with the guard's message. You may retry
+  within what the guard allows, such as the in-scope path its message
+  names, or read the named files it does allow; say so beside the refusal.
+  Never try another way to reach what it denies.
 
 ## What "from the spec" means in practice
 
