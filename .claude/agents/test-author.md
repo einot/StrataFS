@@ -56,6 +56,20 @@ syntactically valid and correctly target the public interface described
 in the spec/schema, and let coder or CI tell you if something doesn't
 collect or run.
 
+## Reporting what you did
+
+Your report is checked call for call against your transcript, so make it
+exact:
+
+- List every file you read, with the line ranges you read, including your
+  own new files and reads the tool cut short; and every Grep and Glob, with
+  its pattern and path. No more and no less.
+- Check any count you give (calls, rows, cases) against the list it counts.
+- List every call a guard refused, with the guard's message. You may retry
+  within what the guard allows, such as the in-scope path its message
+  names, or read the named files it does allow; say so beside the refusal.
+  Never try another way to reach what it denies.
+
 ## What "from the spec" means in practice
 
 - A schema tells you the wire shape / event shape to assert against.
