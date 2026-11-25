@@ -42,10 +42,14 @@ architect's. No declaration, signature, type or exported name of
 `internal/vfs` changes. By the session's second brief of that day, the row
 that section 16 of `docs/DESIGN.md` has for this ADR now says that the ADR
 adds this to the `vfs.FS` contract, as the rows for ADR 0007, ADR 0017 and
-ADR 0024 say of theirs (Assumption 13). *Context* counts the decision, and
-its *What this constrains* names the comment; Assumption 13 is rewritten,
-and says what it said; and the entry under *What this does not decide*
-says the question is decided. §1 to §12, every test, every other
+ADR 0024 say of theirs (Assumption 13). Reviewer read the revision before
+it was committed, and two of the paragraph's sentences were narrowed for
+it, so that the paragraph says nothing of a call given a name its
+directory has (Assumption 13). *Context* counts the decision, and its
+*What this constrains*, which said that no non-test code of `internal/vfs`
+changes, is corrected in place and names the comment; Assumption 13 is
+rewritten, and says what it said; and the entry under *What this does not
+decide* says the question is decided. §1 to §12, every test, every other
 assumption and what a client sees are unchanged, and no other ADR is
 revised: ADR 0014 and ADR 0024 need no cross-reference (Assumption 13).
 There is no `CHANGES` line, a doc comment and a row of that table being
@@ -314,13 +318,14 @@ cross-reference; ADR 0010's bullet on 4294967295, by cross-reference; the
 tests of `internal/policy`, `internal/blobfs` and `internal/nfs`; and, after
 the code lands, one row of `docs/tla/trace.tsv` and the commit the
 CommitProtocol module is checked against (§9). No non-test code of
-`internal/policy`, `internal/nfs` or `internal/vfs` changes, and nothing in
-the bucket, the flags or the wire formats. On the wire, three procedures
-answer `NFS3_OK` as before, and the new object's attributes can report
-another group than they did. Since the revision of 2026-11-25 this ADR also
-constrains the `vfs.FS` contract, through one paragraph of the doc comment
-above `Create` in `internal/vfs/vfs.go`, the one change to that package, in
-which no declaration moves (Assumption 13).
+`internal/policy` or `internal/nfs` changes, and in `internal/vfs` no
+declaration does: since the revision of 2026-11-25 one paragraph is added
+to the doc comment above `Create` in `internal/vfs/vfs.go`, and nothing
+else in that package changes. Nothing changes in the bucket, the flags or
+the wire formats. On the wire, three procedures answer `NFS3_OK` as before,
+and the new object's attributes can report another group than they did.
+Through that paragraph this ADR also constrains the `vfs.FS` contract
+(Assumption 13).
 
 ## Decision
 
@@ -1353,11 +1358,11 @@ Each is mine unless it says otherwise.
 
     > Create, Mkdir and Symlink each leave unapplied an owner or group that
     > sa sets and c may not give to the object they make, and do not fail for
-    > it. The object has the owner sa sets if c may give it that owner, and
-    > otherwise c.UID; it has the group sa sets if c may give it that group,
-    > and otherwise c.GID. The call does fail if c may not add name to dir.
-    > SetAttr differs: given an owner or group that c may not set, it fails
-    > and applies none of sa.
+    > it. The object a call makes has the owner sa sets if c may give it that
+    > owner, and otherwise c.UID; it has the group sa sets if c may give it
+    > that group, and otherwise c.GID. A call that would make an object fails
+    > if c may not add name to dir. SetAttr differs: given an owner or group
+    > that c may not set, it fails and applies none of sa.
 
     The file is the contract, and this is its restatement; `c`, `sa`,
     `name` and `dir` are the three methods' parameters. The brief gave what
@@ -1391,11 +1396,23 @@ Each is mine unless it says otherwise.
       requests to `f.perm`. So ADR 0025's Assumption 17, ADR 0026's
       Assumption 16 and ADR 0027's Assumption 20 stand: `vfs.FS`'s doc
       comments still state no permission rule.
-    - *The sentence on `dir`* says where a refusal does fail the call. It
-      names no status, which is the policy's (§3, stage D). It is true of
-      every `Create`, `Mkdir` and `Symlink` as `createEntry` stands, a
-      `Create` of a name that exists included, since stage D comes before
-      stage E.
+    - *The sentence on `dir`* says where a refusal does fail the call, and
+      says it only of a call that would make an object. It names no
+      status, which is the policy's (§3, stage D). Of a call given a name
+      the directory has it says nothing. As `createEntry` stands such a
+      call asks the directory's request too, stage D coming before stage
+      E, so a `Create` that would only return the object its name names
+      fails where its caller may not add a name. Of the three calls only
+      `Mkdir` has a test of that order, W4's `Mkdir(ro, "k")`, as reviewer
+      found and the searches the last bullet names bear out. Whether that
+      `Create` should be judged as the open it stands for is open (*What
+      this does not decide*, as in ADR 0025's and ADR 0027's), and the
+      contract does not answer any part of it for every backend. The
+      first wording did: it read "The call does fail if c may not add name
+      to dir", of every call. And the second sentence began "The object
+      has", which read on its own reached the object such a `Create`
+      returns and did not make. Reviewer found both before the revision
+      was committed, and both were narrowed.
     - *The contrast with `SetAttr`* is kept, as one sentence. Both calls
       take a `vfs.SetAttr`, and they treat an owner or group the caller
       may not give in opposite ways (§4), which a backend that built its
@@ -1412,16 +1429,47 @@ Each is mine unless it says otherwise.
       without an attribute its caller may not give. That is said against
       the policy, which decides neither (ADR 0018 §2). Since this revision
       the contract asks both of every backend.
-    - *No test, no `CHANGES` line, no other ADR.* G2 to G4 (§8), ADR 0014
-      §11's W2, its W2 for the requested uid and its W4, and ADR 0024 §7's
-      S1 pin for `blobfs` what the paragraph says, but for one case: no
-      test refuses an owner asked of `Mkdir` or of `Symlink`. `createEntry`
-      is one body for the three, so by reading that case holds as
-      `Create`'s does. No test is added or changed, the brief asking for
-      none, and whether one should be is the session's to raise. A doc
-      comment is nothing a client or an operator can observe. Nothing that
-      ADR 0014 §6 or ADR 0024 says becomes untrue, so neither gains a
-      cross-reference.
+    - *No test, no `CHANGES` line, no other ADR.* No test is added or
+      changed, the brief asking for none. Of what the paragraph says, the
+      existing tests pin this for `blobfs`. A group, at an exclusive
+      `Create`, a `Mkdir` and a `Symlink`: one the caller may give is
+      applied, one it may not is left unapplied with the call returning
+      nil, and with none asked for the group is the caller's own (G2's
+      first table, each row for the three calls; G3 and G4 pin parts of
+      the same). An owner, at those three calls: with none asked for it
+      is the caller's own (G2's first table), and one the caller may give
+      is applied (ADR 0014 §11's W2 for the requested uid; for `Create`
+      also G2's second table, G3 and W4). At an exclusive `Create` alone:
+      an owner the caller may not give is left unapplied with the call
+      returning nil (G2's second table, G3's seventh row, W2 for the
+      requested uid, W4), and an owner and a group are asked for in one
+      call (G2's second table; G3's sixth to eighth rows). The directory:
+      an exclusive `Create`, a `Mkdir` and a `Symlink` of a name the
+      directory does not have fail where the directory's request is
+      refused (ADR 0014 §11's W2 and W4; for `Create` also G2, and G3's
+      ninth row). `SetAttr`: ADR 0024 §7's S1. So, by the reading and the
+      searches the last bullet names, the paragraph says four things that
+      no test pins. First, that an owner its caller may not give is left
+      unapplied at `Mkdir` or `Symlink`. Second, what `Mkdir` or `Symlink`
+      does with an owner and a group in one call. Third, of a `Create`
+      that is not exclusive and makes an object, everything but that the
+      object is its caller's, which G4's UNCHECKED `CREATE` of `pub/b`
+      shows with a group asked for that is its caller's own. Fourth, that
+      a `Create` that is not exclusive, of a name the directory does not
+      have, fails where the directory's request is refused: no test has a
+      directory refuse a `Create` that is not exclusive. Each holds by
+      reading: `createEntry` is one body for the three calls, and reads
+      `excl` only where the directory has the name. By the session's
+      brief #169 holds the first three, and the session adds the fourth
+      to it. The first version of this bullet named the first alone.
+      Reviewer found it wrong of what the first wording said of a name
+      the directory has, which the paragraph no longer says; the count
+      made to correct it found the second and the third; and reviewer
+      found the fourth, which that count's wording, "makes an object",
+      had left in neither list, a refused call making none. A doc
+      comment is nothing a client or an operator can observe. Nothing
+      that ADR 0014 §6 or ADR 0024 says becomes untrue, so neither gains
+      a cross-reference.
     - *`docs/DESIGN.md`'s row says it too.* The first brief of 2026-11-25
       had this revision change `internal/vfs/vfs.go` and this ADR, one
       sentence of ADR 0014 §6 or of ADR 0024 at most, and nothing else. So
@@ -1445,13 +1493,17 @@ Each is mine unless it says otherwise.
     - *Read, not run.* `internal/vfs/vfs.go`, `createEntry` and
       `docs/tla/trace.tsv` were read whole in the session's worktree,
       which by its brief is clean at `3c35d70`, `main` just after this
-      ADR's PR was merged. That no test refuses an owner asked of `Mkdir`
-      or of `Symlink` is from a search of the test files under `internal/`
-      for a creation given a uid, and from reading the rows it found.
-      Nothing was run, and that the file is still gofmt-clean is by
-      reading, for the session's merge bar to show. No source outside this
-      repository was fetched for this revision, which says nothing new of
-      anything outside it.
+      ADR's PR was merged. What the tests pin is from reading
+      `internal/blobfs/create_group_test.go` whole, G4's rows, W2 for the
+      requested uid, the creating rows of W2, every row of W4 and S1's
+      cases. What no test pins is from searches of the test files under
+      `internal/`, for a creation given a uid, for a `Create` that is not
+      exclusive, for a creation its directory refuses and for a `sattr3`
+      sent over the wire, and from reading what they matched. Nothing was
+      run, and that the file is still gofmt-clean is by reading, for the
+      session's merge bar to show. No source outside this repository was
+      fetched for this revision, which says nothing new of anything
+      outside it.
 14. **The tests** (§8). Three new files, so that a red run exists; `cg` as
     the prefix; G1 as a characterisation of a row that does not change; the
     ids 504, 40 and 41 and the modes, which no requirement gives; and G3's
