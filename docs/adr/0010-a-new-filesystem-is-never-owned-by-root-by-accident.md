@@ -5,6 +5,13 @@
 **Revised:** 2026-10-07 — cross-references only. The bullet *`-read-only`
 on an empty bucket (#68)* under *What this does not decide* now ends by
 saying that ADR 0011 decides it. Nothing else changed.
+**Revised:** 2026-11-24 — cross-references only, for ADR 0028, which
+decides #98. The bullet *4294967295 through the protocol* under *What this
+does not decide* says that CREATE, MKDIR and SYMLINK "apply a requested gid
+from any caller"; since ADR 0028 they apply one only for a caller asserting
+uid 0 or asserting the gid as one of its own, and the bullet now ends by
+saying so. Whether the server should refuse the value is still undecided.
+Nothing else changed.
 **Issue:** #72
 
 ## Context
@@ -484,6 +491,10 @@ approved say so (Assumption 17).
   CREATE, MKDIR and SYMLINK apply a requested gid from any caller and a
   requested uid from one asserting uid 0 (`internal/blobfs/fs.go:447-461`,
   `:671-676`). Whether the server should refuse it is a decision of its own.
+  Since ADR 0028 a creation applies a requested gid only where the rule
+  that decides a SETATTR's group allows it, to a caller asserting uid 0 or
+  asserting that gid as one of its own, so the unchecked route is closed
+  and the value itself is still not refused.
 - **A warning when the owner is root.**
 - **macOS's `KAUTH_UID_NONE`,** `~(uid_t)0 - 100`, which is 4294967195. It is
   accepted: it is an ordinary id on Linux (*Sources*).

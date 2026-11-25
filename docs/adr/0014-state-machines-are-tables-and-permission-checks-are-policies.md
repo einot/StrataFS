@@ -130,6 +130,23 @@ pins, P6, whose unknown `Op`s now begin at 14, and W5, which no longer names
 request that is not advisory, the stages, the mode's table and every other
 test this ADR pins are unchanged, and the text of the replaced parts stays
 as the record.
+**Revised:** 2026-11-24 — cross-reference only, for ADR 0028, which decides
+#98 and replaces two parts of this ADR: §6's rule that a requested gid at
+creation "is applied as now, with no check", which since ADR 0028 §1 and §2
+is applied only if `f.perm` allows an `OpChgrp` for it on the new object,
+the request `SetAttr` makes, and is otherwise left unapplied, as a refused
+uid is; and the place that §6's *The wiring at `a6cff50`* and Assumption 46
+give the creation-time `OpChown`, after `allocInode`, which since ADR 0028
+§3 is before it, with the `OpChgrp` after the `OpChown` and both carrying
+the new object as the call makes it with neither applied, so that every
+request a creation makes is asked before the call changes anything. §11's
+statement that no test relies on how `sa.GID` at creation is handled is the
+record only since ADR 0028 §8, whose G1 to G4 pin that handling. §6, §11
+and *Assumptions* each gain a sentence saying so. `Unix()`'s rows,
+`OpChgrp`'s included, `Request`, the stages, the fields and the values of
+the creation-time `OpChown`, what its refusal does and every test this ADR
+pins are unchanged, W2 for the requested uid included, and the text of the
+replaced parts stays as the record.
 **Issue:** #114
 
 ## Context
@@ -692,6 +709,14 @@ This is for the PR that wires the policy. It changes no behaviour.
       `Create` of a name that exists makes no inode and no `OpChown` request,
       as today it applies no `sa.UID`.
     - A requested gid is applied as now, with no check, until #98's fix.
+      ADR 0028 is #98's fix: since it a creation that makes a new inode and
+      is given a gid asks `OpChgrp` with `GID` `*sa.GID`, after the
+      `OpChown`, applies the gid only if that is allowed and ignores a
+      refusal as it ignores the `OpChown`'s, and asks both before
+      `allocInode`, each with `Object` the new object as the call makes it
+      with neither applied (ADR 0028 §2, §3), so what the wiring below says
+      of where the `OpChown` is asked and of `sa.GID`'s apply is the record
+      only.
   - `Remove`, `Rmdir`: `OpRemoveEntry` on the directory.
   - `Rename`: `OpRename`, with `Object` the source directory and `Dst` the
     target. Since ADR 0026 §2 the `OpRemoveEntry` of `Remove` and `Rmdir`
@@ -1174,7 +1199,9 @@ no two objects a row names are equal (#148); and W4 gains two rows there.
 Since ADR 0027, U5 is pinned, by that ADR's §1 and its X1, which replaces
 P9; P6's unknown `Op`s are 0 and 14 to 255; W5 no longer names `Access`,
 which that ADR's X10 and X11 show asks `f.perm`; and W4's `Access` rows
-stand.
+stand. Since ADR 0028, how `sa.GID` at creation is handled is pinned, by
+that ADR's §1 to §3 and its G1 to G4, and W2 for the requested uid stands as
+written, its recorded requests unchanged.
 
 **`blobfs`, for the PR that does §7** (package `blobfs`, in one new file,
 `internal/blobfs/mount_mode_test.go`; Assumption 42). The harness is
@@ -1570,7 +1597,10 @@ says how it bears on this ADR.
 20. **A requested uid at creation goes through `OpChown`**, with a refusal
     ignored. A requested gid stays inline until #98's fix: giving it an
     `OpChgrp` request now would refuse groups that are applied today, which
-    is #98's decision to make.
+    is #98's decision to make. ADR 0028 made it: the gid goes through
+    `OpChgrp`, with a refusal ignored as the uid's is, and both requests are
+    asked before `allocInode`, which replaces the place Assumption 46 gives
+    the `OpChown`.
 21. **`Access` does not go through `f.perm` until #97's fix**, and
     `AccessBits` carries no mount mask. RFC 1813 §4.4 keeps `ACCESS`'s answer
     apart from the server's own overrides (*Sources*), so deriving `ACCESS`

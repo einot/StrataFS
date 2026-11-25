@@ -11,7 +11,7 @@ CommitProtocol	GetSnapshot	internal/blobfs/commit.go	decodeSnapshot	none	-
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.mutable	none: mode is an fsm.Atomic, read in one atomic load	ADR 0011 section 4; ADR 0003 section 5; ADR 0014 section 7
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.markDirty	FS.mu (write), held by its caller	ADR 0023 section 3
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.SetAttr	FS.mu (write)	ADR 0024 section 2
-CommitProtocol	Mutate	internal/blobfs/fs.go	FS.createEntry	FS.mu (write)	-
+CommitProtocol	Mutate	internal/blobfs/fs.go	FS.createEntry	FS.mu (write)	ADR 0028 section 3
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.unlink	FS.mu (write)	ADR 0024 section 3
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.Rename	FS.mu (write)	-
 CommitProtocol	Mutate	internal/blobfs/fs.go	FS.bufferWrite	openFile.mu, then FS.mu (write)	ADR 0003 section 3; ADR 0024 section 1

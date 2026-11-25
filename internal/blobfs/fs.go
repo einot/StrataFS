@@ -731,16 +731,18 @@ func (f *FS) markDirty() {
 	f.changes++
 }
 
-// allocInode creates a new inode. Caller must hold mu for writing.
-func (f *FS) allocInode(t vfs.FileType, mode uint32, c vfs.Caller, parent uint64) *inode {
+// allocInode creates a new inode owned by uid and gid. It takes the ids rather
+// than the caller because createEntry decides them by policy before calling
+// it (ADR 0028 §3). Caller must hold mu for writing.
+func (f *FS) allocInode(t vfs.FileType, mode, uid, gid uint32, parent uint64) *inode {
 	now := time.Now()
 	n := &inode{
 		ID:      f.nextIno,
 		Gen:     uint64(now.UnixNano()),
 		Type:    t,
 		Mode:    mode & 0o7777,
-		UID:     c.UID,
-		GID:     c.GID,
+		UID:     uid,
+		GID:     gid,
 		NLink:   1,
 		Parent:  parent,
 		ATimeNS: now.UnixNano(),
@@ -757,7 +759,12 @@ func (f *FS) allocInode(t vfs.FileType, mode uint32, c vfs.Caller, parent uint64
 	return n
 }
 
-// createEntry is the shared body of CREATE, MKDIR and SYMLINK.
+// createEntry is the shared body of CREATE, MKDIR and SYMLINK. Holding mu for
+// writing, it asks f.perm OpAddEntry on the directory and returns a refusal
+// (ADR 0014 §6). Then, only if it is about to make an object, it asks OpChown
+// if sa.UID is set and OpChgrp if sa.GID is set, in that order, before
+// changing anything; each id is applied only on the policy's nil, and a
+// refusal is not returned (ADR 0028 §2, §3).
 //
 // TLA+: docs/tla/CommitProtocol.tla Mutate
 func (f *FS) createEntry(ctx context.Context, c vfs.Caller, dir vfs.Handle, name string, t vfs.FileType, sa vfs.SetAttr, target string, excl bool) (vfs.Handle, vfs.Attr, error) {
@@ -814,18 +821,28 @@ func (f *FS) createEntry(ctx context.Context, c vfs.Caller, dir vfs.Handle, name
 		mode = *sa.Mode
 	}
 
-	n := f.allocInode(t, mode, c, d.ID)
+	// Both requests ask about the object as it would be made with no owner and
+	// no group asked for, so neither verdict depends on the other's answer.
+	// They come before allocInode, the call's first change, so that no answer
+	// can leave an inode in the table with no entry naming it. A refusal of
+	// either leaves that id the caller's and fails nothing (ADR 0028 §2, §3,
+	// §4).
+	obj := policy.Object{Type: t, Mode: mode & 0o7777, UID: c.UID, GID: c.GID}
+	uid, gid := c.UID, c.GID
 	if sa.UID != nil {
-		// A refused uid is left unapplied and fails nothing: the new inode
-		// stays the caller's, as when none is asked for (ADR 0014 §6).
-		r := policy.Request{Op: policy.OpChown, Caller: c, Object: objectOf(n), UID: *sa.UID}
+		r := policy.Request{Op: policy.OpChown, Caller: c, Object: obj, UID: *sa.UID}
 		if f.perm.Check(r) == nil {
-			n.UID = *sa.UID
+			uid = *sa.UID
 		}
 	}
 	if sa.GID != nil {
-		n.GID = *sa.GID
+		r := policy.Request{Op: policy.OpChgrp, Caller: c, Object: obj, GID: *sa.GID}
+		if f.perm.Check(r) == nil {
+			gid = *sa.GID
+		}
 	}
+
+	n := f.allocInode(t, mode, uid, gid, d.ID)
 	if t == vfs.TypeLnk {
 		n.Target = target
 		n.Size = uint64(len(target))
