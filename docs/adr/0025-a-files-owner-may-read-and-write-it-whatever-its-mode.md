@@ -54,6 +54,19 @@ is answered by ADR 0027 §3 to §6. §1, §3 and §6 each gain a sentence saying
 so. The rows as a call meets them, §2, §4, `Permits` and every assertion of
 A1 to A10 are unchanged, and the text of the replaced parts stays as the
 record.
+**Revised:** 2026-11-28 — cross-reference only, for ADR 0029, which decides
+#69 and replaces three parts of this ADR: §1's rows, which gain a line that
+refuses, with `vfs.ErrInval`, a call's request on an object that is neither
+a regular file nor a directory, and §1's paragraph on such an object, whose
+rows are no longer "what they were"; §3's third item, the `ACCESS` bits of
+such an object, which ADR 0029 §3 keeps; and the form of §6's A1, whose
+branch for any other type asserts `vfs.ErrInval`, and of A2's four symlink
+rows, pinned as `vfs.ErrInval` where they were pinned as refusals only.
+Assumption 12's assumption, that #69's fix allows a symlink nothing that is
+refused today, holds. §1, §3 and §6 each gain a sentence saying so. The rows
+for a regular file and a directory, §2, §4, `Permits` and every other
+assertion of A1 to A10 are unchanged, and the text of the replaced parts
+stays as the record.
 **Issue:** #93
 
 ## Context
@@ -308,7 +321,10 @@ allows root both permissions on anything that is not a directory.
   `vfs.ErrAcces` unless `Permits`, which is ADR 0014 §11's U3 and #69's to
   change. One half of U3 is pinned from here, as a refusal only: where
   `Permits` refuses such an object the permission its row asks for, the row
-  refuses it (§6; Assumption 12).
+  refuses it (§6; Assumption 12). ADR 0029 changes them: since its §1 a
+  call's request for one of the three, of such an object, is refused with
+  `vfs.ErrInval` before `Permits` is asked, and only an advisory request is
+  still answered by `Permits`.
 
 **`Permits` does not change.** The override is in the three rows, so nothing
 else that reads `Permits` moves: not `AccessBits` (§3); not `OpSetTimes`,
@@ -498,7 +514,8 @@ no longer built on `Permits` alone (its §2 and §7), which replaces the
 first paragraph of this section in its mechanism and in nothing a client
 sees on a file; it settles the directory bits and the diverged mount, and
 keeps the bits of an object that is neither until #69 (its §4 to §6); and
-it leaves the fourth closed.
+it leaves the fourth closed. ADR 0029 decides #69, and keeps those bits for
+good (its §3).
 
 ### 4. Security
 
@@ -712,7 +729,10 @@ stays unpinned where `Permits` allows, and is pinned as a refusal only where
 `Permits` refuses. U4, U5 and U6 stay unpinned, and no test here relies on
 them: no directory's mode has `0o1000` set; `AccessBits` and `Access` are
 asked of no directory that has read without search or write without search;
-and no time is set by a caller who is not the owner.
+and no time is set by a caller who is not the owner. Since ADR 0029 §9, U3
+is pinned whole: A1's branch for any other type asserts `vfs.ErrInval`, and
+A2's four symlink rows below, pinned as refusals only, are pinned as
+`vfs.ErrInval`.
 
 **`internal/policy`** (package `policy_test`; Assumption 13). The new tests
 go in one new file, `internal/policy/owner_access_test.go`, and reuse

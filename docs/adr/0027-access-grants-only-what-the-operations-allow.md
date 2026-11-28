@@ -38,6 +38,22 @@ decided*, 5, and Assumption 19 say so. What §14, the opening of *Put to the
 owner, and decided* and Assumptions 1 and 22 say of the session's decision
 stands as the record of 2026-11-23. No rule, no table, no row, no test and
 no word of the `CHANGES` line changes.
+**Revised:** 2026-11-28 — cross-reference only, for ADR 0029, which decides
+#69 and replaces four parts of this ADR: §2's rows for `OpRead`, `OpWrite`
+and `OpTruncate`, which gain a line that refuses, with `vfs.ErrInval`, a
+request that is not advisory whose `Object` is neither a regular file nor a
+directory, an advisory request being answered as §2 has it; what §6 left to
+#69's ADR, which takes the path §6 left open, refusing the call alone, keeps
+such an object's `ACCESS` bits for good, and has `READLINK` go on asking no
+policy; what §10 says is unpinned, U3 for a call, which is pinned since,
+with the branch of X4 and of P13 for such an object; and the entry on a
+symlink under *What this does not decide*. §2's first law keeps the scope
+this ADR gave it, and for an object that is neither it is false by design
+since ADR 0029 §3. §2, §6, §10 and *What this does not decide* each gain a
+sentence saying so. §1's tables, `AccessBits`, the `OpExecute` row, every
+answer to an advisory request, §8's S1 to S5 and every mask a test pins are
+unchanged, X1 included, and the text of the replaced parts stays as the
+record.
 **Issue:** #97
 
 ## Context
@@ -476,7 +492,10 @@ answered as it was.
   for every request, as this section had it until the pass of 2026-11-23,
   the law pinned the unmarked answer through the marked one, against §6
   and §10. Of the two, the law gives way: it is claimed where §8's S2 rests
-  on it, and no further.
+  on it, and no further. ADR 0029 decides #69, and the law stays where it
+  stops: since its §1 such a request unmarked is refused with
+  `vfs.ErrInval`, while the same request marked is still answered by the
+  mode, so for such an object the law is false by design (ADR 0029 §3).
 - *Execution is backed by a read.* For a regular file, if `Unix()` allows
   `OpExecute`, it allows `OpRead` unmarked, by line 2 or by line 4. That is
   ADR 0025 §3's fourth item, which stays closed.
@@ -752,7 +771,11 @@ them to that (§2; Assumption 24). Two things bind #69's ADR when it comes:
 The mount gate is kept for these objects, where Linux's server drops it for
 device files, since a client opens a device on its own machine. This server
 makes no device, and ADR 0011 §4 pins that a read-only FS grants none of the
-three bits.
+three bits. ADR 0029 is #69's ADR: it refuses the call alone, with
+`vfs.ErrInval`, and leaves the advisory answer as it is, so these bits stand
+for good, for the reason the second point above gives and for one more that
+it reads from Apple's client (its §3), and it has `READLINK` go on asking no
+policy (its §4).
 
 ### 7. How `blobfs` asks
 
@@ -899,7 +922,9 @@ the mark existed, and by the *Growth* rule it speaks of those alone: an
 advisory request of such an object is no part of it, and X1, X4 and X6 pin
 it. So no test asks §2's first law of an object that is neither a regular
 file nor a directory: asked there, beside those advisory answers, it would
-pin U3 where `Permits` allows (§2).
+pin U3 where `Permits` allows (§2). Since ADR 0029, U3 is pinned for a call
+too, as `vfs.ErrInval`, and the branch of X4 and of P13 for such an object
+is that ADR's N2 and N3 (its §9).
 
 **`internal/policy`** (package `policy_test`). A new file,
 `internal/policy/access_test.go`, with helpers of its own prefixed `ac`, and
@@ -1790,7 +1815,7 @@ Each is mine unless it says otherwise.
 - #69, #98, #99, #100, #101, #154 and #155 (§13), and the rows U3 and U6.
 - What `ACCESS` reports for a symlink once #69 has decided what a `Read` or
   a `Write` of one answers, and whether `READLINK` should ask a policy
-  (§6).
+  (§6). ADR 0029 decides both: the bits stay, and `READLINK` asks none.
 - Whether `ACCESS`'s reply should carry attributes taken in the hold that
   made the mask. The `access` handler takes them from a later `GetAttr`,
   so a change of mode or owner between the two gives a client a mask

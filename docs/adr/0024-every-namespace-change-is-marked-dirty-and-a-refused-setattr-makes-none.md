@@ -52,6 +52,13 @@ that 10 and 4500 do not, and Assumption 28 lists what S7 detects and what
 stays review's, the unsettled mark and the growth hole fill (F2);
 Assumption 30 is reworded to what `btBounded` does on a timeout (F1).
 Nothing else moved.
+**Revised:** 2026-11-28 — cross-reference only, for ADR 0029, which decides
+#69. §2's *What is unchanged* said that a symlink's handle is still accepted
+with a size; since ADR 0029 §1 it is refused with `vfs.ErrInval`, by the
+`OpTruncate` that `setAttrRequests` asks first, in `truncate`'s pre-check,
+so a refused call takes no gate and applies nothing, as §2 has it for every
+refusal. §2 gains a sentence saying so. The rule, the requests, their
+order, the holds and every test this ADR pins are unchanged.
 **Issue:** #143, #144
 
 ## Context
@@ -377,7 +384,9 @@ non-owner with write permission may still set the times (#100). The NFS
 layer's guard check (#99), `createEntry`'s handling of `sa` (#98), `Write`'s
 check before its wait (#101) and `Access` are untouched. ADR 0006's trim
 rules, ADR 0012's gate, mark and settle pass, and ADR 0003 §2's accounting
-at `truncate` (site 3) are untouched.
+at `truncate` (site 3) are untouched. ADR 0029 has since decided #69: a
+size is refused on a symlink's handle with `vfs.ErrInval`, by the first of
+the requests above, in the pre-check.
 
 **What coder's commit chose**, recorded against `369cbad` where the pins
 above left room (Assumption 22):

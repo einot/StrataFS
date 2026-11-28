@@ -147,6 +147,20 @@ and *Assumptions* each gain a sentence saying so. `Unix()`'s rows,
 the creation-time `OpChown`, what its refusal does and every test this ADR
 pins are unchanged, W2 for the requested uid included, and the text of the
 replaced parts stays as the record.
+**Revised:** 2026-11-28 — cross-reference only, for ADR 0029, which decides
+#69 and replaces three parts of this ADR: §5's bullets for the `OpRead` row
+and for the `OpWrite` and `OpTruncate` row, as ADR 0025 and ADR 0027 left
+them, which since ADR 0029 §1 also refuse, with `vfs.ErrInval`, a request
+that is not advisory whose `Object` is neither a regular file nor a
+directory, after the directory's `vfs.ErrIsDir` and before any permission is
+looked at; §6's statement of what `blobfs` relies on in `Unix()`'s type
+rows, which grows by that refusal, so that stage D can answer `vfs.ErrInval`
+too; and §11's U3, which ADR 0029 §1 and §9 pin whole, with the safety rule
+read to match. §5, §6 and §11 each gain a sentence saying so. U6 is not
+#69's and stays unpinned. `Permits`, `AccessBits`, every other row, an
+advisory request's answers, the stages, §6's request lists and every other
+test this ADR pins are unchanged, and the text of the replaced parts stays
+as the record.
 **Issue:** #114
 
 ## Context
@@ -590,6 +604,10 @@ Every rule below is normative:
   request that leaves both nil they are the bullets above, and for one that
   sets either they also refuse, with `vfs.ErrPerm`, in a directory whose
   mode has `0o1000` set; the `OpAddEntry` row is as this section has it.
+  Since ADR 0029 §1 the `OpRead` row and the `OpWrite` and `OpTruncate` row
+  also refuse, with `vfs.ErrInval`, after the directory's `vfs.ErrIsDir` and
+  before any permission is looked at, a request that is not advisory whose
+  `Object` is neither a regular file nor a directory.
 - `Unix` is a function, not an exported variable, so there is no package-level
   authority anyone can reassign. It returns a value that holds no state, and
   two calls decide alike. `policy` exports no variable at all.
@@ -748,7 +766,12 @@ This is for the PR that wires the policy. It changes no behaviour.
   ADR that installs more keeps `Unix()` in front, as
   `policy.All(policy.Unix(), p)` does. A test that replaces `f.perm` with a
   policy that allows more makes its calls only on objects of the type each
-  operation needs (§11).
+  operation needs (§11). Since ADR 0029 stage D can also answer
+  `vfs.ErrInval`, the refusal `Unix()`'s three file rows give a call on an
+  object that is neither a regular file nor a directory, and `blobfs` relies
+  on that refusal as it relies on the two above: without it `Write` and
+  `truncate` would give a symlink a size that is not its target's length,
+  and a chunk list (ADR 0029 §2, §7).
 - **The wiring at `a6cff50`** (2026-10-31; Assumptions 43 to 47, 50 and
   51). `SetAttr` and `truncate` already make every request they make
   through `f.perm` (ADR 0024 §2: `setAttrRequests`, once for a call without
@@ -1201,7 +1224,12 @@ P9; P6's unknown `Op`s are 0 and 14 to 255; W5 no longer names `Access`,
 which that ADR's X10 and X11 show asks `f.perm`; and W4's `Access` rows
 stand. Since ADR 0028, how `sa.GID` at creation is handled is pinned, by
 that ADR's §1 to §3 and its G1 to G4, and W2 for the requested uid stands as
-written, its recorded requests unchanged.
+written, its recorded requests unchanged. Since ADR 0029, U3 is pinned
+whole, by that ADR's §1 and its N1 to N3: a request that is not advisory is
+refused with `vfs.ErrInval`, an advisory one is answered by the mode, and
+the safety rule below reads a regular file as the type that `Read`, `Write`
+and a `SetAttr` that sets a size need; of the six rows only U6 stays
+unpinned, and it is #100's.
 
 **`blobfs`, for the PR that does §7** (package `blobfs`, in one new file,
 `internal/blobfs/mount_mode_test.go`; Assumption 42). The harness is

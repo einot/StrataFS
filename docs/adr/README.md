@@ -111,3 +111,4 @@ URL, and what was taken from it.
 | [0026](0026-in-a-sticky-directory-only-an-owner-removes-or-renames-an-entry.md) | In a sticky directory only root, the directory's owner or an entry's owner may remove, rename or replace that entry | Accepted |
 | [0027](0027-access-grants-only-what-the-operations-allow.md) | ACCESS grants a bit only where the operations it names are allowed, and asks the policy that decides them | Accepted |
 | [0028](0028-a-group-asked-for-at-creation-is-applied-only-for-root-or-a-member.md) | A group asked for at creation is applied only for root or a member of it, and is otherwise left unapplied | Accepted |
+| [0029](0029-only-a-regular-file-is-read-written-or-given-a-size.md) | Only a regular file is read, written or given a size: a symbolic link's handle is refused, and ACCESS still reports its mode | Accepted |

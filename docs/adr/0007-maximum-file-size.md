@@ -16,6 +16,15 @@ that a refused request's handler still waits behind a commit that holds
 decide*, describe the code before that ADR, since a commit now makes its
 store calls holding no `FS.mu`, and the wait is for its two bounded holds.
 The limit, its checks and everything else are unchanged.
+**Revised:** 2026-11-28 — cross-reference only, for ADR 0029, which decides
+#69. The bullet *`SETATTR` with a size, and `WRITE`, on a symlink's handle*
+under *What this does not decide* now ends by saying so, and its sentence
+that both check only that the handle is not a directory describes the code
+before that ADR. §6 and §7 each gain a sentence pointing to ADR 0029 §6,
+which says how an inode that is not a regular file can still be above the
+limit and tests that §6's record leaves it out. The limit, its checks, their
+order, the record and everything else are unchanged, and every test this
+ADR pins stands.
 **Issue:** #55, #66
 
 ## Context
@@ -436,7 +445,9 @@ and nothing otherwise:
 largest such size, and `max_file_size` the `MaxFileSize` (both
 `slog.KindUint64`). The attributes are top-level, not grouped. Directories and
 symlinks are not counted. It is logged once per `New`, after the filesystem is
-loaded.
+loaded. Since ADR 0029 no call puts a directory or a symlink above the limit,
+a bucket an earlier build wrote can still hold a symlink that is, and
+ADR 0029 §6 tests that the record leaves it out.
 
 ### 7. The test surface
 
@@ -503,6 +514,10 @@ How a test reaches each case:
   `vfs.ErrROFS`, before `ErrFBig` (§4's order), whereas a store wrapped in
   `store.ReadOnly` refuses only the store's own writes, so on it those calls
   are accepted in memory and fail only when a commit reaches the store.
+
+For §6's filter, an inode above the limit that is not a regular file is
+reached as ADR 0029 §6 and §9 say: by a snapshot whose inode sizes are set
+by hand, with ADR 0024 §7's recipe.
 
 A build without these checks turns an over-limit request into a chunk list as
 long as the request asks for. So a test reaches a clean failure with the
@@ -703,7 +718,9 @@ required, except where it says otherwise.
   an `UNCHECKED` create's size, and drops a `GUARDED` create's size.
 - **`SETATTR` with a size, and `WRITE`, on a symlink's handle.** Both check
   only that the handle is not a directory. This ADR bounds them as it bounds a
-  regular file.
+  regular file. ADR 0029 decides it: both are refused with `vfs.ErrInval`, as
+  a `Read` of such a handle is, with §4's `ErrFBig` still answered first and
+  nothing changed by a refused call.
 - **`inode.used` and `FSStat`**, which walk chunk lists on every attribute read
   and every `FSSTAT`.
 - **#61.** Converting `-chunk-size` can wrap. The chunk size now sets the
