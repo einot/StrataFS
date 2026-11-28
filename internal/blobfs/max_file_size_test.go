@@ -59,13 +59,15 @@ package blobfs
 // goroutines never touch t.
 //
 // Not covered, on purpose:
-//   - That §6's record counts regular files only, and not a directory or a
-//     symlink above the limit. ADR 0007 §7 pins no way to put a non-regular
-//     inode above the limit: the only route is SETATTR with a size on a
-//     symlink's handle, which "What this does not decide" leaves open as a
-//     defect, and a test built on it would make that defect part of the test
-//     surface. TestMaxFileSizeMountRecord's bucket holds no such inode, so the
-//     filter is never exercised.
+//   - Here, that §6's record counts regular files only, and not a directory or
+//     a symlink above the limit. TestMaxFileSizeMountRecord's bucket holds no
+//     such inode, so it does not exercise the filter. Since ADR 0029
+//     (docs/adr/0029-only-a-regular-file-is-read-written-or-given-a-size.md)
+//     no call puts a non-regular inode above the limit, and the filter is
+//     exercised by that ADR's N7, TestTheMountRecordCountsRegularFilesOnly in
+//     symlink_handle_test.go, on a bucket whose snapshot holds a symlink and a
+//     directory above the limit, set by hand with ADR 0024 §7's recipe (ADR
+//     0029 §6), which stands for a bucket an earlier build wrote.
 //   - ErrNameTooLong before ErrFBig: no document here gives the name limit.
 //   - Cloner.CloneRange (§3): nothing implements it.
 //   - That truncate's and flushOpen's fills are unchanged and bounded by

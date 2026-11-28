@@ -67,8 +67,10 @@ package blobfs
 // since ADR 0027 section 10, and is tested in access_test.go; W4 still has no
 // such row. How sa.GID at creation is handled, a group asked for at creation
 // (#98), is pinned since ADR 0028 section 8, and is tested in
-// create_group_test.go; no test here asks for a group at creation. U3 and U6
-// stay unpinned. W2's tree gives d2 the mode 0o1770, but under the recorder,
+// create_group_test.go; no test here asks for a group at creation. Read or
+// Write of a symlink (U3) is pinned since ADR 0029 section 9, and is tested in
+// symlink_handle_test.go; W4 still has no such row. U6 alone stays unpinned.
+// W2's tree gives d2 the mode 0o1770, but under the recorder,
 // which allows whatever it does not refuse, no mode bears on a verdict (ADR
 // 0026 section 7).
 
@@ -1256,6 +1258,9 @@ type pwCheck struct {
 // no sticky row. Access for a directory with read but not search, or write but
 // not search, U5, is pinned since ADR 0027 section 10 and tested in
 // access_test.go; W4 still has no such row, and its ten Access rows stand.
+// Read or Write of a symlink, U3, is pinned since ADR 0029 section 9 and
+// tested in symlink_handle_test.go; W4 still has no such row. Of the six, U6,
+// times set by a non-owner, alone stays unpinned.
 func TestTheUnixRowsAreUnchangedThroughTheFS(t *testing.T) {
 	const where = "W4, ADR 0014 sections 5, 6 and 11"
 	e := uc43Setup(t)

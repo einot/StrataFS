@@ -47,10 +47,15 @@ package policy_test
 // is asked under its own lock; and each exhaustive loop reports through
 // limiter, so that a wrong rule does not print every case.
 //
-// Not relied on: U6, and U3 for a request that is not advisory where Permits
-// allows, which ADR 0027 §10 leaves unpinned. So the law that an advisory
-// request only narrows is asked here of regular files and directories alone:
-// asked of any other type it would pin U3's allowing half.
+// Not relied on: U6. U3 is pinned whole since ADR 0029 §9: a request that is
+// not advisory, of an object that is neither a regular file nor a directory,
+// is vfs.ErrInval (owner_access_test.go's A1, ADR 0029's N1), and the same
+// request marked is answered by the mode, nil or vfs.ErrAcces (X4 here, ADR
+// 0029's N2). The law that an advisory request only narrows is asked here of
+// regular files and directories alone, and stays there for good: for any
+// other type it is false since ADR 0029 §3, where an advisory request is
+// allowed wherever the mode allows it and the same request unmarked is
+// always refused.
 
 import (
 	"errors"
@@ -667,12 +672,17 @@ func TestWhatAccessBitsGrantsTheRowsAllow(t *testing.T) {
 //   - a regular file is nil exactly when oraclePermits gives the row's
 //     permission, and vfs.ErrAcces otherwise, so neither the owner override nor
 //     the read that execute gives reaches an advisory request;
-//   - any other type is nil exactly when oraclePermits gives it, and otherwise
-//     a refusal whose error is not pinned.
+//   - any other type is nil exactly when oraclePermits gives it, and
+//     vfs.ErrAcces otherwise, compared with ==. That refusal is pinned since
+//     ADR 0029 §9's N2: an advisory request of such an object is answered by
+//     the mode whatever its type, and line 2 of ADR 0029 §1, which refuses the
+//     same request unmarked with vfs.ErrInval, does not reach it (ADR 0029 §1
+//     and §3).
 //
 // For a regular file and a directory it also asks §2's first law, that an
 // advisory request only narrows: where the marked request is allowed, the same
-// request unmarked is allowed too.
+// request unmarked is allowed too. It does not ask it of another type, where
+// the law is false since ADR 0029 §3.
 func TestAnAdvisoryRequestIsAnsweredByTheModeAlone(t *testing.T) {
 	u := policy.Unix()
 	l := &limiter{t: t, limit: 20}
@@ -705,10 +715,16 @@ func TestAnAdvisoryRequestIsAnsweredByTheModeAlone(t *testing.T) {
 								err, want)
 						}
 					default:
-						if permits != (err == nil) {
-							l.errorf("%s of a type %d, mode %#o, = %v, want it allowed exactly when Permits gives the "+
-								"row's permission, which it does: %v (ADR 0027 §2 and §6, §10 X4)", what, typ, mode, err,
-								permits)
+						var want error = vfs.ErrAcces
+						if permits {
+							want = nil
+						}
+						if err != want {
+							l.errorf("%s of a type %d, mode %#o, = %#v (%v), want %v, compared with ==: an advisory "+
+								"request of an object that is neither a regular file nor a directory is nil exactly "+
+								"when Permits gives the row's permission, which it does: %v, and the bare "+
+								"vfs.ErrAcces otherwise, whatever its type (ADR 0027 §2 and §6, §10 X4; ADR 0029 §1 "+
+								"and §3, §9 N2)", what, typ, mode, err, err, want, permits)
 						}
 					}
 					if err != nil || (typ != vfs.TypeReg && typ != vfs.TypeDir) {

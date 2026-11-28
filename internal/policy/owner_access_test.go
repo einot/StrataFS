@@ -18,6 +18,14 @@ package policy_test
 //	                      Permits(c, o, PermWrite); (3) nil for a regular file
 //	                      and its owner; (4) vfs.ErrAcces.
 //
+// Since ADR 0029 §1
+// (docs/adr/0029-only-a-regular-file-is-read-written-or-given-a-size.md), each
+// of the three rows has one more line after the directory's: vfs.ErrInval for
+// a request that is not advisory whose Object is neither a regular file nor a
+// directory, for every caller, root included, before any permission is looked
+// at. Every Type but vfs.TypeReg and vfs.TypeDir, valid or not, is such an
+// object. The requests A1 makes are not advisory.
+//
 // Covered, with the names ADR 0025 §6 pins:
 //   - A1, TestTheFileRowsExhaustively;
 //   - A3, TestADirectorysOwnerIsHeldToItsMode, a characterisation that passes
@@ -29,8 +37,10 @@ package policy_test
 //
 // These reuse policy_test.go's fixtures: the callers, p2Callers, p2Modes,
 // p2Types, mkObj, mkReq, mkRename, oraclePermits, limiter and opName. Helpers
-// of this file's own are prefixed oa. U3 stays unpinned where Permits allows,
-// and U4, U5 and U6 are not relied on: no directory here has 0o1000 set, no
+// of this file's own are prefixed oa. U3 is pinned whole since ADR 0029 §9:
+// A1's branch for a type that is neither a regular file nor a directory is
+// that ADR's N1, and asserts vfs.ErrInval for every caller, mode and Op. U4,
+// U5 and U6 are not relied on: no directory here has 0o1000 set, no
 // AccessBits is asked of a directory, and no time is set (ADR 0025 §6).
 
 import (
@@ -82,9 +92,12 @@ var oaAllTypes = append(append([]vfs.FileType(nil), p2Types...),
 //   - a directory: vfs.ErrIsDir, compared with ==;
 //   - a regular file: nil or vfs.ErrAcces exactly as the lines give, compared
 //     with ==;
-//   - any other type: a non-nil error, whichever it is, where oraclePermits
-//     refuses the row's permission, and nothing asserted where it allows (U3;
-//     ADR 0025 Assumption 12).
+//   - any other type: vfs.ErrInval, compared with ==, for every caller, root
+//     included, every mode and every Op, whatever Permits would give. That
+//     branch is ADR 0029 §9's N1, and pins ADR 0014 §11's U3 for a request
+//     that is not advisory (ADR 0029 §1, line 2); before ADR 0029 it asserted
+//     a refusal only where oraclePermits refused, and nothing where it
+//     allowed.
 func TestTheFileRowsExhaustively(t *testing.T) {
 	u := policy.Unix()
 	l := &limiter{t: t, limit: 20}
@@ -116,12 +129,12 @@ func TestTheFileRowsExhaustively(t *testing.T) {
 								"§2, §6 A1)", what, mode, err, err, want)
 						}
 					default:
-						if !oraclePermits(nc.c, o, oaRowPerm(op)) && err == nil {
-							l.errorf("%s of a type %d, mode %#o, = nil, want a refusal: an object that is neither a "+
-								"regular file nor a directory gets neither the owner override nor read with "+
-								"execute, so it is refused where Permits refuses the row's permission (ADR 0025 "+
-								"§1, §6 A1; ADR 0014 §11 U3's refusing half, pinned only as a refusal)",
-								what, typ, mode)
+						if err != vfs.ErrInval {
+							l.errorf("%s of a type %d, mode %#o, = %#v (%v), want the bare vfs.ErrInval, compared "+
+								"with ==: a request that is not advisory, of an object that is neither a regular "+
+								"file nor a directory, is refused for its type, for every caller, root included, "+
+								"before any permission is looked at (ADR 0029 §1, line 2; §9 N1; ADR 0014 §11 U3)",
+								what, typ, mode, err, err)
 						}
 					}
 				}
