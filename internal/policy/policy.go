@@ -9,7 +9,8 @@
 // Spec: docs/adr/0014-state-machines-are-tables-and-permission-checks-are-policies.md §4, §5;
 // docs/adr/0025-a-files-owner-may-read-and-write-it-whatever-its-mode.md §1, §2, §3;
 // docs/adr/0026-in-a-sticky-directory-only-an-owner-removes-or-renames-an-entry.md §1, §2;
-// docs/adr/0027-access-grants-only-what-the-operations-allow.md §1, §2, §3
+// docs/adr/0027-access-grants-only-what-the-operations-allow.md §1, §2, §3;
+// docs/adr/0029-only-a-regular-file-is-read-written-or-given-a-size.md §1, §3
 package policy
 
 import "strata/internal/vfs"
@@ -130,9 +131,13 @@ type Request struct {
 	// let the caller open or attempt, ahead of any call, and nothing is done
 	// on its answer. A file row answers it by the mode alone, with neither the
 	// owner override nor the read that execute permission gives, which stand
-	// in for a descriptor a client already holds open. Every other row
-	// answers it as it answers the same request without the mark. It is false
-	// on every request a call makes (ADR 0027 §2, §3).
+	// in for a descriptor a client already holds open. Nor does a file row
+	// refuse it for an object that is neither a regular file nor a directory,
+	// as it refuses the same request without the mark: ACCESS still reports
+	// such an object's mode, whose bits speak for what a client does with it
+	// by other means, such as reading a symlink (ADR 0029 §1, §3). Every other
+	// row answers it as it answers the same request without the mark. It is
+	// false on every request a call makes (ADR 0027 §2, §3).
 	Advisory bool
 }
 
@@ -199,11 +204,15 @@ func Unix() Policy {
 // caller, since it is a fault in the code that built the request rather than
 // a judgement of the caller.
 //
-// The three file rows, OpRead, OpWrite and OpTruncate, are ADR 0025 §1's, not
-// ADR 0014 §5's: they allow a regular file's owner, and OpRead a caller whom
-// the mode gives execute, past what Permits gives. ADR 0027 §2 keeps both
-// departures from a request marked Advisory, which these rows alone read, so
-// ACCESS gets the mode's verdict from them.
+// The three file rows, OpRead, OpWrite and OpTruncate, are ADR 0029 §1's,
+// since it gave them their second line: past the directory's vfs.ErrIsDir, a
+// request that is not advisory, for an object that is not a regular file, is
+// refused with vfs.ErrInval before any permission is looked at. Past that
+// line they are ADR 0025 §1's, not ADR 0014 §5's: they allow a regular file's
+// owner, and OpRead a caller whom the mode gives execute, past what Permits
+// gives. ADR 0027 §2 keeps both departures, and ADR 0029 §1 the second line,
+// from a request marked Advisory, which these rows alone read, so ACCESS gets
+// the mode's verdict from them, whatever the object's type.
 //
 // The OpExecute row is ADR 0027 §2's: vfs.ErrIsDir for a directory, else
 // Permits with PermExec. Only ACCESS asks it.
@@ -287,26 +296,40 @@ func (unixRules) Check(r Request) error {
 
 // fileAccess is the row of an operation on a file's contents: want is PermRead
 // for OpRead, and PermWrite for OpWrite and OpTruncate. The first line that
-// holds decides (ADR 0025 §1):
+// holds decides (ADR 0025 §1; ADR 0029 §1):
 //
 //  1. vfs.ErrIsDir, if o is a directory, before any permission is looked at;
-//  2. nil, if Permits(c, o, want);
-//  3. nil, if the request is not advisory, o is a regular file and c is its
+//  2. vfs.ErrInval, if the request is not advisory and o is not a regular
+//     file, for every caller, root included, and before any permission is
+//     looked at. A read, a write and a size change are for a regular file
+//     (RFC 1813 §3.3.6, §3.3.7), so the caller is told the true reason,
+//     which no change of mode or owner would cure;
+//  3. nil, if Permits(c, o, want);
+//  4. nil, if the request is not advisory, o is a regular file and c is its
 //     owner, c.UID == o.UID. A stateless server cannot see that the owner
 //     already holds the file open, so it lets the owner past the mode (RFC
 //     1813 §4.4);
-//  4. for a read alone, nil, if the request is not advisory, o is a regular
+//  5. for a read alone, nil, if the request is not advisory, o is a regular
 //     file and Permits(c, o, PermExec), since a server cannot tell a page-in
-//     from a read (§2);
-//  5. vfs.ErrAcces otherwise.
+//     from a read (ADR 0025 §2);
+//  6. vfs.ErrAcces otherwise.
 //
-// Lines 3 and 4 live here rather than in Permits so that every other row
-// still answers from the mode alone. An advisory request skips them, since
-// ACCESS is a client's check at open, which neither departure speaks for, so
-// AccessBits gets the mode's verdict from this row (ADR 0027 §2, §3).
+// Line 2 reads o.Type and the mark alone, and blobfs relies on it as on line
+// 1: past it, a call's request names a regular file, so no call gives any
+// other object a size or file data (ADR 0029 §7). Lines 4 and 5 live here
+// rather than in Permits so that every other row still answers from the mode
+// alone. An advisory request skips lines 2, 4 and 5, so AccessBits gets the
+// mode's verdict from this row: lines 4 and 5 because ACCESS is a client's
+// check at open, which neither departure speaks for (ADR 0027 §2, §3), and
+// line 2 because ACCESS still reports the mode of an object that is neither
+// a regular file nor a directory, for what a client does with it by other
+// means, such as reading a symlink (ADR 0029 §3).
 func fileAccess(c vfs.Caller, o Object, want Perm, advisory bool) error {
 	if o.Type == vfs.TypeDir {
 		return vfs.ErrIsDir
+	}
+	if !advisory && o.Type != vfs.TypeReg {
+		return vfs.ErrInval
 	}
 	if Permits(c, o, want) {
 		return nil
