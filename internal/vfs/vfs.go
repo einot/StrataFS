@@ -210,6 +210,14 @@ type FS interface {
 
 	// Create fails with ErrFBig, before it creates or changes anything and
 	// whether or not name exists, if sa.Size is set and above MaxFileSize.
+	//
+	// Create, Mkdir and Symlink each leave unapplied an owner or group that
+	// sa sets and c may not give to the object they make, and do not fail for
+	// it. The object a call makes has the owner sa sets if c may give it that
+	// owner, and otherwise c.UID; it has the group sa sets if c may give it
+	// that group, and otherwise c.GID. A call that would make an object fails
+	// if c may not add name to dir. SetAttr differs: given an owner or group
+	// that c may not set, it fails and applies none of sa.
 	Create(ctx context.Context, c Caller, dir Handle, name string, sa SetAttr, excl bool) (Handle, Attr, error)
 	Mkdir(ctx context.Context, c Caller, dir Handle, name string, sa SetAttr) (Handle, Attr, error)
 	Symlink(ctx context.Context, c Caller, dir Handle, name, target string, sa SetAttr) (Handle, Attr, error)
